@@ -1,0 +1,610 @@
+//! Taskbar host window — the shell's UI surface.
+//!
+//! Design language: `docs/ui-ux.md`. A minimal, text-first, 36px "efficiency
+//! bar": a brand dot, task buttons (hover + active states, click to focus),
+//! and a read-only right zone with task count and clock.
+//!
+//! Opt-out: shown by default, disabled with `MINICON_NO_TASKBAR=1` or
+//! `MINICON_TASKBAR=0`. The default run never touches the Shell registry.
+//!
+//! GDI/HWND handles are stored as `isize` in process-lifetime statics; the
+//! message thread is the only user, so this is safe by construction.
+
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{
+    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, CreateFontW, CreateSolidBrush, DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH,
+    HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
+    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, OUT_DEFAULT_PRECIS, TRANSPARENT,
+};
+use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, SetFocus, TrackMouseEvent, UnregisterHotKey, MOD_ALT, TRACKMOUSEEVENT,
+    TME_LEAVE, VK_ESCAPE, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetForegroundWindow,
+    GetSystemMetrics, IsIconic, RegisterClassW, SetForegroundWindow, ShowWindow, SM_CXSCREEN,
+    SM_CYSCREEN, SW_RESTORE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETFOCUS, WNDCLASSW,
+    WNDCLASS_STYLES, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+};
+
+use crate::win_util::wide;
+
+// --- layout tokens --------------------------------------------------------
+const BAR_H: i32 = 36;
+const PAD: i32 = 10;
+const GAP: i32 = 4;
+const GRIP: i32 = 12;
+const RIGHT_W: i32 = 92;
+const BTN_MIN: i32 = 120;
+const BTN_MAX: i32 = 200;
+const BTN_TOP: i32 = 6;
+const CLOCK_W: i32 = 44;
+
+// --- palette (COLORREF = 0x00BBGGRR) --------------------------------------
+const COLOR_BG: COLORREF = COLORREF(0x001F_1B1B);
+const COLOR_SURFACE: COLORREF = COLORREF(0x002C_2626);
+const COLOR_HOVER: COLORREF = COLORREF(0x003B_3333);
+const COLOR_ACCENT: COLORREF = COLORREF(0x00F5_8B4C);
+const COLOR_TEXT: COLORREF = COLORREF(0x00E6_E6E6);
+const COLOR_MUTED: COLORREF = COLORREF(0x00A2_9A9A);
+
+// WM_MOUSELEAVE lives in Win32::UI::Controls, which we don't pull in.
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// Global hotkey id for summoning the bar into keyboard-navigation mode.
+const HOTKEY_ID: i32 = 1;
+
+static TASKBAR_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Whether the acrylic backdrop is active (paint glass-black instead of bg).
+static ACRYLIC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn hbrush(v: isize) -> HBRUSH {
+    HBRUSH(v as *mut core::ffi::c_void)
+}
+
+fn hwnd_from(v: isize) -> HWND {
+    HWND(v as *mut core::ffi::c_void)
+}
+
+struct TaskItem {
+    hwnd: isize,
+    title: String,
+}
+
+#[derive(Default)]
+struct State {
+    tasks: Vec<TaskItem>,
+    hover: Option<usize>,
+    /// Keyboard-navigation cursor (distinct from mouse hover).
+    selected: Option<usize>,
+    rects: Vec<RECT>,
+}
+
+fn state() -> &'static Mutex<State> {
+    static S: OnceLock<Mutex<State>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(State::default()))
+}
+
+struct Brushes {
+    bg: isize,
+    glass: isize,
+    surface: isize,
+    hover: isize,
+    accent: isize,
+}
+
+fn brushes() -> &'static Brushes {
+    static B: OnceLock<Brushes> = OnceLock::new();
+    B.get_or_init(|| {
+        // SAFETY: solid brushes are process-lifetime GDI objects, never freed.
+        unsafe {
+            Brushes {
+                bg: CreateSolidBrush(COLOR_BG).0 as isize,
+                // Pure black doubles as the "glass" fill when the frame is
+                // extended into the client area (DWM backdrop shows through).
+                glass: CreateSolidBrush(COLORREF(0)).0 as isize,
+                surface: CreateSolidBrush(COLOR_SURFACE).0 as isize,
+                hover: CreateSolidBrush(COLOR_HOVER).0 as isize,
+                accent: CreateSolidBrush(COLOR_ACCENT).0 as isize,
+            }
+        }
+    })
+}
+
+fn font() -> isize {
+    static F: OnceLock<isize> = OnceLock::new();
+    *F.get_or_init(|| {
+        let face = wide("Segoe UI");
+        // SAFETY: `face` outlives the call; the font is process-lifetime.
+        unsafe {
+            CreateFontW(
+                -12,
+                0,
+                0,
+                0,
+                400, // FW_NORMAL
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                0,
+                PCWSTR(face.as_ptr()),
+            )
+            .0 as isize
+        }
+    })
+}
+
+/// Whether the taskbar host should be shown. On by default; disable with
+/// `MINICON_NO_TASKBAR=1` or `MINICON_TASKBAR=0`.
+pub fn enabled() -> bool {
+    if std::env::var_os("MINICON_NO_TASKBAR").is_some() {
+        return false;
+    }
+    match std::env::var("MINICON_TASKBAR") {
+        Ok(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Err(_) => true,
+    }
+}
+
+/// Creates the taskbar window.
+pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: standard Win32 window creation; buffers outlive their calls.
+    unsafe {
+        let class_name = wide("minicon_winmgr_taskbar");
+        let class_title = wide("minicon taskbar");
+        let wnd_class = WNDCLASSW {
+            lpfnWndProc: Some(wndproc),
+            hInstance: hinstance,
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+            // No class brush: we fill the whole client in WM_PAINT and handle
+            // WM_ERASEBKGND ourselves, so the acrylic "glass" fill isn't erased
+            // by an opaque background.
+            hbrBackground: HBRUSH::default(),
+            style: WNDCLASS_STYLES::default(),
+            ..Default::default()
+        };
+        if RegisterClassW(&wnd_class) == 0 {
+            return Err(
+                format!("RegisterClassW(taskbar) failed (Win32 error {})", GetLastError().0).into(),
+            );
+        }
+
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(class_title.as_ptr()),
+            WS_POPUP | WS_VISIBLE,
+            0,
+            screen_h - BAR_H,
+            screen_w,
+            BAR_H,
+            None,
+            None,
+            Some(hinstance),
+            None,
+        )?;
+
+        TASKBAR_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        tracing::info!(hwnd = ?hwnd, "taskbar window created");
+
+        // Rounded corners are safe by default; acrylic is opt-in.
+        crate::dwm::apply_rounded_corners(hwnd);
+        let acrylic = acrylic_requested() && crate::dwm::enable_acrylic(hwnd);
+        ACRYLIC_ACTIVE.store(acrylic, Ordering::SeqCst);
+        if acrylic_requested() && !acrylic {
+            tracing::warn!("MINICON_ACRYLIC requested but unavailable; using opaque bar");
+        }
+
+        // Global hotkey (Alt+`) summons the bar into keyboard-navigation mode.
+        match RegisterHotKey(Some(hwnd), HOTKEY_ID, MOD_ALT, VK_OEM_3.0 as u32) {
+            Ok(()) => tracing::info!("keyboard nav hotkey registered (Alt+`)"),
+            Err(err) => tracing::warn!(%err, "hotkey registration failed (Alt+` already taken?)"),
+        }
+    }
+    refresh();
+    Ok(())
+}
+
+/// Whether the user asked for the acrylic backdrop.
+fn acrylic_requested() -> bool {
+    std::env::var("MINICON_ACRYLIC").is_ok_and(|v| {
+        !matches!(v.to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off")
+    })
+}
+
+/// Re-enumerates task windows, recomputes layout, and repaints.
+pub fn refresh() {
+    let Some(hwnd) = current_hwnd() else { return };
+
+    let tasks: Vec<TaskItem> = crate::window_snapshot::taskbar_windows()
+        .into_iter()
+        .map(|w| TaskItem {
+            hwnd: w.hwnd.0 as isize,
+            title: w.title,
+        })
+        .collect();
+
+    // SAFETY: `hwnd` is our live taskbar window.
+    unsafe {
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let rects = layout(client.right, tasks.len());
+
+        let mut st = state().lock().unwrap();
+        st.tasks = tasks;
+        st.rects = rects;
+        if st.hover.is_some_and(|h| h >= st.tasks.len()) {
+            st.hover = None;
+        }
+        if st.selected.is_some_and(|s| s >= st.tasks.len()) {
+            st.selected = st.tasks.len().checked_sub(1);
+        }
+        tracing::debug!(
+            count = st.tasks.len(),
+            titles = ?st.tasks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
+            "taskbar refreshed"
+        );
+        let _ = InvalidateRect(Some(hwnd), None, true);
+    }
+}
+
+fn current_hwnd() -> Option<HWND> {
+    let raw = TASKBAR_HWND.load(Ordering::SeqCst);
+    (raw != 0).then(|| hwnd_from(raw))
+}
+
+/// Lays out task buttons across the available width.
+fn layout(client_w: i32, n: usize) -> Vec<RECT> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let left = PAD + GRIP;
+    let avail = (client_w - left - PAD - RIGHT_W).max(0);
+    let total_gap = GAP * (n as i32 - 1);
+    let bw = ((avail - total_gap) / n as i32).clamp(BTN_MIN, BTN_MAX);
+    (0..n)
+        .map(|i| {
+            let x = left + i as i32 * (bw + GAP);
+            RECT {
+                left: x,
+                top: BTN_TOP,
+                right: x + bw,
+                bottom: BAR_H - BTN_TOP,
+            }
+        })
+        .collect()
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            unsafe { paint(hwnd) };
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            track_leave(hwnd);
+            let x = get_x(lparam);
+            let y = get_y(lparam);
+            let changed = {
+                let mut st = state().lock().unwrap();
+                let hover = st
+                    .rects
+                    .iter()
+                    .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
+                if hover != st.hover {
+                    st.hover = hover;
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            let changed = state().lock().unwrap().hover.take().is_some();
+            if changed {
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let target = {
+                let st = state().lock().unwrap();
+                st.hover.and_then(|i| st.tasks.get(i)).map(|t| t.hwnd)
+            };
+            if let Some(target) = target {
+                activate(hwnd_from(target));
+            }
+            LRESULT(0)
+        }
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
+            // Summon: focus the bar and start the keyboard cursor at task 0.
+            let _ = unsafe { SetForegroundWindow(hwnd) };
+            let _ = unsafe { SetFocus(Some(hwnd)) };
+            let changed = {
+                let mut st = state().lock().unwrap();
+                let sel = (!st.tasks.is_empty()).then_some(0);
+                st.selected = sel;
+                sel.is_some()
+            };
+            if changed {
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            let key = wparam.0 as u16;
+            let mut changed = false;
+            {
+                let mut st = state().lock().unwrap();
+                let n = st.tasks.len();
+                if n > 0 {
+                    match key {
+                        k if k == VK_LEFT.0 || k == VK_RIGHT.0 => {
+                            st.selected = step_index(st.selected, n, k == VK_RIGHT.0);
+                            changed = true;
+                        }
+                        k if k == VK_RETURN.0 => {
+                            if let Some(t) = st.selected.and_then(|i| st.tasks.get(i)) {
+                                let target = hwnd_from(t.hwnd);
+                                st.selected = None;
+                                drop(st);
+                                activate(target);
+                                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                                return LRESULT(0);
+                            }
+                        }
+                        k if k == VK_ESCAPE.0 => {
+                            changed = st.selected.take().is_some();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if changed {
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+            LRESULT(0)
+        }
+        WM_SETFOCUS => {
+            let changed = {
+                let mut st = state().lock().unwrap();
+                if st.selected.is_none() && !st.tasks.is_empty() {
+                    st.selected = Some(0);
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+            LRESULT(0)
+        }
+        WM_KILLFOCUS => {
+            let changed = state().lock().unwrap().selected.take().is_some();
+            if changed {
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1), // fully repainted in WM_PAINT
+        WM_DESTROY => {
+            tracing::info!("taskbar window destroyed");
+            let _ = unsafe { UnregisterHotKey(Some(hwnd), HOTKEY_ID) };
+            TASKBAR_HWND.store(0, Ordering::SeqCst);
+            LRESULT(0)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Paints the whole bar: background, grip dot, task buttons, right zone.
+unsafe fn paint(hwnd: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+    let mut client = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut client) };
+    let br = brushes();
+
+    unsafe {
+        let bg = if ACRYLIC_ACTIVE.load(Ordering::SeqCst) {
+            br.glass
+        } else {
+            br.bg
+        };
+        FillRect(hdc, &client, hbrush(bg));
+
+        // Brand grip: a small accent dot.
+        let dot = RECT {
+            left: PAD,
+            top: BAR_H / 2 - 3,
+            right: PAD + 6,
+            bottom: BAR_H / 2 + 3,
+        };
+        FillRect(hdc, &dot, hbrush(br.accent));
+
+        let old_font = SelectObject(hdc, HGDIOBJ(font() as *mut core::ffi::c_void));
+        SetBkMode(hdc, TRANSPARENT);
+
+        let fg = GetForegroundWindow().0 as isize;
+        let st = state().lock().unwrap();
+
+        for (i, item) in st.tasks.iter().enumerate() {
+            let Some(r) = st.rects.get(i).copied() else {
+                continue;
+            };
+            let active = item.hwnd == fg;
+            let selected = st.selected == Some(i);
+            let brush = if st.hover == Some(i) {
+                br.hover
+            } else {
+                br.surface
+            };
+            FillRect(hdc, &r, hbrush(brush));
+
+            if active {
+                let marker = RECT {
+                    left: r.left,
+                    top: r.top,
+                    right: r.left + 3,
+                    bottom: r.bottom,
+                };
+                FillRect(hdc, &marker, hbrush(br.accent));
+            }
+
+            // Keyboard cursor: a 1px accent outline around the selected button.
+            if selected {
+                FrameRect(hdc, &r, hbrush(br.accent));
+            }
+
+            SetTextColor(
+                hdc,
+                if active || selected {
+                    COLOR_TEXT
+                } else {
+                    COLOR_MUTED
+                },
+            );
+            let mut text: Vec<u16> = item.title.encode_utf16().collect();
+            let mut tr = r;
+            tr.left += 9;
+            tr.right -= 8;
+            DrawTextW(
+                hdc,
+                &mut text,
+                &mut tr,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+            );
+        }
+
+        // Right zone: task count + clock, both right-aligned and muted.
+        SetTextColor(hdc, COLOR_MUTED);
+        draw_right(hdc, &st.tasks.len().to_string(), " 任务", client.right - PAD - CLOCK_W - 72, client.right - PAD - CLOCK_W);
+
+        let now = GetLocalTime();
+        let clock = format!("{:02}:{:02}", now.wHour, now.wMinute);
+        draw_right(hdc, &clock, "", client.right - PAD - CLOCK_W, client.right - PAD);
+
+        SelectObject(hdc, old_font);
+        let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+/// Draws `text` + `suffix` right-aligned within `[left, right]`.
+unsafe fn draw_right(hdc: HDC, text: &str, suffix: &str, left: i32, right: i32) {
+    let label = format!("{text}{suffix}");
+    let mut buf: Vec<u16> = label.encode_utf16().collect();
+    let mut r = RECT {
+        left,
+        top: 0,
+        right,
+        bottom: BAR_H,
+    };
+    unsafe {
+        DrawTextW(
+            hdc,
+            &mut buf,
+            &mut r,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+    }
+}
+
+/// Registers for `WM_MOUSELEAVE` (idempotent per hover session).
+fn track_leave(hwnd: HWND) {
+    let mut tme = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    let _ = unsafe { TrackMouseEvent(&mut tme) };
+}
+
+/// Brings `target` to the foreground, restoring it first if minimized.
+fn activate(target: HWND) {
+    // SAFETY: `target` is a live top-level window from our task list.
+    unsafe {
+        if IsIconic(target).as_bool() {
+            let _ = ShowWindow(target, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(target);
+    }
+}
+
+fn get_x(lparam: LPARAM) -> i32 {
+    (lparam.0 as usize & 0xFFFF) as u16 as i16 as i32
+}
+
+fn get_y(lparam: LPARAM) -> i32 {
+    ((lparam.0 as usize >> 16) & 0xFFFF) as u16 as i16 as i32
+}
+
+/// Advances the keyboard cursor by one task, wrapping around. `None` starts at
+/// the first (forward) or last (backward) task; empty lists stay `None`.
+fn step_index(current: Option<usize>, n: usize, forward: bool) -> Option<usize> {
+    if n == 0 {
+        return None;
+    }
+    match current {
+        None => Some(if forward { 0 } else { n - 1 }),
+        Some(cur) => Some(if forward {
+            (cur + 1) % n
+        } else {
+            (cur + n - 1) % n
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_index;
+
+    #[test]
+    fn empty_list_has_no_selection() {
+        assert_eq!(step_index(None, 0, true), None);
+        assert_eq!(step_index(Some(0), 0, false), None);
+    }
+
+    #[test]
+    fn none_selects_first_or_last() {
+        assert_eq!(step_index(None, 3, true), Some(0));
+        assert_eq!(step_index(None, 3, false), Some(2));
+    }
+
+    #[test]
+    fn forward_wraps_around() {
+        assert_eq!(step_index(Some(0), 3, true), Some(1));
+        assert_eq!(step_index(Some(2), 3, true), Some(0));
+    }
+
+    #[test]
+    fn backward_wraps_around() {
+        assert_eq!(step_index(Some(0), 3, false), Some(2));
+        assert_eq!(step_index(Some(2), 3, false), Some(1));
+    }
+}

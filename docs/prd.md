@@ -1,0 +1,188 @@
+# minicon-winmgr — 产品需求文档（PRD）
+
+> 状态：草案 v0.1（热身期）
+> 目标读者：本仓后续会话 / 分身、评审者
+> 关联：`README.md`（方向声明）、`docs/prd.md`（本文件）
+
+---
+
+## 1. 目的与范围
+
+为公司工作站提供一个 **可靠、可长期常驻、可管理** 的 Windows 外壳 / 会话管理器，
+对标 Cairo Desktop 的外壳体验，但在 **稳定性与会话生命周期** 上做差异化加固。
+
+- **范围内**：外壳常驻进程、窗口感知、任务栏宿主、会话生命周期、可选的外壳替换开关。
+- **非目标（早期阶段明确不做）**：打包发布、代码签名、修改 Winlogon `Shell` 注册表（默认 companion 模式）、完整桌面/启动器 UI 的一次性铺开。
+
+## 2. 设计原则（防漂移）
+
+1. **companion 优先**：默认不接管、不修改系统注册表；替换 Explorer 仅作为可选、手动、可逆的后续步骤。
+2. **可观测先行**：没有日志/告警的外壳不上线（对齐"日志做全"偏好）。
+3. **小步验收**：每完成一小步即 `cargo check`，可运行即真跑一次并核对残留进程。
+4. **按需求树裁剪**：任何新功能必须先落入第 6 节需求树，否则视为漂移。
+
+---
+
+## 3. 对标产品功能树 — Cairo Desktop
+
+来源：[cairodesktop.com](https://cairodesktop.com/) 与 [cairoshell/cairoshell](https://github.com/cairoshell/cairoshell)。
+
+```text
+Cairo Desktop（Windows 外壳替代）
+├── 任务栏 Taskbar
+│   ├── 任务列表（按"程序列表"同样的分类方式组织窗口）
+│   ├── 列表按钮（窗口总览，便于切换）
+│   ├── 系统托盘 / 通知区
+│   ├── 时钟
+│   └── 快速启动 / 任务栏快捷方式
+├── 程序菜单 Programs Menu（Cairo Menu）
+│   ├── 应用分类（拖拽整理，用户自定义）
+│   ├── 应用搜索
+│   ├── Places（导航位置：计算机/文档等）
+│   └── 最近使用
+├── 动态桌面 Dynamic Desktop
+│   ├── 可浏览桌面（无需打开资源管理器）
+│   ├── 桌面图标
+│   └── 弹出式前进 / 后退导航
+├── 文件夹堆栈 Folder Stacks
+│   └── 把常用文件夹拖到菜单栏做即时访问
+├── 窗口管理
+│   ├── 悬停窗口预览
+│   ├── 堆叠窗口组（stacked window groups）
+│   └── 窗口贴靠 / 靠边
+├── 多显示器支持
+├── 个性化 / 主题
+└── 外壳集成
+    ├── 替换 explorer shell
+    └── 桌面模式 / 外壳模式切换
+```
+
+**对标结论**：Cairo 的形态价值集中在"任务栏 + 程序菜单 + 可浏览桌面"。
+我们的切入点是其下的 **可靠性底座与会话管理**——这正是 README 提到的痛点
+（长时间公司桌面会话里 explorer / Cairo 都会卡死）。
+
+---
+
+## 4. 思维树（markdown-tree-dag）
+
+把"如何造一个可靠、可管理的 Cairo 级外壳"拆成 DAG：节点可被多个父节点共享（用 `←` 标注额外父边）。
+
+```text
+[根] 让公司工作站获得可靠、可管理的 Windows 外壳
+├── 可靠性优先
+│   ├── 可观测        → [A] 日志 / panic 落盘 / 单实例
+│   ├── 进程健壮      → [B] 消息泵 / 优雅退出
+│   └── 崩溃可恢复    → [E] 会话生命周期          ← 也依赖 [B]
+├── Cairo 功能对齐
+│   ├── 窗口可见性    → [C] 顶层窗口枚举
+│   │                     └──→ [D] 任务栏宿主（静态列表）
+│   ├── 启动器        → (后续) 程序菜单
+│   └── 桌面          → (后续) 动态桌面
+└── 部署安全
+    ├── 默认不接管    → companion 模式（贯穿始终）
+    └── 可选替换      → [F] Winlogon Shell（手动 / 可逆）  ← 依赖 [D]
+
+依赖边（DAG）：
+  A → B → C → D → F
+  B → E
+  D → E（会话恢复需要一个可知的窗口层）
+```
+
+---
+
+## 5. 记忆宫殿（mermaid-flowchart-memory-palace）
+
+把整个系统想象成一座"宫殿"：四个房间沿主廊排列。每个房间是一个关注点，
+进门顺序即落地顺序（M0 → M5）。
+
+```mermaid
+flowchart TD
+    subgraph PALACE["记忆宫殿：minicon-winmgr"]
+        direction TB
+
+        subgraph ROOM_A["① 观测地基 (M0) — 门口玄关"]
+            A1["结构化日志<br/>滚动文件 + stderr"]
+            A2["panic hook 落盘"]
+            A3["CreateMutexW 单实例"]
+            A1 --> A2 --> A3
+        end
+
+        subgraph ROOM_B["② 消息地基 (M1) — 大堂"]
+            B1["message-only 窗口<br/>HWND_MESSAGE"]
+            B2["消息泵<br/>GetMessage/Dispatch"]
+            B3["优雅退出<br/>Ctrl+C → WM_CLOSE"]
+            B1 --> B2 --> B3
+        end
+
+        subgraph ROOM_C["③ 窗口感知 (M2) — 陈列室"]
+            C1["EnumWindows 枚举"]
+            C2["class/title/pid/可见性 快照"]
+            C1 --> C2
+        end
+
+        subgraph ROOM_D["④ 任务栏宿主 (M3) — 工作间"]
+            D1["owned 置顶窗口"]
+            D2["静态任务列表"]
+            D1 --> D2
+        end
+
+        subgraph ROOM_E["⑤ 会话生命周期 (M4) — 后厨"]
+            E1["WTS 会话变更通知"]
+            E2["WM_QUERYENDSESSION / ENDSESSION"]
+            E1 --> E2
+        end
+
+        subgraph ROOM_F["⑥ 外壳替换开关 (M5) — 暗门(手动/可逆)"]
+            F1["Winlogon Shell 注册表<br/>仅当前用户"]
+        end
+    end
+
+    ROOM_A ==> ROOM_B ==> ROOM_C ==> ROOM_D
+    ROOM_B -.恢复依赖.-> ROOM_E
+    ROOM_D -.需要窗口层.-> ROOM_E
+    ROOM_D ==> ROOM_F
+
+    classDef done fill:#d4edda,stroke:#2e7d32;
+    classDef current fill:#fff3cd,stroke:#f9a825;
+    classDef todo fill:#f8f9fa,stroke:#adb5bd;
+    class A1,A2,A3,B1,B2,B3 done;
+    class C1,C2 current;
+    class D1,D2,E1,E2,F1 todo;
+```
+
+> 图例：绿=已完成（M0/M1）、黄=进行中（M2）、灰=待办。
+
+---
+
+## 6. 最小核心需求树（MVP）
+
+| 编号 | 需求 | 验收标准 | 里程碑 | 状态 |
+|------|------|----------|--------|------|
+| A | 常驻与可观测 | 滚动文件+stderr 双写；panic 入日志；二次启动被拒 | M0 | ✅ 已实现 |
+| B | 消息 / 窗口地基 | message-only 窗口可建；消息泵稳定运行；Ctrl+C 优雅退出 | M1 | ✅ 已实现 |
+| C | 窗口感知 | 枚举顶层窗口并可输出 class/title/pid/可见性快照 | M2 | ✅ 已实现 |
+| D | 任务栏宿主 | 自建置顶窗口，静态展示 C 的快照 | M3 | ✅ 已实现（默认常显） |
+| E | 会话生命周期 | 收 WTS 会话变更 + `WM_QUERYENDSESSION/ENDSESSION`，记录回收路径 | M4 | ✅ 已实现 |
+| F | 外壳替换开关 | 当前用户级、手动、可一键回滚 | M5 | ✅ 已实现（受控；写入需二次确认） |
+
+**差异化定位**：A/B/E 是我们的护城河（可靠性 + 会话管理）；C/D 是"像 Cairo"的最低门槛。
+
+---
+
+## 7. 里程碑与风险
+
+- **M0 / M1 已完成**（companion 模式，未触碰任何注册表；未发版、未签名）。
+- **风险 1 — 漂移**：任何新点子先回写第 4/6 节再动手。
+- **风险 2 — 会话替换的破坏性**：M5 修改 `HKCU\...\Winlogon\Shell`，属共享系统状态，落地前需人工确认并提供回滚。
+- **风险 3 — 多实例污染**：GUI 实验最多起 1 个实例，用完即关并核对残留进程。
+
+## 8. 后续待办（Followups）
+
+- [x] M2：`EnumWindows` 顶层窗口枚举与快照日志
+- [x] M3：任务栏宿主窗口（置顶、静态列表；opt-in `MINICON_TASKBAR=1`）
+- [x] M4：WTS 会话变更通知 + 会话结束处理
+- [x] M5：受控的 Winlogon Shell 开关。`--shell-status` 只读已验（本机当前为 `C:\Program Files\Cairo Shell\CairoDesktop.exe`）；写入需 `MINICON_CONFIRM_SHELL=yes` 二次确认，**默认/本次均未执行写入**。
+- [x] M3+：自绘任务栏（极简深色、文本优先、hover/active、点击切窗、时钟+计数；过滤 helper 窗口 903→11）。设计语言见 `docs/ui-ux.md`。
+- [x] DWM 圆角（默认）+ 亚克力（`MINICON_ACRYLIC=1`，opt-in），均优雅降级（`src/dwm.rs`）。
+- [x] 键盘导航：Alt+` 唤出、←/→ 选择、Enter 切换、Esc 取消（含单元测试）。
+- [ ] 任务分组、系统托盘镜像（见 `docs/ui-ux.md` §6）
