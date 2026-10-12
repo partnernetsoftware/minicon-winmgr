@@ -200,7 +200,15 @@ fn ensure_items() {
     if LOADED.load(Ordering::SeqCst) {
         return;
     }
-    let found = crate::launcher::discover_shortcuts();
+    let all = crate::launcher::discover_shortcuts();
+    // Show the most-used apps first (empty query ranks by launch frequency).
+    let found: Vec<crate::launcher::Shortcut> = crate::launcher::search_ranked(&all, "", all.len())
+        .into_iter()
+        .map(|s| crate::launcher::Shortcut {
+            name: s.name.clone(),
+            path: s.path.clone(),
+        })
+        .collect();
     tracing::info!(
         count = found.len(),
         "start menu indexed Start Menu shortcuts"

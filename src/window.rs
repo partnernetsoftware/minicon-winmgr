@@ -114,8 +114,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::error!(%err, "tray host install failed; continuing without it");
         }
 
+        // Window-management hotkeys (Win+Left/Right/Up).
+        if let Err(err) = crate::hotkeys::install(hinstance) {
+            tracing::error!(%err, "window hotkeys init failed; continuing without them");
+        }
+
         let mut msg = MSG::default();
         tracing::info!("entering message pump");
+        crate::metrics::log_sample();
         for m in crate::monitor::enumerate() {
             tracing::info!(
                 x = m.x,
@@ -195,6 +201,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             tracing::debug!(timer_id = wparam.0, "heartbeat: message pump alive");
             window_snapshot::log_snapshot();
             crate::taskbar::refresh();
+            crate::metrics::log_sample();
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

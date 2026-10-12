@@ -87,6 +87,16 @@ fn is_lnk(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
 }
 
+/// Like [`search`], but boosts frequently/recently launched apps: an empty
+/// query returns the most-used apps first (see `crate::recents`).
+pub fn search_ranked<'a>(items: &'a [Shortcut], query: &str, limit: usize) -> Vec<&'a Shortcut> {
+    if query.trim().is_empty() {
+        let stats = crate::recents::load();
+        return crate::recents::rank(items, &stats, limit);
+    }
+    search(items, query, limit)
+}
+
 /// Fuzzy-matches `items` against `query`, returning up to `limit` best matches,
 /// best first. An empty query returns the first `limit` items.
 pub fn search<'a>(items: &'a [Shortcut], query: &str, limit: usize) -> Vec<&'a Shortcut> {
@@ -153,8 +163,9 @@ fn fuzzy_score(name: Vec<char>, needle: &[char]) -> Option<i64> {
     }
 }
 
-/// Launches the shortcut at `path`.
+/// Launches the shortcut at `path`, recording it for frequency ranking.
 pub fn launch(path: &str) -> std::io::Result<()> {
+    crate::recents::record(path);
     #[cfg(windows)]
     {
         // `start "" <path>` opens the file with its default handler; the empty

@@ -6,10 +6,13 @@
 mod config;
 mod dwm;
 mod grouping;
+mod hotkeys;
 mod launcher;
 mod launcher_ui;
 mod logging;
+mod metrics;
 mod monitor;
+mod recents;
 mod session;
 mod shell_registry;
 mod single_instance;

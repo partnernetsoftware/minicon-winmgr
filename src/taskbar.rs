@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
-    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
@@ -36,11 +36,13 @@ use windows::Win32::UI::Shell::{
     SHAppBarMessage,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetForegroundWindow,
-    GetSystemMetrics, HWND_TOPMOST, IsIconic, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_RESTORE,
-    SWP_NOACTIVATE, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY,
-    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT,
-    WM_SETFOCUS, WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, HWND_TOPMOST, IsIconic,
+    MF_STRING, PostMessageW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE,
+    SW_RESTORE, SWP_NOACTIVATE, SetForegroundWindow, SetWindowPos, ShowWindow, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS,
+    WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
@@ -494,6 +496,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        WM_RBUTTONDOWN => {
+            let target = {
+                let bars = bars().lock().unwrap();
+                let hover = bars.iter().find(|b| b.hwnd == key).and_then(|b| b.hover);
+                drop(bars);
+                hover.and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd))
+            };
+            if let Some(target) = target {
+                window_menu(hwnd, hwnd_from(target));
+            }
+            LRESULT(0)
+        }
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
             // Summon: focus the primary bar and start the keyboard cursor at 0.
             let _ = unsafe { SetForegroundWindow(hwnd) };
@@ -759,6 +773,60 @@ fn track_leave(hwnd: HWND) {
         dwHoverTime: 0,
     };
     let _ = unsafe { TrackMouseEvent(&mut tme) };
+}
+
+/// Taskbar right-click menu item ids.
+const MENU_RESTORE: usize = 1;
+const MENU_MINIMIZE: usize = 2;
+const MENU_MAXIMIZE: usize = 3;
+const MENU_CLOSE: usize = 4;
+
+/// Shows the right-click window menu for `target` and applies the choice.
+fn window_menu(owner: HWND, target: HWND) {
+    // SAFETY: the menu is created and destroyed within this call; `owner` and
+    // `target` are live windows owned by this process.
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let restore = wide("还原");
+        let minimize = wide("最小化");
+        let maximize = wide("最大化");
+        let close = wide("关闭");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_RESTORE, PCWSTR(restore.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_MINIMIZE, PCWSTR(minimize.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_MAXIMIZE, PCWSTR(maximize.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE, PCWSTR(close.as_ptr()));
+
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        // Required so the popup dismisses correctly when clicking away.
+        let _ = SetForegroundWindow(owner);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            Some(0),
+            owner,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+
+        match (cmd.0 & 0xFFFF) as usize {
+            MENU_RESTORE => {
+                let _ = ShowWindow(target, SW_RESTORE);
+            }
+            MENU_MINIMIZE => {
+                let _ = ShowWindow(target, SW_MINIMIZE);
+            }
+            MENU_MAXIMIZE => {
+                let _ = ShowWindow(target, SW_MAXIMIZE);
+            }
+            MENU_CLOSE => {
+                let _ = PostMessageW(Some(target), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Brings `target` to the foreground, restoring it first if minimized.

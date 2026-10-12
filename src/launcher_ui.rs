@@ -264,7 +264,7 @@ fn toggle() {
 fn refresh_results() {
     let Some(list) = list() else { return };
     let query = read_edit_text();
-    let results = crate::launcher::search(items(), &query, MAX_RESULTS);
+    let results = crate::launcher::search_ranked(items(), &query, MAX_RESULTS);
     // SAFETY: `list` is our live list box; the added strings are copied by the
     // control before each call returns.
     unsafe {
@@ -334,7 +334,7 @@ fn selected_path() -> Option<String> {
         return None;
     }
     let query = read_edit_text();
-    let results = crate::launcher::search(items(), &query, MAX_RESULTS);
+    let results = crate::launcher::search_ranked(items(), &query, MAX_RESULTS);
     results.get(index as usize).map(|s| s.path.clone())
 }
 
