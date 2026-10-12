@@ -69,23 +69,26 @@ Cairo Desktop（Windows 外壳替代）
 
 ```text
 [根] 让公司工作站获得可靠、可管理的 Windows 外壳
-├── 可靠性优先
+├── 可靠性优先 ✅ 已落地（护城河）
 │   ├── 可观测        → [A] 日志 / panic 落盘 / 单实例
 │   ├── 进程健壮      → [B] 消息泵 / 优雅退出
 │   └── 崩溃可恢复    → [E] 会话生命周期          ← 也依赖 [B]
-├── Cairo 功能对齐
-│   ├── 窗口可见性    → [C] 顶层窗口枚举
-│   │                     └──→ [D] 任务栏宿主（静态列表）
-│   ├── 启动器        → (后续) 程序菜单
-│   └── 桌面          → (后续) 动态桌面
-└── 部署安全
+├── Cairo 功能对齐 ★ 当前最高杠杆枝（正在砍）
+│   ├── 窗口可见性    → [C] 顶层窗口枚举 → [D] 任务栏宿主（已在做）
+│   ├── 通知区        → [G] 系统托盘镜像           ← 待做（新翼）
+│   ├── 启动器        → [H] 程序菜单 / 启动器 UI    ← 待做（检索逻辑已有）
+│   └── 多显示器      → [I] 每屏一栏               ← 待做
+└── 部署安全 ✅
     ├── 默认不接管    → companion 模式（贯穿始终）
     └── 可选替换      → [F] Winlogon Shell（手动 / 可逆）  ← 依赖 [D]
 
 依赖边（DAG）：
   A → B → C → D → F
   B → E
-  D → E（会话恢复需要一个可知的窗口层）
+  C → G, H, I        （都建立在"窗口感知 + 任务栏"之上）
+  D → I              （每屏一栏是任务栏的多实例化）
+
+裁剪原则：只沿 ★ 最高杠杆枝（Cairo 功能对齐）推进；可靠性/部署安全已在手，不再扩。
 ```
 
 ---
@@ -135,22 +138,28 @@ flowchart TD
         subgraph ROOM_F["⑥ 外壳替换开关 (M5) — 暗门(手动/可逆)"]
             F1["Winlogon Shell 注册表<br/>仅当前用户"]
         end
+
+        subgraph ROOM_G["⑦ 外壳体验扩展 (M6) — 新翼★"]
+            G1["系统托盘镜像"]
+            G2["启动器 UI"]
+            G3["多显示器每屏一栏"]
+        end
     end
 
     ROOM_A ==> ROOM_B ==> ROOM_C ==> ROOM_D
     ROOM_B -.恢复依赖.-> ROOM_E
     ROOM_D -.需要窗口层.-> ROOM_E
     ROOM_D ==> ROOM_F
+    ROOM_C ==> ROOM_G
 
     classDef done fill:#d4edda,stroke:#2e7d32;
     classDef current fill:#fff3cd,stroke:#f9a825;
     classDef todo fill:#f8f9fa,stroke:#adb5bd;
-    class A1,A2,A3,B1,B2,B3 done;
-    class C1,C2 current;
-    class D1,D2,E1,E2,F1 todo;
+    class A1,A2,A3,B1,B2,B3,C1,C2,D1,D2,E1,E2,F1 done;
+    class G1,G2,G3 todo;
 ```
 
-> 图例：绿=已完成（M0/M1）、黄=进行中（M2）、灰=待办。
+> 图例：绿=已完成（M0–M5 全部）；灰=待办（M6 新翼：托盘镜像 / 启动器 UI / 每屏一栏）。
 
 ---
 
@@ -179,7 +188,7 @@ flowchart TD
 ## 8. 后续待办（Followups）
 
 - [x] M2：`EnumWindows` 顶层窗口枚举与快照日志
-- [x] M3：任务栏宿主窗口（置顶、静态列表；opt-in `MINICON_TASKBAR=1`）
+- [x] M3：任务栏宿主窗口（默认常显；`MINICON_NO_TASKBAR=1` 隐藏）
 - [x] M4：WTS 会话变更通知 + 会话结束处理
 - [x] M5：受控的 Winlogon Shell 开关。`--shell-status` 只读已验（本机当前为 `C:\Program Files\Cairo Shell\CairoDesktop.exe`）；写入需 `MINICON_CONFIRM_SHELL=yes` 二次确认，**默认/本次均未执行写入**。
 - [x] M3+：自绘任务栏（极简深色、文本优先、hover/active、点击切窗、时钟+计数；过滤 helper 窗口 903→11）。设计语言见 `docs/ui-ux.md`。
