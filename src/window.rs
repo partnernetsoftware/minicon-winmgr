@@ -99,6 +99,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("taskbar disabled via env");
         }
 
+        // Launcher popup (Alt+Space) — self-contained window + hotkey.
+        if let Err(err) = crate::launcher_ui::init(hinstance) {
+            tracing::error!(%err, "launcher UI init failed; continuing without it");
+        }
+
+        // Start menu (ORB) — opened from the taskbar brand dot.
+        if let Err(err) = crate::start_menu::install(hinstance) {
+            tracing::error!(%err, "start menu init failed; continuing without it");
+        }
+
+        // Tray host is inert unless MINICON_TRAY_HOST=1 (replacement mode).
+        if let Err(err) = crate::tray_host::install(hinstance) {
+            tracing::error!(%err, "tray host install failed; continuing without it");
+        }
+
         let mut msg = MSG::default();
         tracing::info!("entering message pump");
         for m in crate::monitor::enumerate() {
@@ -110,6 +125,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 primary = m.primary,
                 "monitor work area"
             );
+        }
+        let tray = crate::tray::enumerate();
+        tracing::info!(count = tray.len(), "notification area mirrored");
+        for icon in &tray {
+            tracing::debug!(pid = icon.pid, tooltip = %icon.tooltip, "tray icon");
+        }
+
+        let hosted = crate::tray_host::icons();
+        if !hosted.is_empty() {
+            tracing::info!(count = hosted.len(), "tray icons hosted");
         }
         window_snapshot::log_snapshot();
         loop {

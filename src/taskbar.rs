@@ -1,8 +1,12 @@
-//! Taskbar host window — the shell's UI surface.
+//! Taskbar host windows — the shell's UI surface.
 //!
 //! Design language: `docs/ui-ux.md`. A minimal, text-first, 36px "efficiency
 //! bar": a brand dot, task buttons (hover + active states, click to focus),
 //! and a read-only right zone with task count and clock.
+//!
+//! Multi-monitor: one bar is created per monitor, docked to that monitor's work
+//! area. The task list is shared; layout, hover, and keyboard cursor are kept
+//! per bar (keyed by HWND).
 //!
 //! Opt-out: shown by default, disabled with `MINICON_NO_TASKBAR=1` or
 //! `MINICON_TASKBAR=0`. The default run never touches the Shell registry.
@@ -10,7 +14,7 @@
 //! GDI/HWND handles are stored as `isize` in process-lifetime statics; the
 //! message thread is the only user, so this is safe by construction.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
@@ -27,12 +31,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, RegisterHotKey, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     UnregisterHotKey, VK_ESCAPE, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT,
 };
+use windows::Win32::UI::Shell::{
+    ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_POSCHANGED, APPBARDATA,
+    SHAppBarMessage,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetForegroundWindow,
-    GetSystemMetrics, IsIconic, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETFOCUS, WNDCLASS_STYLES, WNDCLASSW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GetSystemMetrics, HWND_TOPMOST, IsIconic, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_RESTORE,
+    SWP_NOACTIVATE, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY,
+    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT,
+    WM_SETFOCUS, WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
@@ -63,7 +71,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// Global hotkey id for summoning the bar into keyboard-navigation mode.
 const HOTKEY_ID: i32 = 1;
 
-static TASKBAR_HWND: AtomicIsize = AtomicIsize::new(0);
+/// AppBar callback message (WM_APP + 1) for docked bars.
+const APPBAR_CALLBACK: u32 = 0x8000 + 1;
 
 /// Whether the acrylic backdrop is active (paint glass-black instead of bg).
 static ACRYLIC_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -88,18 +97,25 @@ struct TaskItem {
     label: String,
 }
 
+/// Per-bar state: layout, mouse hover, and keyboard cursor.
 #[derive(Default)]
-struct State {
-    tasks: Vec<TaskItem>,
-    hover: Option<usize>,
-    /// Keyboard-navigation cursor (distinct from mouse hover).
-    selected: Option<usize>,
+struct BarEntry {
+    hwnd: isize,
+    /// Monitor work area this bar is docked to.
+    area: (i32, i32, i32, i32),
     rects: Vec<RECT>,
+    hover: Option<usize>,
+    selected: Option<usize>,
 }
 
-fn state() -> &'static Mutex<State> {
-    static S: OnceLock<Mutex<State>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(State::default()))
+fn bars() -> &'static Mutex<Vec<BarEntry>> {
+    static B: OnceLock<Mutex<Vec<BarEntry>>> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn tasks() -> &'static Mutex<Vec<TaskItem>> {
+    static T: OnceLock<Mutex<Vec<TaskItem>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 struct Brushes {
@@ -170,24 +186,28 @@ pub fn enabled() -> bool {
     }
 }
 
-/// Primary monitor work area as `(x, y, width, height)`; falls back to the full
+/// Work areas to dock a bar to: one per monitor (primary first), or the full
 /// screen when monitor enumeration is unavailable.
-fn primary_work_area() -> (i32, i32, i32, i32) {
-    if let Some(m) = crate::monitor::enumerate().into_iter().next() {
-        return (m.x, m.y, m.width, m.height);
+fn bar_areas() -> Vec<(i32, i32, i32, i32)> {
+    let monitors = crate::monitor::enumerate();
+    if !monitors.is_empty() {
+        return monitors
+            .into_iter()
+            .map(|m| (m.x, m.y, m.width, m.height))
+            .collect();
     }
     // SAFETY: pure metric queries.
     unsafe {
-        (
+        vec![(
             0,
             0,
             GetSystemMetrics(SM_CXSCREEN),
             GetSystemMetrics(SM_CYSCREEN),
-        )
+        )]
     }
 }
 
-/// Creates the taskbar window.
+/// Creates one taskbar window per monitor.
 pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: standard Win32 window creation; buffers outlive their calls.
     unsafe {
@@ -212,41 +232,116 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
 
-        let (wx, wy, ww, wh) = primary_work_area();
-        let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            PCWSTR(class_name.as_ptr()),
-            PCWSTR(class_title.as_ptr()),
-            WS_POPUP | WS_VISIBLE,
-            wx,
-            wy + wh - BAR_H,
-            ww,
-            BAR_H,
-            None,
-            None,
-            Some(hinstance),
-            None,
-        )?;
+        let areas = bar_areas();
+        let acrylic_wanted = acrylic_requested();
+        let mut acrylic_ok = acrylic_wanted;
 
-        TASKBAR_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
-        tracing::info!(hwnd = ?hwnd, "taskbar window created");
+        for (i, (x, y, w, h)) in areas.into_iter().enumerate() {
+            let hwnd = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR(class_title.as_ptr()),
+                WS_POPUP | WS_VISIBLE,
+                x,
+                y + h - BAR_H,
+                w,
+                BAR_H,
+                None,
+                None,
+                Some(hinstance),
+                None,
+            )?;
 
-        // Rounded corners are safe by default; acrylic is opt-in.
-        crate::dwm::apply_rounded_corners(hwnd);
-        let acrylic = acrylic_requested() && crate::dwm::enable_acrylic(hwnd);
-        ACRYLIC_ACTIVE.store(acrylic, Ordering::SeqCst);
-        if acrylic_requested() && !acrylic {
-            tracing::warn!("MINICON_ACRYLIC requested but unavailable; using opaque bar");
+            bars().lock().unwrap().push(BarEntry {
+                hwnd: hwnd.0 as isize,
+                area: (x, y, w, h),
+                ..Default::default()
+            });
+            tracing::info!(hwnd = ?hwnd, index = i, "taskbar window created");
+
+            // Dock as an AppBar so maximized windows stop above the bar.
+            if register_appbar(hwnd, (x, y, w, h)) {
+                tracing::info!(hwnd = ?hwnd, "taskbar docked as AppBar");
+            } else {
+                tracing::warn!(hwnd = ?hwnd, "AppBar registration failed; bar stays floating");
+            }
+
+            // Rounded corners are safe everywhere; acrylic is opt-in.
+            crate::dwm::apply_rounded_corners(hwnd);
+            if acrylic_wanted {
+                acrylic_ok &= crate::dwm::enable_acrylic(hwnd);
+            }
+
+            // The primary (first) bar owns the keyboard-navigation hotkey.
+            if i == 0 {
+                match RegisterHotKey(Some(hwnd), HOTKEY_ID, MOD_ALT, VK_OEM_3.0 as u32) {
+                    Ok(()) => tracing::info!("keyboard nav hotkey registered (Alt+`)"),
+                    Err(err) => {
+                        tracing::warn!(%err, "hotkey registration failed (Alt+` already taken?)")
+                    }
+                }
+            }
         }
 
-        // Global hotkey (Alt+`) summons the bar into keyboard-navigation mode.
-        match RegisterHotKey(Some(hwnd), HOTKEY_ID, MOD_ALT, VK_OEM_3.0 as u32) {
-            Ok(()) => tracing::info!("keyboard nav hotkey registered (Alt+`)"),
-            Err(err) => tracing::warn!(%err, "hotkey registration failed (Alt+` already taken?)"),
+        ACRYLIC_ACTIVE.store(acrylic_ok, Ordering::SeqCst);
+        if acrylic_wanted && !acrylic_ok {
+            tracing::warn!("MINICON_ACRYLIC requested but unavailable; using opaque bar");
         }
     }
     refresh();
     Ok(())
+}
+
+/// Registers `hwnd` as an AppBar docked to the bottom edge, then positions it
+/// within `area` (a monitor work area). Returns false if registration failed.
+fn register_appbar(hwnd: HWND, area: (i32, i32, i32, i32)) -> bool {
+    // SAFETY: `abd` is a properly sized APPBARDATA with a live window handle.
+    unsafe {
+        let mut abd = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            hWnd: hwnd,
+            uCallbackMessage: APPBAR_CALLBACK,
+            ..Default::default()
+        };
+        if SHAppBarMessage(ABM_NEW, &mut abd) == 0 {
+            return false;
+        }
+    }
+    set_appbar_pos(hwnd, area);
+    true
+}
+
+/// Repositions a registered AppBar to the bottom of `area`, reserving BAR_H.
+fn set_appbar_pos(hwnd: HWND, area: (i32, i32, i32, i32)) {
+    let (x, y, w, h) = area;
+    // SAFETY: `abd` is a properly sized APPBARDATA for a registered AppBar.
+    unsafe {
+        let mut abd = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            hWnd: hwnd,
+            uCallbackMessage: APPBAR_CALLBACK,
+            uEdge: ABE_BOTTOM,
+            rc: RECT {
+                left: x,
+                top: y,
+                right: x + w,
+                bottom: y + h,
+            },
+            ..Default::default()
+        };
+        let _ = SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+        abd.rc.top = abd.rc.bottom - BAR_H;
+        let _ = SHAppBarMessage(ABM_SETPOS, &mut abd);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            abd.rc.left,
+            abd.rc.top,
+            abd.rc.right - abd.rc.left,
+            abd.rc.bottom - abd.rc.top,
+            SWP_NOACTIVATE,
+        );
+    }
 }
 
 /// Whether the user asked for the acrylic backdrop.
@@ -259,11 +354,9 @@ fn acrylic_requested() -> bool {
     })
 }
 
-/// Re-enumerates task windows, recomputes layout, and repaints.
+/// Re-enumerates task windows, recomputes every bar's layout, and repaints.
 pub fn refresh() {
-    let Some(hwnd) = current_hwnd() else { return };
-
-    let tasks: Vec<TaskItem> =
+    let tasks_now: Vec<TaskItem> =
         crate::grouping::group_by_pid(crate::window_snapshot::taskbar_windows())
             .into_iter()
             .map(|group| {
@@ -284,33 +377,38 @@ pub fn refresh() {
             })
             .collect();
 
-    // SAFETY: `hwnd` is our live taskbar window.
-    unsafe {
-        let mut client = RECT::default();
-        let _ = GetClientRect(hwnd, &mut client);
-        let rects = layout(client.right, tasks.len());
+    let n = tasks_now.len();
+    *tasks().lock().unwrap() = tasks_now;
 
-        let mut st = state().lock().unwrap();
-        st.tasks = tasks;
-        st.rects = rects;
-        if st.hover.is_some_and(|h| h >= st.tasks.len()) {
-            st.hover = None;
-        }
-        if st.selected.is_some_and(|s| s >= st.tasks.len()) {
-            st.selected = st.tasks.len().checked_sub(1);
-        }
-        tracing::debug!(
-            count = st.tasks.len(),
-            groups = ?st.tasks.iter().map(|t| format!("{}#{}", t.key, t.label)).collect::<Vec<_>>(),
-            "taskbar refreshed"
-        );
-        let _ = InvalidateRect(Some(hwnd), None, true);
+    let mut bars = bars().lock().unwrap();
+    if bars.is_empty() {
+        return;
     }
-}
-
-fn current_hwnd() -> Option<HWND> {
-    let raw = TASKBAR_HWND.load(Ordering::SeqCst);
-    (raw != 0).then(|| hwnd_from(raw))
+    for bar in bars.iter_mut() {
+        let hwnd = hwnd_from(bar.hwnd);
+        let mut client = RECT::default();
+        // SAFETY: `hwnd` is a live bar window owned by this process.
+        unsafe {
+            let _ = GetClientRect(hwnd, &mut client);
+        }
+        bar.rects = layout(client.right, n);
+        if bar.hover.is_some_and(|h| h >= n) {
+            bar.hover = None;
+        }
+        if bar.selected.is_some_and(|s| s >= n) {
+            bar.selected = n.checked_sub(1);
+        }
+        // SAFETY: same as above.
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, true);
+        }
+    }
+    tracing::debug!(
+        count = n,
+        bars = bars.len(),
+        groups = ?tasks().lock().unwrap().iter().map(|t| format!("{}#{}", t.key, t.label)).collect::<Vec<_>>(),
+        "taskbar refreshed"
+    );
 }
 
 /// Lays out task buttons across the available width.
@@ -336,6 +434,7 @@ fn layout(client_w: i32, n: usize) -> Vec<RECT> {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let key = hwnd.0 as isize;
     match msg {
         WM_PAINT => {
             unsafe { paint(hwnd) };
@@ -346,16 +445,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let x = get_x(lparam);
             let y = get_y(lparam);
             let changed = {
-                let mut st = state().lock().unwrap();
-                let hover = st
-                    .rects
-                    .iter()
-                    .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
-                if hover != st.hover {
-                    st.hover = hover;
-                    true
-                } else {
-                    false
+                let mut bars = bars().lock().unwrap();
+                match bars.iter_mut().find(|b| b.hwnd == key) {
+                    Some(bar) => {
+                        let hover = bar
+                            .rects
+                            .iter()
+                            .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
+                        let changed = hover != bar.hover;
+                        bar.hover = hover;
+                        changed
+                    }
+                    None => false,
                 }
             };
             if changed {
@@ -364,16 +465,29 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
-            let changed = state().lock().unwrap().hover.take().is_some();
+            let changed = {
+                let mut bars = bars().lock().unwrap();
+                bars.iter_mut()
+                    .find(|b| b.hwnd == key)
+                    .is_some_and(|b| b.hover.take().is_some())
+            };
             if changed {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             }
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            let x = get_x(lparam);
+            // Brand dot opens the start menu.
+            if x < PAD + GRIP {
+                crate::start_menu::toggle();
+                return LRESULT(0);
+            }
             let target = {
-                let st = state().lock().unwrap();
-                st.hover.and_then(|i| st.tasks.get(i)).map(|t| t.hwnd)
+                let bars = bars().lock().unwrap();
+                let hover = bars.iter().find(|b| b.hwnd == key).and_then(|b| b.hover);
+                drop(bars);
+                hover.and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd))
             };
             if let Some(target) = target {
                 activate(hwnd_from(target));
@@ -381,14 +495,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
-            // Summon: focus the bar and start the keyboard cursor at task 0.
+            // Summon: focus the primary bar and start the keyboard cursor at 0.
             let _ = unsafe { SetForegroundWindow(hwnd) };
             let _ = unsafe { SetFocus(Some(hwnd)) };
             let changed = {
-                let mut st = state().lock().unwrap();
-                let sel = (!st.tasks.is_empty()).then_some(0);
-                st.selected = sel;
-                sel.is_some()
+                let has_tasks = !tasks().lock().unwrap().is_empty();
+                let mut bars = bars().lock().unwrap();
+                match bars.iter_mut().find(|b| b.hwnd == key) {
+                    Some(bar) => {
+                        bar.selected = has_tasks.then_some(0);
+                        bar.selected.is_some()
+                    }
+                    None => false,
+                }
             };
             if changed {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -396,29 +515,31 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_KEYDOWN => {
-            let key = wparam.0 as u16;
+            let vk = wparam.0 as u16;
+            let n = tasks().lock().unwrap().len();
             let mut changed = false;
-            {
-                let mut st = state().lock().unwrap();
-                let n = st.tasks.len();
-                if n > 0 {
-                    match key {
+            if n > 0 {
+                let mut bars = bars().lock().unwrap();
+                if let Some(bar) = bars.iter_mut().find(|b| b.hwnd == key) {
+                    match vk {
                         k if k == VK_LEFT.0 || k == VK_RIGHT.0 => {
-                            st.selected = step_index(st.selected, n, k == VK_RIGHT.0);
+                            bar.selected = step_index(bar.selected, n, k == VK_RIGHT.0);
                             changed = true;
                         }
                         k if k == VK_RETURN.0 => {
-                            if let Some(t) = st.selected.and_then(|i| st.tasks.get(i)) {
-                                let target = hwnd_from(t.hwnd);
-                                st.selected = None;
-                                drop(st);
-                                activate(target);
+                            let target = bar
+                                .selected
+                                .and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd));
+                            bar.selected = None;
+                            if let Some(target) = target {
+                                drop(bars);
+                                activate(hwnd_from(target));
                                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
                                 return LRESULT(0);
                             }
                         }
                         k if k == VK_ESCAPE.0 => {
-                            changed = st.selected.take().is_some();
+                            changed = bar.selected.take().is_some();
                         }
                         _ => {}
                     }
@@ -431,12 +552,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_SETFOCUS => {
             let changed = {
-                let mut st = state().lock().unwrap();
-                if st.selected.is_none() && !st.tasks.is_empty() {
-                    st.selected = Some(0);
-                    true
-                } else {
-                    false
+                let has_tasks = !tasks().lock().unwrap().is_empty();
+                let mut bars = bars().lock().unwrap();
+                match bars.iter_mut().find(|b| b.hwnd == key) {
+                    Some(bar) if bar.selected.is_none() && has_tasks => {
+                        bar.selected = Some(0);
+                        true
+                    }
+                    _ => false,
                 }
             };
             if changed {
@@ -445,7 +568,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_KILLFOCUS => {
-            let changed = state().lock().unwrap().selected.take().is_some();
+            let changed = {
+                let mut bars = bars().lock().unwrap();
+                bars.iter_mut()
+                    .find(|b| b.hwnd == key)
+                    .is_some_and(|b| b.selected.take().is_some())
+            };
             if changed {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             }
@@ -456,17 +584,42 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1), // fully repainted in WM_PAINT
+        m if m == APPBAR_CALLBACK => {
+            // Another AppBar moved/resized: re-dock to the stored work area.
+            if wparam.0 as u32 == ABN_POSCHANGED {
+                let area = bars()
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|b| b.hwnd == key)
+                    .map(|b| b.area);
+                if let Some(area) = area {
+                    set_appbar_pos(hwnd, area);
+                }
+            }
+            LRESULT(0)
+        }
         WM_DESTROY => {
-            tracing::info!("taskbar window destroyed");
             let _ = unsafe { UnregisterHotKey(Some(hwnd), HOTKEY_ID) };
-            TASKBAR_HWND.store(0, Ordering::SeqCst);
+            // SAFETY: deregisters this AppBar; harmless if it was never docked.
+            unsafe {
+                let mut abd = APPBARDATA {
+                    cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+                    hWnd: hwnd,
+                    ..Default::default()
+                };
+                let _ = SHAppBarMessage(ABM_REMOVE, &mut abd);
+            }
+            let mut bars = bars().lock().unwrap();
+            bars.retain(|b| b.hwnd != key);
+            tracing::info!(remaining = bars.len(), "taskbar window destroyed");
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
-/// Paints the whole bar: background, grip dot, task buttons, right zone.
+/// Paints one bar: background, grip dot, task buttons, right zone.
 unsafe fn paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
@@ -495,15 +648,22 @@ unsafe fn paint(hwnd: HWND) {
         SetBkMode(hdc, TRANSPARENT);
 
         let fg = GetForegroundWindow().0 as isize;
-        let st = state().lock().unwrap();
+        let tasks = tasks().lock().unwrap();
+        let (rects, hover, selected) = {
+            let bars = bars().lock().unwrap();
+            match bars.iter().find(|b| b.hwnd == hwnd.0 as isize) {
+                Some(b) => (b.rects.clone(), b.hover, b.selected),
+                None => (Vec::new(), None, None),
+            }
+        };
 
-        for (i, item) in st.tasks.iter().enumerate() {
-            let Some(r) = st.rects.get(i).copied() else {
+        for (i, item) in tasks.iter().enumerate() {
+            let Some(r) = rects.get(i).copied() else {
                 continue;
             };
             let active = item.members.contains(&fg);
-            let selected = st.selected == Some(i);
-            let brush = if st.hover == Some(i) {
+            let is_selected = selected == Some(i);
+            let brush = if hover == Some(i) {
                 br.hover
             } else {
                 br.surface
@@ -521,13 +681,13 @@ unsafe fn paint(hwnd: HWND) {
             }
 
             // Keyboard cursor: a 1px accent outline around the selected button.
-            if selected {
+            if is_selected {
                 FrameRect(hdc, &r, hbrush(br.accent));
             }
 
             SetTextColor(
                 hdc,
-                if active || selected {
+                if active || is_selected {
                     COLORREF(theme().text)
                 } else {
                     COLORREF(theme().muted)
@@ -549,7 +709,7 @@ unsafe fn paint(hwnd: HWND) {
         SetTextColor(hdc, COLORREF(theme().muted));
         draw_right(
             hdc,
-            &st.tasks.len().to_string(),
+            &tasks.len().to_string(),
             " 任务",
             client.right - PAD - CLOCK_W - 72,
             client.right - PAD - CLOCK_W,

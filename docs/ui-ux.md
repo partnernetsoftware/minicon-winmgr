@@ -78,6 +78,7 @@
 - ✅ 圆角 / 亚克力（DWM，`src/dwm.rs`）：圆角用 `DWMWA_WINDOW_CORNER_PREFERENCE`（Win11，默认开启）；亚克力用 `DWMWA_SYSTEMBACKDROP_TYPE`+扩展边框（**opt-in `MINICON_ACRYLIC=1`**）。两者均优雅降级——不支持的 OS 回退为方角 / 不透明栏（Windows Server 2022 实测均不支持，已记日志）。
 - ✅ 键盘导航：全局热键 **Alt+`** 唤出并聚焦任务栏，**←/→** 移动选择（accent 描边），**Enter** 切换到选中任务，**Esc** 取消；失焦自动清除光标。环绕逻辑有单元测试。
 - ✅ 任务分组 / 同应用多窗口折叠：按 pid 归组，多窗口显示 `标题 (+N)`（`src/grouping.rs`）。实测 11 窗口 → 8 组。
+- ✅ 多显示器每屏一栏：每个显示器工作区各一条栏，任务列表共享、布局/hover/键盘光标按窗口独立（`src/taskbar.rs`）。
 - ✅ 主题可配置：颜色来自 `config`（`minicon.conf` 或 `MINICON_CONFIG`），默认值与本文档色板一致。
-- ⬜ 系统托盘镜像与通知区。
+- ⬜ 系统托盘镜像。
 - ⬜ 应用启动器 UI（检索逻辑已在 `src/launcher.rs`，暂以 `--launch` CLI 暴露）。

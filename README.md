@@ -61,6 +61,10 @@ Config file (`minicon.conf`, or `MINICON_CONFIG`): `key=value`, `#`/`;` comments
 | `session` | M4 WTS session lifecycle |
 | `shell_registry` | M5 controlled Shell switch |
 | `grouping` / `launcher` / `monitor` / `config` | task grouping, Start Menu search, monitors, theme/config |
+| `tray` / `launcher_ui` | M6: notification-area mirror, Alt+Space launcher popup |
+| `tray_host` / `start_menu` | M7: replacement-mode tray host (`MINICON_TRAY_HOST=1`), ORB start menu |
+
+Reference implementation notes (ideas worth borrowing): [`docs/reference-tinywm.md`](docs/reference-tinywm.md). Replacement readiness gate: [`docs/replacement-readiness.md`](docs/replacement-readiness.md).
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, and `cargo test` on Windows.
 
