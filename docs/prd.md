@@ -185,4 +185,5 @@ flowchart TD
 - [x] M3+：自绘任务栏（极简深色、文本优先、hover/active、点击切窗、时钟+计数；过滤 helper 窗口 903→11）。设计语言见 `docs/ui-ux.md`。
 - [x] DWM 圆角（默认）+ 亚克力（`MINICON_ACRYLIC=1`，opt-in），均优雅降级（`src/dwm.rs`）。
 - [x] 键盘导航：Alt+` 唤出、←/→ 选择、Enter 切换、Esc 取消（含单元测试）。
-- [ ] 任务分组、系统托盘镜像（见 `docs/ui-ux.md` §6）
+- [x] 任务分组（按 pid 折叠，`src/grouping.rs`）；config/主题（`src/config.rs`）；多显示器枚举（`src/monitor.rs`，任务栏按主屏工作区定位）；开始菜单检索（`src/launcher.rs`，`--launch` CLI）；CI 基线（`.github/workflows/ci.yml`）。
+- [ ] 系统托盘镜像；应用启动器 UI；多显示器每屏一栏（见 `docs/ui-ux.md` §6）

@@ -13,28 +13,28 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH,
-    HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor,
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
-    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, OUT_DEFAULT_PRECIS, TRANSPARENT,
+    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
+    DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
+    DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, SetFocus, TrackMouseEvent, UnregisterHotKey, MOD_ALT, TRACKMOUSEEVENT,
-    TME_LEAVE, VK_ESCAPE, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT,
+    MOD_ALT, RegisterHotKey, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    UnregisterHotKey, VK_ESCAPE, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetForegroundWindow,
-    GetSystemMetrics, IsIconic, RegisterClassW, SetForegroundWindow, ShowWindow, SM_CXSCREEN,
-    SM_CYSCREEN, SW_RESTORE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETFOCUS, WNDCLASSW,
-    WNDCLASS_STYLES, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GetSystemMetrics, IsIconic, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_RESTORE,
+    SetForegroundWindow, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETFOCUS, WNDCLASS_STYLES, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
+use windows::core::PCWSTR;
 
 use crate::win_util::wide;
 
@@ -49,13 +49,13 @@ const BTN_MAX: i32 = 200;
 const BTN_TOP: i32 = 6;
 const CLOCK_W: i32 = 44;
 
-// --- palette (COLORREF = 0x00BBGGRR) --------------------------------------
-const COLOR_BG: COLORREF = COLORREF(0x001F_1B1B);
-const COLOR_SURFACE: COLORREF = COLORREF(0x002C_2626);
-const COLOR_HOVER: COLORREF = COLORREF(0x003B_3333);
-const COLOR_ACCENT: COLORREF = COLORREF(0x00F5_8B4C);
-const COLOR_TEXT: COLORREF = COLORREF(0x00E6_E6E6);
-const COLOR_MUTED: COLORREF = COLORREF(0x00A2_9A9A);
+// --- palette defaults live in `config::Theme`; loaded once at startup --------
+fn theme() -> crate::config::Theme {
+    static T: OnceLock<crate::config::Theme> = OnceLock::new();
+    *T.get_or_init(|| crate::config::load().theme)
+}
+
+const COLORREF_BLACK: COLORREF = COLORREF(0);
 
 // WM_MOUSELEAVE lives in Win32::UI::Controls, which we don't pull in.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -76,9 +76,16 @@ fn hwnd_from(v: isize) -> HWND {
     HWND(v as *mut core::ffi::c_void)
 }
 
+/// One taskbar button: an application group collapsed to a single entry.
 struct TaskItem {
+    /// Group identity (owning pid), for logging/stability.
+    key: String,
+    /// Window to focus when the button is activated.
     hwnd: isize,
-    title: String,
+    /// All windows in the group (used for the "active" highlight).
+    members: Vec<isize>,
+    /// Button label (title, with `(+N)` when the group has more windows).
+    label: String,
 }
 
 #[derive(Default)]
@@ -109,13 +116,13 @@ fn brushes() -> &'static Brushes {
         // SAFETY: solid brushes are process-lifetime GDI objects, never freed.
         unsafe {
             Brushes {
-                bg: CreateSolidBrush(COLOR_BG).0 as isize,
+                bg: CreateSolidBrush(COLORREF(theme().bg)).0 as isize,
                 // Pure black doubles as the "glass" fill when the frame is
                 // extended into the client area (DWM backdrop shows through).
-                glass: CreateSolidBrush(COLORREF(0)).0 as isize,
-                surface: CreateSolidBrush(COLOR_SURFACE).0 as isize,
-                hover: CreateSolidBrush(COLOR_HOVER).0 as isize,
-                accent: CreateSolidBrush(COLOR_ACCENT).0 as isize,
+                glass: CreateSolidBrush(COLORREF_BLACK).0 as isize,
+                surface: CreateSolidBrush(COLORREF(theme().surface)).0 as isize,
+                hover: CreateSolidBrush(COLORREF(theme().hover)).0 as isize,
+                accent: CreateSolidBrush(COLORREF(theme().accent)).0 as isize,
             }
         }
     })
@@ -155,8 +162,28 @@ pub fn enabled() -> bool {
         return false;
     }
     match std::env::var("MINICON_TASKBAR") {
-        Ok(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
-        Err(_) => true,
+        Ok(v) => !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => crate::config::load().show_taskbar,
+    }
+}
+
+/// Primary monitor work area as `(x, y, width, height)`; falls back to the full
+/// screen when monitor enumeration is unavailable.
+fn primary_work_area() -> (i32, i32, i32, i32) {
+    if let Some(m) = crate::monitor::enumerate().into_iter().next() {
+        return (m.x, m.y, m.width, m.height);
+    }
+    // SAFETY: pure metric queries.
+    unsafe {
+        (
+            0,
+            0,
+            GetSystemMetrics(SM_CXSCREEN),
+            GetSystemMetrics(SM_CYSCREEN),
+        )
     }
 }
 
@@ -178,21 +205,22 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         };
         if RegisterClassW(&wnd_class) == 0 {
-            return Err(
-                format!("RegisterClassW(taskbar) failed (Win32 error {})", GetLastError().0).into(),
-            );
+            return Err(format!(
+                "RegisterClassW(taskbar) failed (Win32 error {})",
+                GetLastError().0
+            )
+            .into());
         }
 
-        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        let (wx, wy, ww, wh) = primary_work_area();
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             PCWSTR(class_name.as_ptr()),
             PCWSTR(class_title.as_ptr()),
             WS_POPUP | WS_VISIBLE,
-            0,
-            screen_h - BAR_H,
-            screen_w,
+            wx,
+            wy + wh - BAR_H,
+            ww,
             BAR_H,
             None,
             None,
@@ -224,7 +252,10 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
 /// Whether the user asked for the acrylic backdrop.
 fn acrylic_requested() -> bool {
     std::env::var("MINICON_ACRYLIC").is_ok_and(|v| {
-        !matches!(v.to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off")
+        !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
     })
 }
 
@@ -232,13 +263,26 @@ fn acrylic_requested() -> bool {
 pub fn refresh() {
     let Some(hwnd) = current_hwnd() else { return };
 
-    let tasks: Vec<TaskItem> = crate::window_snapshot::taskbar_windows()
-        .into_iter()
-        .map(|w| TaskItem {
-            hwnd: w.hwnd.0 as isize,
-            title: w.title,
-        })
-        .collect();
+    let tasks: Vec<TaskItem> =
+        crate::grouping::group_by_pid(crate::window_snapshot::taskbar_windows())
+            .into_iter()
+            .map(|group| {
+                let first = group.windows.first();
+                let base = first.map(|w| w.title.clone()).unwrap_or_default();
+                let extra = group.windows.len().saturating_sub(1);
+                let label = if extra > 0 {
+                    format!("{base} (+{extra})")
+                } else {
+                    base
+                };
+                TaskItem {
+                    key: group.key,
+                    hwnd: first.map(|w| w.hwnd.0 as isize).unwrap_or(0),
+                    members: group.windows.iter().map(|w| w.hwnd.0 as isize).collect(),
+                    label,
+                }
+            })
+            .collect();
 
     // SAFETY: `hwnd` is our live taskbar window.
     unsafe {
@@ -257,7 +301,7 @@ pub fn refresh() {
         }
         tracing::debug!(
             count = st.tasks.len(),
-            titles = ?st.tasks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
+            groups = ?st.tasks.iter().map(|t| format!("{}#{}", t.key, t.label)).collect::<Vec<_>>(),
             "taskbar refreshed"
         );
         let _ = InvalidateRect(Some(hwnd), None, true);
@@ -457,7 +501,7 @@ unsafe fn paint(hwnd: HWND) {
             let Some(r) = st.rects.get(i).copied() else {
                 continue;
             };
-            let active = item.hwnd == fg;
+            let active = item.members.contains(&fg);
             let selected = st.selected == Some(i);
             let brush = if st.hover == Some(i) {
                 br.hover
@@ -484,12 +528,12 @@ unsafe fn paint(hwnd: HWND) {
             SetTextColor(
                 hdc,
                 if active || selected {
-                    COLOR_TEXT
+                    COLORREF(theme().text)
                 } else {
-                    COLOR_MUTED
+                    COLORREF(theme().muted)
                 },
             );
-            let mut text: Vec<u16> = item.title.encode_utf16().collect();
+            let mut text: Vec<u16> = item.label.encode_utf16().collect();
             let mut tr = r;
             tr.left += 9;
             tr.right -= 8;
@@ -502,12 +546,24 @@ unsafe fn paint(hwnd: HWND) {
         }
 
         // Right zone: task count + clock, both right-aligned and muted.
-        SetTextColor(hdc, COLOR_MUTED);
-        draw_right(hdc, &st.tasks.len().to_string(), " 任务", client.right - PAD - CLOCK_W - 72, client.right - PAD - CLOCK_W);
+        SetTextColor(hdc, COLORREF(theme().muted));
+        draw_right(
+            hdc,
+            &st.tasks.len().to_string(),
+            " 任务",
+            client.right - PAD - CLOCK_W - 72,
+            client.right - PAD - CLOCK_W,
+        );
 
         let now = GetLocalTime();
         let clock = format!("{:02}:{:02}", now.wHour, now.wMinute);
-        draw_right(hdc, &clock, "", client.right - PAD - CLOCK_W, client.right - PAD);
+        draw_right(
+            hdc,
+            &clock,
+            "",
+            client.right - PAD - CLOCK_W,
+            client.right - PAD,
+        );
 
         SelectObject(hdc, old_font);
         let _ = EndPaint(hwnd, &ps);

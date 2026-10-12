@@ -43,9 +43,26 @@ Unified shell switcher (view / start / switch between Windows explorer, Cairo De
 | `--shell-list` | list profiles + current |
 | `--shell-set <explorer\|cairo\|minicon\|path>` | set `Shell` (needs `MINICON_CONFIRM_SHELL=yes`) |
 | `--shell-replace` / `--shell-rollback <value\|default>` | guarded writes (same token) |
+| `--launch <query>` | list ranked Start Menu matches |
+| `--launch-run <query>` | launch the best Start Menu match |
 | `--help` | usage |
 
-Env: `MINICON_NO_TASKBAR=1` (hide bar), `MINICON_ACRYLIC=1` (DWM acrylic backdrop, best-effort), `MINICON_HEARTBEAT_SECS=N`, `MINICON_LOG_DIR=path`, `MINICON_CAIRO_PATH=path`, `RUST_LOG=...`.
+Env: `MINICON_NO_TASKBAR=1` (hide bar), `MINICON_ACRYLIC=1` (DWM acrylic backdrop, best-effort), `MINICON_HEARTBEAT_SECS=N`, `MINICON_LOG_DIR=path`, `MINICON_CAIRO_PATH=path`, `MINICON_CONFIG=path` (config file), `RUST_LOG=...`.
+
+Config file (`minicon.conf`, or `MINICON_CONFIG`): `key=value`, `#`/`;` comments. Keys: `theme.bg|surface|hover|accent|text|muted` (`#RRGGBB`), `hotkey`, `show_taskbar`.
+
+## Modules
+
+| Module | Role |
+|--------|------|
+| `logging` / `single_instance` | M0 observability + single-instance guard |
+| `window` / `window_snapshot` | M1 message loop, M2 window enumeration |
+| `taskbar` / `dwm` | M3 self-painted bar, rounded corners + acrylic |
+| `session` | M4 WTS session lifecycle |
+| `shell_registry` | M5 controlled Shell switch |
+| `grouping` / `launcher` / `monitor` / `config` | task grouping, Start Menu search, monitors, theme/config |
+
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, and `cargo test` on Windows.
 
 ## Build
 ```bat

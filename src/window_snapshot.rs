@@ -4,13 +4,13 @@
 //! window, with the fields a task list needs (class, title, pid, visibility).
 //! M2 only observes — it never moves, hides, or selects windows.
 
-use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GW_OWNER,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetWindow, GetWindowLongPtrW,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
+use windows::core::BOOL;
 
 /// Read-only description of a top-level window.
 #[derive(Debug, Clone)]
@@ -38,11 +38,7 @@ pub fn snapshot() -> Vec<WindowInfo> {
 pub fn log_snapshot() {
     let windows = snapshot();
     let visible = windows.iter().filter(|w| w.visible).count();
-    tracing::info!(
-        total = windows.len(),
-        visible,
-        "top-level window snapshot"
-    );
+    tracing::info!(total = windows.len(), visible, "top-level window snapshot");
     for w in &windows {
         tracing::debug!(
             hwnd = ?w.hwnd,

@@ -14,19 +14,19 @@
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use crate::session;
-use crate::window_snapshot;
 use crate::win_util::wide;
+use crate::window_snapshot;
 
-use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, HWND_MESSAGE,
-    MSG, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_QUERYENDSESSION, WM_TIMER,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HWND_MESSAGE,
+    MSG, PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage,
+    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_QUERYENDSESSION, WM_TIMER,
     WM_WTSSESSION_CHANGE, WNDCLASS_STYLES, WNDCLASSW,
 };
+use windows::core::{BOOL, PCWSTR};
 
 const CLASS_NAME: &str = "minicon_winmgr_message_window";
 const WINDOW_TITLE: &str = "minicon-winmgr (message-only)";
@@ -101,12 +101,24 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut msg = MSG::default();
         tracing::info!("entering message pump");
+        for m in crate::monitor::enumerate() {
+            tracing::info!(
+                x = m.x,
+                y = m.y,
+                width = m.width,
+                height = m.height,
+                primary = m.primary,
+                "monitor work area"
+            );
+        }
         window_snapshot::log_snapshot();
         loop {
             let ret = GetMessageW(&mut msg, None, 0, 0);
             match ret.0 {
                 -1 => {
-                    return Err(format!("GetMessageW failed (Win32 error {})", GetLastError().0).into());
+                    return Err(
+                        format!("GetMessageW failed (Win32 error {})", GetLastError().0).into(),
+                    );
                 }
                 0 => break, // WM_QUIT
                 _ => {}
@@ -116,7 +128,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         tracing::info!("message loop exited");
-        Ok(())    }
+        Ok(())
+    }
 }
 
 /// Window procedure for the shell message window.

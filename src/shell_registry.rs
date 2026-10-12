@@ -12,12 +12,12 @@
 
 use std::error::Error;
 
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-    KEY_READ, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE, RegCloseKey,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
+use windows::core::PCWSTR;
 
 use crate::win_util::wide;
 

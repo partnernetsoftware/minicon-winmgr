@@ -6,7 +6,7 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::RemoteDesktop::{
-    WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 
 // WTS session-change event codes from `wtsapi32.h`. The windows crate exposes

@@ -1,5 +1,9 @@
+mod config;
 mod dwm;
+mod grouping;
+mod launcher;
 mod logging;
+mod monitor;
 mod session;
 mod shell_registry;
 mod single_instance;
@@ -22,6 +26,8 @@ enum Cli {
     ShellSet(Option<String>),
     ShellReplace,
     ShellRollback(Option<String>),
+    Launch(Option<String>),
+    LaunchRun(Option<String>),
     Help,
 }
 
@@ -35,6 +41,8 @@ impl Cli {
             Some("--shell-set") => Cli::ShellSet(args.next()),
             Some("--shell-replace") => Cli::ShellReplace,
             Some("--shell-rollback") => Cli::ShellRollback(args.next()),
+            Some("--launch") => Cli::Launch(args.next()),
+            Some("--launch-run") => Cli::LaunchRun(args.next()),
             Some("--help") | Some("-h") => Cli::Help,
             Some(other) => {
                 eprintln!("minicon-winmgr: unknown argument '{other}'");
@@ -58,8 +66,49 @@ fn main() {
         Cli::ShellSet(target) => cmd_shell_set(target),
         Cli::ShellReplace => cmd_shell_replace(),
         Cli::ShellRollback(prev) => cmd_shell_rollback(prev),
+        Cli::Launch(query) => cmd_launch(query),
+        Cli::LaunchRun(query) => cmd_launch_run(query),
         Cli::Help => print_help(),
     }
+}
+
+/// Prints ranked Start Menu matches for a query.
+fn cmd_launch(query: Option<String>) {
+    let Some(query) = query else {
+        eprintln!("minicon-winmgr: --launch needs a query");
+        std::process::exit(2);
+    };
+    let items = launcher::discover_shortcuts();
+    let matches = launcher::search(&items, &query, 20);
+    if matches.is_empty() {
+        println!(
+            "no matches for '{query}' ({} shortcuts indexed)",
+            items.len()
+        );
+        return;
+    }
+    for s in matches {
+        println!("{}  —  {}", s.name, s.path);
+    }
+}
+
+/// Launches the best Start Menu match for a query.
+fn cmd_launch_run(query: Option<String>) {
+    let Some(query) = query else {
+        eprintln!("minicon-winmgr: --launch-run needs a query");
+        std::process::exit(2);
+    };
+    let items = launcher::discover_shortcuts();
+    let Some(best) = launcher::search(&items, &query, 1).into_iter().next() else {
+        eprintln!("minicon-winmgr: no match for '{query}'");
+        std::process::exit(1);
+    };
+    tracing::info!(name = %best.name, path = %best.path, "launching shortcut");
+    if let Err(err) = launcher::launch(&best.path) {
+        eprintln!("minicon-winmgr: launch failed: {err}");
+        std::process::exit(1);
+    }
+    println!("launched {}", best.name);
 }
 
 /// Normal companion run: single-instance guard, then the message loop.
@@ -111,7 +160,11 @@ fn cmd_shell_list() {
             None => ("default", "(not set -> explorer.exe)".to_string()),
             Some(p) => ("override", p.clone()),
         };
-        let mark = if is_current(&current, path) { "  <- current" } else { "" };
+        let mark = if is_current(&current, path) {
+            "  <- current"
+        } else {
+            ""
+        };
         println!("{name:<10} {kind:<10} {shown}{mark}");
     }
     println!();
@@ -259,6 +312,8 @@ fn print_help() {
            minicon-winmgr --shell-replace     set Shell to this exe (needs {CONFIRM_ENV}=yes)\n\
            minicon-winmgr --shell-rollback <value|default>\n\
                                               restore Shell (needs {CONFIRM_ENV}=yes)\n\
+           minicon-winmgr --launch <query>    list Start Menu matches for a query\n\
+           minicon-winmgr --launch-run <query> launch the best Start Menu match\n\
            minicon-winmgr --help              show this help\n\
          \n\
          Taskbar keys:\n\

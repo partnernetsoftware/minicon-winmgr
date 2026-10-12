@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Initializes the global tracing subscriber.
 ///
@@ -24,9 +24,7 @@ pub fn init() -> WorkerGuard {
         .with_ansi(false)
         .with_target(true);
 
-    let stderr_layer = fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_ansi(true);
+    let stderr_layer = fmt::layer().with_writer(std::io::stderr).with_ansi(true);
 
     let subscriber = tracing_subscriber::registry()
         .with(filter)

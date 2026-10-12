@@ -5,9 +5,9 @@
 
 use std::fmt;
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
+use windows::core::PCWSTR;
 
 /// Owns the singleton mutex for as long as it is alive; releases it on drop.
 pub struct InstanceGuard {
@@ -26,7 +26,10 @@ impl fmt::Display for AcquireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AcquireError::AlreadyRunning => {
-                write!(f, "another instance already holds the single-instance mutex")
+                write!(
+                    f,
+                    "another instance already holds the single-instance mutex"
+                )
             }
             AcquireError::Create(code) => write!(f, "CreateMutexW failed (os error {code})"),
         }
