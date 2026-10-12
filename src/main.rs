@@ -7,6 +7,7 @@ mod config;
 mod dwm;
 mod grouping;
 mod hotkeys;
+mod hover_preview;
 mod launcher;
 mod launcher_ui;
 mod logging;

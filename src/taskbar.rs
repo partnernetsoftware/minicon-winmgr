@@ -37,12 +37,13 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, HWND_TOPMOST, IsIconic,
-    MF_STRING, PostMessageW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE,
-    SW_RESTORE, SWP_NOACTIVATE, SetForegroundWindow, SetWindowPos, ShowWindow, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS,
-    WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+    HWND_TOPMOST, IsIconic, IsWindow, KillTimer, MF_STRING, PostMessageW, RegisterClassW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE,
+    SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_TIMER, WNDCLASS_STYLES,
+    WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
@@ -77,6 +78,11 @@ const HOTKEY_ID: i32 = 1;
 
 /// AppBar callback message (WM_APP + 1) for docked bars.
 const APPBAR_CALLBACK: u32 = 0x8000 + 1;
+
+/// One-shot timer that gates the hover window preview (debounce).
+const HOVER_TIMER_ID: usize = 2;
+/// Delay before a hover shows the preview, in milliseconds.
+const HOVER_DELAY_MS: u32 = 350;
 
 /// Whether the acrylic backdrop is active (paint glass-black instead of bg).
 static ACRYLIC_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -506,7 +512,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             track_leave(hwnd);
             let x = get_x(lparam);
             let y = get_y(lparam);
-            let changed = {
+            let (changed, hover) = {
                 let mut bars = bars().lock().unwrap();
                 match bars.iter_mut().find(|b| b.hwnd == key) {
                     Some(bar) => {
@@ -516,17 +522,58 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
                         let changed = hover != bar.hover;
                         bar.hover = hover;
-                        changed
+                        (changed, hover)
                     }
-                    None => false,
+                    None => (false, None),
                 }
             };
             if changed {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                // Re-arm the debounced preview timer for the new hover target.
+                let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
+                crate::hover_preview::hide();
+                if hover.is_some() {
+                    let _ = unsafe { SetTimer(Some(hwnd), HOVER_TIMER_ID, HOVER_DELAY_MS, None) };
+                }
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == HOVER_TIMER_ID => {
+            let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
+            let hover = bars()
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|b| b.hwnd == key)
+                .and_then(|b| b.hover);
+            if let Some(i) = hover {
+                let btn = bars()
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|b| b.hwnd == key)
+                    .and_then(|b| b.rects.get(i).copied());
+                let target = tasks().lock().unwrap().get(i).map(|t| t.hwnd);
+                if let (Some(r), Some(target)) = (btn, target) {
+                    let mut wr = RECT::default();
+                    // SAFETY: `hwnd` is our live bar; converting client→screen.
+                    unsafe {
+                        let _ = GetWindowRect(hwnd, &mut wr);
+                    }
+                    let anchor = RECT {
+                        left: r.left + wr.left,
+                        top: r.top + wr.top,
+                        right: r.right + wr.left,
+                        bottom: r.bottom + wr.top,
+                    };
+                    crate::hover_preview::show(target, anchor);
+                }
             }
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
+            let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
+            crate::hover_preview::hide();
             let changed = {
                 let mut bars = bars().lock().unwrap();
                 bars.iter_mut()
@@ -539,6 +586,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
+            crate::hover_preview::hide();
             let x = get_x(lparam);
             let y = get_y(lparam);
             // Brand dot opens the start menu.
@@ -590,6 +639,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_RBUTTONDOWN => {
+            let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
+            crate::hover_preview::hide();
             let target = {
                 let bars = bars().lock().unwrap();
                 let hover = bars.iter().find(|b| b.hwnd == key).and_then(|b| b.hover);
@@ -675,6 +726,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_KILLFOCUS => {
+            let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
+            crate::hover_preview::hide();
             let changed = {
                 let mut bars = bars().lock().unwrap();
                 bars.iter_mut()
@@ -976,8 +1029,14 @@ fn window_menu(owner: HWND, target: HWND) {
 
 /// Brings `target` to the foreground, restoring it first if minimized.
 fn activate(target: HWND) {
-    // SAFETY: `target` is a live top-level window from our task list.
+    // SAFETY: `target` is a live top-level window from our task list. Guard
+    // against a stale handle (window closed and the value reused) so we never
+    // foreground the wrong window.
     unsafe {
+        if !IsWindow(Some(target)).as_bool() {
+            tracing::debug!(?target, "activate: target window no longer exists");
+            return;
+        }
         if IsIconic(target).as_bool() {
             let _ = ShowWindow(target, SW_RESTORE);
         }

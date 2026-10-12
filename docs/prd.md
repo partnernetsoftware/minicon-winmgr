@@ -148,11 +148,12 @@ flowchart TD
             G3["多显示器每屏一栏 / ORB 主菜单"]
         end
 
-        subgraph ROOM_H["⑧ 任务栏增强 + 稳定性 (M8/M9) — ★当前"]
+        subgraph ROOM_H["⑧ 任务栏增强 + 稳定性 (M8/M9/M10) — ★当前"]
             H1["快速启动钉住<br/>(recents 前 N)"]
             H2["窗口列表按钮"]
             H3["Snap 热键<br/>(Win+* → Ctrl+Alt+* 回退)"]
             H4["稳定性指标<br/>metrics"]
+            H5["悬停窗口预览<br/>缩略图悬浮窗"]
         end
     end
 
@@ -167,11 +168,28 @@ flowchart TD
     classDef current fill:#fff3cd,stroke:#f9a825;
     classDef todo fill:#f8f9fa,stroke:#adb5bd;
     class A1,A2,A3,B1,B2,B3,C1,C2,D1,D2,E1,E2,F1,G1,G2,G3 done;
-    class H1,H2,H3,H4 current;
+    class H1,H2,H3,H4,H5 current;
 ```
 
 > 图例：绿=已完成（M0–M7）；黄=当前推进（M8/M9：任务栏增强 + 稳定性指标）。
 > 剩余次级项（悬停预览 / 文件夹堆栈 / 可浏览桌面）见 `plan/plan-shell-gaps.md`。
+
+### 5.1 已验证事实与坑（不变量）
+
+> 由"政委"审阅 + 实测确认，跨会话沿用。改代码前先读这一节。
+
+**已验证事实**
+- `cargo test` = 91 passed；`cargo clippy --all-targets -- -D warnings` 干净；`cargo fmt --check` 通过。
+- companion 模式下默认外壳常占用 `Win+*`：`run_dialog` 与 `hotkeys` 均**回退**到 `Ctrl+Alt+*`（实测注册成功）。若回退也被占，仅记 `error` 日志、热键不可用（用户无感）。
+- companion 模式下系统通知区被其它外壳接管，`tray` 镜像常为 `count=0`；替换模式才由 `tray_host` 提供。
+- 稳定性：句柄/GDI 在分钟级测量中**持平**（无泄漏）；AppBar `ABM_NEW` 在已有外壳占底边时失败 → 退化为悬浮（预期 WARN）。
+
+**坑 / 不变量**
+- **taskbar 状态只允许消息线程访问**：`tasks()` / `bars()` / `tray_icons()` / `pins()` 共用唯一消息线程。当前加锁顺序**不统一**（`paint` 是 tasks→bars→pins，`refresh` 是 bars→tasks），仅因单线程才安全；**任何新增 worker 线程都可能死锁**。禁止新增线程去抢这些锁。
+- **文件/跨进程 IO 不得在持 `bars()`/`tasks()` 锁时做**：`refresh()` 会同步跨进程读托盘 + 扫开始菜单，周期过长会卡 UI；新功能把 IO 放锁外。
+- **激活窗口前必须 `IsWindow` 守卫**：句柄可能已关闭并被复用，否则会把前台切到错误窗口（`taskbar::activate` 已加）。
+- **悬停预览禁止在 `WM_MOUSEMOVE` 同步 `PrintWindow`**：用 `WM_TIMER` 节流（350ms），单窗口 show/hide 复用，`HBITMAP` 在 target 变化与 `WM_DESTROY` 时释放（`hover_preview`）。
+- **不改 `Cargo.toml` 的 feature 冻结约定**：禁止用 `windows::core::link!` 绕过未启用 feature，改用语义化 feature（如 `PrintWindow` 需 `Win32_Storage_Xps`）。
 
 ---
 
@@ -213,4 +231,6 @@ flowchart TD
 - [x] M8 稳定性 + 输入：`metrics`（内存/句柄/GDI 周期采样）、`hotkeys`（Win+←/→/↑ Snap）、`recents`（启动频次排序）。
 - [x] 运行对话框 `run_dialog`（Win+R，被占用时回退 Ctrl+Alt+R）；托盘图标条 `tray_bar`（任务栏右区绘制，companion 下无图标则不占位）。
 - [x] M9 任务栏增强：快速启动 `quick_launch`（把 recents 前 N 名钉到任务栏左侧，无历史则空）、窗口列表按钮 `task_list`（点击弹出全部分组窗口的菜单）；Snap 热键加 `Win+* → Ctrl+Alt+*` 回退。
-- [ ] 外壳功能补全（次级，见 `plan/plan-shell-gaps.md`）：悬停窗口预览、文件夹堆栈、可浏览桌面。
+- [x] M10 悬停预览：`hover_preview`（任务栏按钮悬停 350ms 弹 `PrintWindow(PW_RENDERFULLCONTENT)` 缩略图；纯几何 `target_rect` + 单测；单窗口复用、位图按需释放）。
+- [x] 调研：文件夹堆栈 / 可浏览桌面 → `plan/plan-folder-stacks.md`（结论：先做"文件夹堆栈最小切片"，可浏览桌面缓做）。
+- [ ] 外壳功能补全（次级，见 `plan/plan-shell-gaps.md`）：文件夹堆栈最小切片、主菜单最近使用/搜索、可浏览桌面。

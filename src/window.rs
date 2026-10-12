@@ -114,6 +114,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::error!(%err, "run dialog init failed; continuing without it");
         }
 
+        // Hover window-preview popup (shown by the taskbar on hover).
+        if let Err(err) = crate::hover_preview::install(hinstance) {
+            tracing::error!(%err, "hover preview init failed; continuing without it");
+        }
+
         // Tray host is inert unless MINICON_TRAY_HOST=1 (replacement mode).
         if let Err(err) = crate::tray_host::install(hinstance) {
             tracing::error!(%err, "tray host install failed; continuing without it");
