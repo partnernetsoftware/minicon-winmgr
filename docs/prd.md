@@ -9,7 +9,7 @@
 ## 1. 目的与范围
 
 为公司工作站提供一个 **可靠、可长期常驻、可管理** 的 Windows 外壳 / 会话管理器，
-对标 Cairo Desktop 的外壳体验，但在 **稳定性与会话生命周期** 上做差异化加固。
+对标成熟的第三方桌面外壳体验，但在 **稳定性与会话生命周期** 上做差异化加固。
 
 - **范围内**：外壳常驻进程、窗口感知、任务栏宿主、会话生命周期、可选的外壳替换开关。
 - **非目标（早期阶段明确不做）**：打包发布、代码签名、修改 Winlogon `Shell` 注册表（默认 companion 模式）、完整桌面/启动器 UI 的一次性铺开。
@@ -23,19 +23,19 @@
 
 ---
 
-## 3. 对标产品功能树 — Cairo Desktop
+## 3. 对标产品功能树 — 参考桌面外壳
 
-来源：[cairodesktop.com](https://cairodesktop.com/) 与 [cairoshell/cairoshell](https://github.com/cairoshell/cairoshell)。
+来源：对主流第三方 Windows 桌面外壳的公开功能梳理（不针对具体产品命名）。
 
 ```text
-Cairo Desktop（Windows 外壳替代）
+参考桌面外壳（Windows 外壳替代）
 ├── 任务栏 Taskbar
-│   ├── 任务列表（按"程序列表"同样的分类方式组织窗口）
+│   ├── 任务列表（按应用/分类组织窗口）
 │   ├── 列表按钮（窗口总览，便于切换）
 │   ├── 系统托盘 / 通知区
 │   ├── 时钟
 │   └── 快速启动 / 任务栏快捷方式
-├── 程序菜单 Programs Menu（Cairo Menu）
+├── 程序菜单 Programs Menu
 │   ├── 应用分类（拖拽整理，用户自定义）
 │   ├── 应用搜索
 │   ├── Places（导航位置：计算机/文档等）
@@ -53,19 +53,18 @@ Cairo Desktop（Windows 外壳替代）
 ├── 多显示器支持
 ├── 个性化 / 主题
 └── 外壳集成
-    ├── 替换 explorer shell
+    ├── 替换默认 shell
     └── 桌面模式 / 外壳模式切换
 ```
 
-**对标结论**：Cairo 的形态价值集中在"任务栏 + 程序菜单 + 可浏览桌面"。
-我们的切入点是其下的 **可靠性底座与会话管理**——这正是 README 提到的痛点
-（长时间公司桌面会话里 explorer / Cairo 都会卡死）。
+**对标结论**：这类外壳的形态价值集中在"任务栏 + 程序菜单 + 可浏览桌面"。
+我们的切入点是其下的 **可靠性底座与会话管理**——长时间公司桌面会话里，默认 shell 与第三方外壳都可能卡死。
 
 ---
 
 ## 4. 思维树（markdown-tree-dag）
 
-把"如何造一个可靠、可管理的 Cairo 级外壳"拆成 DAG：节点可被多个父节点共享（用 `←` 标注额外父边）。
+把"如何造一个可靠、可管理的桌面级外壳"拆成 DAG：节点可被多个父节点共享（用 `←` 标注额外父边）。
 
 ```text
 [根] 让公司工作站获得可靠、可管理的 Windows 外壳
@@ -73,7 +72,7 @@ Cairo Desktop（Windows 外壳替代）
 │   ├── 可观测        → [A] 日志 / panic 落盘 / 单实例
 │   ├── 进程健壮      → [B] 消息泵 / 优雅退出
 │   └── 崩溃可恢复    → [E] 会话生命周期          ← 也依赖 [B]
-├── Cairo 功能对齐 ★ 当前最高杠杆枝（正在砍）
+├── 外壳功能对齐 ★ 当前最高杠杆枝（正在砍）
 │   ├── 窗口可见性    → [C] 顶层窗口枚举 → [D] 任务栏宿主（已在做）
 │   ├── 通知区        → [G] 系统托盘镜像           ← 待做（新翼）
 │   ├── 启动器        → [H] 程序菜单 / 启动器 UI    ← 待做（检索逻辑已有）
@@ -88,7 +87,7 @@ Cairo Desktop（Windows 外壳替代）
   C → G, H, I        （都建立在"窗口感知 + 任务栏"之上）
   D → I              （每屏一栏是任务栏的多实例化）
 
-裁剪原则：只沿 ★ 最高杠杆枝（Cairo 功能对齐）推进；可靠性/部署安全已在手，不再扩。
+裁剪原则：只沿 ★ 最高杠杆枝（外壳功能对齐）推进；可靠性/部署安全已在手，不再扩。
 ```
 
 ---
@@ -174,7 +173,7 @@ flowchart TD
 | E | 会话生命周期 | 收 WTS 会话变更 + `WM_QUERYENDSESSION/ENDSESSION`，记录回收路径 | M4 | ✅ 已实现 |
 | F | 外壳替换开关 | 当前用户级、手动、可一键回滚 | M5 | ✅ 已实现（受控；写入需二次确认） |
 
-**差异化定位**：A/B/E 是我们的护城河（可靠性 + 会话管理）；C/D 是"像 Cairo"的最低门槛。
+**差异化定位**：A/B/E 是我们的护城河（可靠性 + 会话管理）；C/D 是"像成熟外壳"的最低门槛。
 
 ---
 
@@ -190,11 +189,11 @@ flowchart TD
 - [x] M2：`EnumWindows` 顶层窗口枚举与快照日志
 - [x] M3：任务栏宿主窗口（默认常显；`MINICON_NO_TASKBAR=1` 隐藏）
 - [x] M4：WTS 会话变更通知 + 会话结束处理
-- [x] M5：受控的 Winlogon Shell 开关。`--shell-status` 只读已验（本机当前为 `C:\Program Files\Cairo Shell\CairoDesktop.exe`）；写入需 `MINICON_CONFIRM_SHELL=yes` 二次确认，**默认/本次均未执行写入**。
+- [x] M5：受控的 Winlogon Shell 开关。`--shell-status` / `--shell-list` 只读；写入（`--shell-set` / `--shell-replace` / `--shell-rollback`）需 `MINICON_CONFIRM_SHELL=yes` 二次确认。
 - [x] M3+：自绘任务栏（极简深色、文本优先、hover/active、点击切窗、时钟+计数；过滤 helper 窗口 903→11）。设计语言见 `docs/ui-ux.md`。
 - [x] DWM 圆角（默认）+ 亚克力（`MINICON_ACRYLIC=1`，opt-in），均优雅降级（`src/dwm.rs`）。
 - [x] 键盘导航：Alt+` 唤出、←/→ 选择、Enter 切换、Esc 取消（含单元测试）。
 - [x] 任务分组（按 pid 折叠，`src/grouping.rs`）；config/主题（`src/config.rs`）；多显示器枚举（`src/monitor.rs`，**每屏一栏**由 `src/taskbar.rs` 落地）；开始菜单检索（`src/launcher.rs`，`--launch` CLI）；CI 基线（`.github/workflows/ci.yml`）。
-- [x] 系统托盘镜像（`src/tray.rs`，companion 模式读现有 shell 托盘；本机因 Cairo 为 shell 无 `Shell_TrayWnd`，返回 0）、应用启动器 UI（`src/launcher_ui.rs`，Alt+Space 弹窗）。
-- [ ] 借鉴 tinywm（见 `docs/reference-tinywm.md`）：**AppBar 停靠已实现**（companion 下 `ABM_NEW` 失败→退化为悬浮；待替换模式复验）；随后 Snap/多屏热键。
+- [x] 系统托盘镜像（`src/tray.rs`，companion 模式读现有 shell 托盘；当第三方外壳接管时无 `Shell_TrayWnd` 可读，返回 0）、应用启动器 UI（`src/launcher_ui.rs`，Alt+Space 弹窗）。
+- [ ] 继续对齐外部外壳实现：**AppBar 停靠已实现**（已有外壳占边时 `ABM_NEW` 可能失败→退化为悬浮）；随后 Snap/多屏热键。
 - [x] M7 替代就绪：AppBar 停靠、`tray_host`（替换模式托盘宿主）、`start_menu`（ORB）。门槛见 `docs/replacement-readiness.md`。

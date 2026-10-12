@@ -1,3 +1,8 @@
+// GUI subsystem: no console window is created, so double-clicking (or being
+// launched as the login shell) never flashes a console. CLI subcommands attach
+// to the parent console on demand (see `attach_console_if_needed`).
+#![windows_subsystem = "windows"]
+
 mod config;
 mod dwm;
 mod grouping;
@@ -20,8 +25,9 @@ mod window_snapshot;
 /// default companion run never needs it, so the registry stays untouched.
 const CONFIRM_ENV: &str = "MINICON_CONFIRM_SHELL";
 
-/// Default install path of Cairo Desktop (override with `MINICON_CAIRO_PATH`).
-const CAIRO_DEFAULT: &str = r"C:\Program Files\Cairo Shell\CairoDesktop.exe";
+/// Env var pointing at an alternative shell executable (the `alt` profile).
+/// No path is baked in — the profile is only usable when this is set.
+const ALT_SHELL_ENV: &str = "MINICON_ALT_SHELL";
 
 enum Cli {
     RunShell,
@@ -57,6 +63,12 @@ impl Cli {
 }
 
 fn main() {
+    // CLI invocations may need a console for their output; the shell run must
+    // stay console-free, so only attach when arguments are present.
+    if std::env::args_os().nth(1).is_some() {
+        attach_console_if_needed();
+    }
+
     let _log_guard = logging::init();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -73,6 +85,40 @@ fn main() {
         Cli::Launch(query) => cmd_launch(query),
         Cli::LaunchRun(query) => cmd_launch_run(query),
         Cli::Help => print_help(),
+    }
+}
+
+/// Because we build as a GUI-subsystem binary there is no console by default.
+/// If we were launched from an interactive terminal (no inherited std handle),
+/// attach to the parent console so `println!`/`eprintln!` are visible. When the
+/// parent redirects our output to a pipe, Rust's std handles already work and we
+/// leave them alone.
+fn attach_console_if_needed() {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        SetStdHandle,
+    };
+
+    // SAFETY: standard console APIs; all failures are non-fatal.
+    unsafe {
+        let have_stdout = GetStdHandle(STD_OUTPUT_HANDLE)
+            .map(|h| !h.is_invalid())
+            .unwrap_or(false);
+        if have_stdout {
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            return;
+        }
+        for std_handle in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            if let Ok(file) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                use std::os::windows::io::AsRawHandle;
+                let raw = file.as_raw_handle() as isize;
+                let _ = SetStdHandle(std_handle, HANDLE(raw as *mut core::ffi::c_void));
+                std::mem::forget(file); // keep the handle open for the process lifetime
+            }
+        }
     }
 }
 
@@ -187,7 +233,7 @@ fn cmd_shell_list() {
 /// Guarded write: set the per-user Shell value to a known target or a raw path.
 fn cmd_shell_set(target: Option<String>) {
     let Some(target) = target else {
-        eprintln!("minicon-winmgr: --shell-set needs a target (explorer|cairo|minicon|<path>)");
+        eprintln!("minicon-winmgr: --shell-set needs a target (explorer|alt|minicon|<path>)");
         std::process::exit(2);
     };
     if !confirmed() {
@@ -221,14 +267,19 @@ fn cmd_shell_set(target: Option<String>) {
 fn resolve_target(target: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
     Ok(match target.to_ascii_lowercase().as_str() {
         "explorer" | "default" | "system" => None,
-        "cairo" => Some(cairo_path()),
+        "alt" | "altshell" => {
+            Some(alt_shell_path().ok_or_else(|| {
+                format!("profile 'alt' needs {ALT_SHELL_ENV}=<path to shell exe>")
+            })?)
+        }
         "minicon" | "minicon-winmgr" => Some(std::env::current_exe()?.display().to_string()),
         _ => Some(target.to_string()),
     })
 }
 
-fn cairo_path() -> String {
-    std::env::var("MINICON_CAIRO_PATH").unwrap_or_else(|_| CAIRO_DEFAULT.to_string())
+/// Path of the alternative shell, from `MINICON_ALT_SHELL` (if set).
+fn alt_shell_path() -> Option<String> {
+    std::env::var(ALT_SHELL_ENV).ok().filter(|p| !p.is_empty())
 }
 
 /// The built-in profile table: (name, resolved Shell value).
@@ -238,7 +289,7 @@ fn builtin_profiles() -> [(&'static str, Option<String>); 3] {
         .map(|p| p.display().to_string());
     [
         ("explorer", None),
-        ("cairo", Some(cairo_path())),
+        ("alt", alt_shell_path()),
         ("minicon", exe),
     ]
 }
@@ -320,7 +371,7 @@ fn print_help() {
            minicon-winmgr                     run the shell (companion mode)\n\
            minicon-winmgr --shell-status      print the per-user Winlogon Shell value\n\
            minicon-winmgr --shell-list        list known shell profiles + current\n\
-           minicon-winmgr --shell-set <t>     set Shell to explorer|cairo|minicon|<path>\n\
+           minicon-winmgr --shell-set <t>     set Shell to explorer|alt|minicon|<path>\n\
                                               (needs {CONFIRM_ENV}=yes)\n\
            minicon-winmgr --shell-replace     set Shell to this exe (needs {CONFIRM_ENV}=yes)\n\
            minicon-winmgr --shell-rollback <value|default>\n\
@@ -340,7 +391,7 @@ fn print_help() {
            MINICON_ACRYLIC=1        use the DWM acrylic backdrop (best-effort)\n\
            MINICON_HEARTBEAT_SECS=N heartbeat/snapshot interval (default 30)\n\
            MINICON_LOG_DIR=path     log directory (default <exe_dir>/logs)\n\
-           MINICON_CAIRO_PATH=path  Cairo Desktop exe path (default {CAIRO_DEFAULT})\n\
+           MINICON_ALT_SHELL=path   exe for the 'alt' shell profile (optional)\n\
            RUST_LOG=...             tracing filter (default info)\n"
     );
 }
