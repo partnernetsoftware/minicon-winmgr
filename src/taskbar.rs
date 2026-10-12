@@ -120,6 +120,13 @@ fn tasks() -> &'static Mutex<Vec<TaskItem>> {
     T.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// Mirrored notification-area icons, refreshed alongside the task list and
+/// rendered by `crate::tray_bar` in the right zone.
+fn tray_icons() -> &'static Mutex<Vec<crate::tray::TrayIcon>> {
+    static T: OnceLock<Mutex<Vec<crate::tray::TrayIcon>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 struct Brushes {
     bg: isize,
     glass: isize,
@@ -382,6 +389,12 @@ pub fn refresh() {
     let n = tasks_now.len();
     *tasks().lock().unwrap() = tasks_now;
 
+    // Refresh the mirrored notification icons and their reserved strip width.
+    let icons = crate::tray::enumerate();
+    let tray_w =
+        crate::tray_bar::strip_width(icons.len(), crate::tray_bar::CELL, crate::tray_bar::GAP);
+    *tray_icons().lock().unwrap() = icons;
+
     let mut bars = bars().lock().unwrap();
     if bars.is_empty() {
         return;
@@ -393,7 +406,7 @@ pub fn refresh() {
         unsafe {
             let _ = GetClientRect(hwnd, &mut client);
         }
-        bar.rects = layout(client.right, n);
+        bar.rects = layout(client.right, n, tray_w);
         if bar.hover.is_some_and(|h| h >= n) {
             bar.hover = None;
         }
@@ -413,13 +426,15 @@ pub fn refresh() {
     );
 }
 
-/// Lays out task buttons across the available width.
-fn layout(client_w: i32, n: usize) -> Vec<RECT> {
+/// Lays out task buttons across the available width, reserving `tray_w` pixels
+/// on the right for the notification-icon strip (plus its trailing margin).
+fn layout(client_w: i32, n: usize, tray_w: i32) -> Vec<RECT> {
     if n == 0 {
         return Vec::new();
     }
     let left = PAD + GRIP;
-    let avail = (client_w - left - PAD - RIGHT_W).max(0);
+    let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
+    let avail = (client_w - left - PAD - RIGHT_W - tray).max(0);
     let total_gap = GAP * (n as i32 - 1);
     let bw = ((avail - total_gap) / n as i32).clamp(BTN_MIN, BTN_MAX);
     (0..n)
@@ -719,6 +734,14 @@ unsafe fn paint(hwnd: HWND) {
             );
         }
 
+        // Notification-icon strip, sitting just left of the status text.
+        let icons = tray_icons().lock().unwrap();
+        if !icons.is_empty() {
+            let tray_right = client.right - PAD - CLOCK_W - 72 - PAD;
+            crate::tray_bar::paint(hdc, BTN_TOP, tray_right, BAR_H - 2 * BTN_TOP, &icons);
+        }
+        drop(icons);
+
         // Right zone: task count + clock, both right-aligned and muted.
         SetTextColor(hdc, COLORREF(theme().muted));
         draw_right(
@@ -890,5 +913,14 @@ mod tests {
     fn backward_wraps_around() {
         assert_eq!(step_index(Some(0), 3, false), Some(2));
         assert_eq!(step_index(Some(2), 3, false), Some(1));
+    }
+
+    #[test]
+    fn tray_strip_shrinks_button_area() {
+        let without = super::layout(420, 2, 0);
+        let with = super::layout(420, 2, 60);
+        assert_eq!(without.len(), 2);
+        assert_eq!(with.len(), 2);
+        assert!(with[1].right < without[1].right);
     }
 }

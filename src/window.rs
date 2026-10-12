@@ -109,6 +109,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::error!(%err, "start menu init failed; continuing without it");
         }
 
+        // Run dialog (Win+R).
+        if let Err(err) = crate::run_dialog::install(hinstance) {
+            tracing::error!(%err, "run dialog init failed; continuing without it");
+        }
+
         // Tray host is inert unless MINICON_TRAY_HOST=1 (replacement mode).
         if let Err(err) = crate::tray_host::install(hinstance) {
             tracing::error!(%err, "tray host install failed; continuing without it");

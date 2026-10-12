@@ -23,7 +23,19 @@ A minimal, reliability-focused Windows shell / session manager written in Rust.
 - **M3 — taskbar host**: self-painted, text-first 36px bar (**shown by default**, `MINICON_NO_TASKBAR=1` to hide) — brand dot, task buttons (hover + active), click-to-focus, task count + clock. Keyboard nav via **Alt+`** then ←/→ + Enter. See [`docs/ui-ux.md`](docs/ui-ux.md).
 - **M4 — session lifecycle**: WTS session-change notifications + `WM_QUERYENDSESSION/ENDSESSION` handling.
 - **M5 — controlled shell switch**: `--shell-status` / `--shell-list` are read-only; writes (`--shell-set` / `--shell-replace` / `--shell-rollback`) require an explicit confirmation token (`MINICON_CONFIRM_SHELL=yes`). Runs in companion mode by default and leaves the registry untouched.
-- **M6/M7 — shell surface**: per-app grouped tasks, one bar per monitor, notification-area mirror + (replacement-mode) tray host, start menu and Alt+Space launcher, AppBar docking.
+- **M6/M7 — shell surface**: per-app grouped tasks, one bar per monitor, notification-area mirror + (replacement-mode) tray host, start menu (apps + Places + power) and Alt+Space launcher, AppBar docking.
+- **M8 — stability + input**: periodic memory/handle/GDI metrics, launch-frequency recents feeding ranking, window-snap hotkeys, Win+R run dialog, and a mirrored tray-icon strip on the bar's right zone.
+
+### Hotkeys
+
+| Keys | Action |
+|------|--------|
+| **Alt+`** | focus the taskbar, then ←/→ + Enter to switch windows, Esc to cancel |
+| **Alt+Space** | jump-to-app launcher (ranked by launch frequency) |
+| **Ctrl+Alt+R** | run dialog (falls back here when another shell already owns **Win+R**) |
+| **Win+←/→/↑** | snap the focused window (best-effort; falls back when taken) |
+
+All hotkeys degrade gracefully with a log line when another shell already owns the combo.
 
 Replacement readiness gate and rollback: [`docs/replacement-readiness.md`](docs/replacement-readiness.md).
 
@@ -74,6 +86,8 @@ Keys: `theme.bg|surface|hover|accent|text|muted` (`#RRGGBB`), `hotkey`, `show_ta
 | `grouping` / `launcher` / `monitor` / `config` | task grouping, Start Menu search, monitors, theme/config |
 | `tray` / `launcher_ui` | M6: notification-area mirror, Alt+Space launcher popup |
 | `tray_host` / `start_menu` | M7: replacement-mode tray host, ORB start menu |
+| `metrics` / `hotkeys` / `recents` | M8: stability sampling, snap hotkeys, launch-frequency store |
+| `run_dialog` / `tray_bar` | M8: Win+R run dialog, tray-icon strip in the bar's right zone |
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, and `cargo test` on Windows.
 
