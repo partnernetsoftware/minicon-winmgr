@@ -117,6 +117,15 @@ fn cmd_launch_run(query: Option<String>) {
 
 /// Normal companion run: single-instance guard, then the message loop.
 fn run_companion() {
+    // When Windows launches us as the login shell there is no console; detach
+    // any inherited console so no stray window appears. CLI subcommands return
+    // before this point, so they keep their console.
+    if shell_registry::is_self_shell() {
+        // SAFETY: FreeConsole is harmless if no console is attached.
+        let _ = unsafe { windows::Win32::System::Console::FreeConsole() };
+        tracing::info!("running as the shell; console detached");
+    }
+
     let _instance = match single_instance::InstanceGuard::acquire("minicon-winmgr.singleton") {
         Ok(guard) => guard,
         Err(err) => {

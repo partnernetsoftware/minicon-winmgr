@@ -155,3 +155,14 @@ fn write_string(value: Option<&str>) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 }
+
+/// True when the per-user `Shell` value points at this executable — i.e. we are
+/// running as the login shell (replacement mode), not as a companion.
+pub fn is_self_shell() -> bool {
+    match current_shell() {
+        Ok(Some(configured)) => std::env::current_exe()
+            .map(|exe| configured.eq_ignore_ascii_case(&exe.display().to_string()))
+            .unwrap_or(false),
+        _ => false,
+    }
+}

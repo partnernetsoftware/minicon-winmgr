@@ -148,18 +148,8 @@ fn host_requested() -> bool {
     match std::env::var("MINICON_TRAY_HOST") {
         Ok(v) if v == "1" => true,
         Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
-        _ => we_are_the_shell(),
+        _ => crate::shell_registry::is_self_shell(),
     }
-}
-
-/// True when the per-user `Shell` value points at this executable.
-fn we_are_the_shell() -> bool {
-    let Ok(Some(configured)) = crate::shell_registry::current_shell() else {
-        return false;
-    };
-    std::env::current_exe()
-        .ok()
-        .is_some_and(|exe| configured.eq_ignore_ascii_case(&exe.display().to_string()))
 }
 
 /// Creates the tray sink window: `Shell_TrayWnd` first, then a private class.
