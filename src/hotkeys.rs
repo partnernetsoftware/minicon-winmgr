@@ -12,7 +12,8 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MOD_WIN, RegisterHotKey, UnregisterHotKey, VK_LEFT, VK_RIGHT, VK_UP,
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_WIN, RegisterHotKey, UnregisterHotKey, VK_LEFT,
+    VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClassNameW, GetForegroundWindow, RegisterClassW,
@@ -63,6 +64,24 @@ pub fn snap_rect(area: (i32, i32, i32, i32), action: Snap) -> (i32, i32, i32, i3
     }
 }
 
+/// Candidate key combinations for `action`, in preference order: the canonical
+/// `Win+*` first, then a `Ctrl+Alt+*` fallback for when another shell (companion
+/// mode) already owns the `Win+*` chord.
+///
+/// Returns `(label, modifiers, virtual-key)` triples. Pure (no Win32); used by
+/// tests to verify that the fallback only swaps modifiers, never the key.
+pub fn combos(action: Snap) -> [(&'static str, HOT_KEY_MODIFIERS, u32); 2] {
+    let (win_label, alt_label, vk) = match action {
+        Snap::Left => ("Win+Left", "Ctrl+Alt+Left", VK_LEFT.0 as u32),
+        Snap::Right => ("Win+Right", "Ctrl+Alt+Right", VK_RIGHT.0 as u32),
+        Snap::Maximize => ("Win+Up", "Ctrl+Alt+Up", VK_UP.0 as u32),
+    };
+    [
+        (win_label, MOD_WIN, vk),
+        (alt_label, MOD_CONTROL | MOD_ALT, vk),
+    ]
+}
+
 /// Installs the window-management hotkeys and prepares their hidden window.
 ///
 /// Registers a private window class and a hidden top-level window, then arms
@@ -103,16 +122,26 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         )?;
         tracing::info!(hwnd = ?hwnd, "snap hotkey window created (hidden)");
 
-        for (id, vk, name) in [
-            (HOTKEY_LEFT, VK_LEFT, "Win+Left"),
-            (HOTKEY_RIGHT, VK_RIGHT, "Win+Right"),
-            (HOTKEY_UP, VK_UP, "Win+Up"),
+        for (id, action) in [
+            (HOTKEY_LEFT, Snap::Left),
+            (HOTKEY_RIGHT, Snap::Right),
+            (HOTKEY_UP, Snap::Maximize),
         ] {
-            match RegisterHotKey(Some(hwnd), id, MOD_WIN, vk.0 as u32) {
-                Ok(()) => tracing::info!(hotkey = name, "snap hotkey registered"),
-                Err(err) => {
-                    tracing::warn!(hotkey = name, %err, "snap hotkey registration failed (taken?)")
+            let mut registered = false;
+            for (label, mods, vk) in combos(action) {
+                match RegisterHotKey(Some(hwnd), id, mods, vk) {
+                    Ok(()) => {
+                        tracing::info!(hotkey = label, "snap hotkey registered");
+                        registered = true;
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!(hotkey = label, %err, "snap hotkey candidate taken")
+                    }
                 }
+            }
+            if !registered {
+                tracing::error!(action = ?action, "snap hotkey unreachable");
             }
         }
     }
@@ -214,7 +243,35 @@ unsafe fn class_name(hwnd: HWND) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Snap, snap_rect};
+    use super::{Snap, combos, snap_rect};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, MOD_WIN};
+
+    #[test]
+    fn combo_primary_uses_win_and_fallback_uses_ctrl_alt() {
+        for action in [Snap::Left, Snap::Right, Snap::Maximize] {
+            let [primary, fallback] = combos(action);
+            assert_eq!(
+                primary.1, MOD_WIN,
+                "primary must use MOD_WIN for {action:?}"
+            );
+            assert_eq!(
+                fallback.1,
+                MOD_CONTROL | MOD_ALT,
+                "fallback must use MOD_CONTROL|MOD_ALT for {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn combo_fallback_shares_the_primary_virtual_key() {
+        for action in [Snap::Left, Snap::Right, Snap::Maximize] {
+            let [primary, fallback] = combos(action);
+            assert_eq!(
+                primary.2, fallback.2,
+                "fallback must reuse the primary VK for {action:?}"
+            );
+        }
+    }
 
     #[test]
     fn maximize_returns_area_unchanged() {

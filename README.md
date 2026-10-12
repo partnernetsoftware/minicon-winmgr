@@ -25,6 +25,7 @@ A minimal, reliability-focused Windows shell / session manager written in Rust.
 - **M5 — controlled shell switch**: `--shell-status` / `--shell-list` are read-only; writes (`--shell-set` / `--shell-replace` / `--shell-rollback`) require an explicit confirmation token (`MINICON_CONFIRM_SHELL=yes`). Runs in companion mode by default and leaves the registry untouched.
 - **M6/M7 — shell surface**: per-app grouped tasks, one bar per monitor, notification-area mirror + (replacement-mode) tray host, start menu (apps + Places + power) and Alt+Space launcher, AppBar docking.
 - **M8 — stability + input**: periodic memory/handle/GDI metrics, launch-frequency recents feeding ranking, window-snap hotkeys, Win+R run dialog, and a mirrored tray-icon strip on the bar's right zone.
+- **M9 — taskbar enhancements**: quick-launch pins (the most-used shortcuts, left of the bar), a window-list button (popup of every task group), and `Win+* → Ctrl+Alt+*` fallback for the snap hotkeys.
 
 ### Hotkeys
 
@@ -33,7 +34,7 @@ A minimal, reliability-focused Windows shell / session manager written in Rust.
 | **Alt+`** | focus the taskbar, then ←/→ + Enter to switch windows, Esc to cancel |
 | **Alt+Space** | jump-to-app launcher (ranked by launch frequency) |
 | **Ctrl+Alt+R** | run dialog (falls back here when another shell already owns **Win+R**) |
-| **Win+←/→/↑** | snap the focused window (best-effort; falls back when taken) |
+| **Win+←/→/↑** | snap the focused window (falls back to **Ctrl+Alt+←/→/↑** when taken) |
 
 All hotkeys degrade gracefully with a log line when another shell already owns the combo.
 
@@ -88,6 +89,7 @@ Keys: `theme.bg|surface|hover|accent|text|muted` (`#RRGGBB`), `hotkey`, `show_ta
 | `tray_host` / `start_menu` | M7: replacement-mode tray host, ORB start menu |
 | `metrics` / `hotkeys` / `recents` | M8: stability sampling, snap hotkeys, launch-frequency store |
 | `run_dialog` / `tray_bar` | M8: Win+R run dialog, tray-icon strip in the bar's right zone |
+| `quick_launch` / `task_list` | M9: pinned quick-launch buttons, window-list popup |
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, and `cargo test` on Windows.
 

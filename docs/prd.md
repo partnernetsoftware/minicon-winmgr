@@ -78,7 +78,8 @@
 │   ├── 启动器        → [H] 检索 + UI ✅ → 频次排序 [L] ✅
 │   ├── 运行对话框    → [M] Win+R（回退 Ctrl+Alt+R）✅
 │   ├── 主菜单        → [N] ORB：应用 + Places + 电源 ✅
-│   └── 窗口管理      → [K] Snap 热键 ✅（补：Win+* 回退待做）
+│   ├── 任务栏增强    → [O] 快速启动（recents 前 N 钉住）✅ + 列表按钮 ✅
+│   └── 窗口管理      → [K] Snap 热键 ✅（含 Win+* → Ctrl+Alt+* 回退）
 └── 部署安全 ✅
     ├── 默认不接管    → companion 模式（贯穿始终）
     └── 可选替换      → [F] 受控 Shell 开关（已试替换并还原）
@@ -86,11 +87,11 @@
 依赖边（DAG）：
   A → B → C → D → F
   B → E
-  C → J, K, L, M, N     （都建立在"窗口感知 + 任务栏"之上）
-  D → I, G              （每屏一栏 / 通知区都是任务栏的多实例化 / 右区扩展）
+  C → J, K, L, M, N, O   （都建立在"窗口感知 + 任务栏"之上）
+  D → I, G, O            （每屏一栏 / 通知区 / 快速启动都是任务栏的分区扩展）
 
-裁剪原则：★ = 外壳功能对齐（[K–N]），因可靠性底座已就位、用户可感知的价值缺口在此；
-剩余次级分支见 plan/plan-shell-gaps.md。
+裁剪原则：★ = 外壳功能对齐（[K–O]），因可靠性底座已就位、用户可感知的价值缺口在此；
+剩余次级分支见 plan/plan-shell-gaps.md（悬停预览、文件夹堆栈、可浏览桌面）。
 ```
 
 ---
@@ -141,10 +142,17 @@ flowchart TD
             F1["Winlogon Shell 注册表<br/>仅当前用户"]
         end
 
-        subgraph ROOM_G["⑦ 外壳体验扩展 (M6) — 新翼★"]
-            G1["系统托盘镜像"]
-            G2["启动器 UI"]
-            G3["多显示器每屏一栏"]
+        subgraph ROOM_G["⑦ 外壳体验扩展 (M6/M7) — 新翼"]
+            G1["系统托盘镜像 + 图标条"]
+            G2["启动器 UI + 运行对话框"]
+            G3["多显示器每屏一栏 / ORB 主菜单"]
+        end
+
+        subgraph ROOM_H["⑧ 任务栏增强 + 稳定性 (M8/M9) — ★当前"]
+            H1["快速启动钉住<br/>(recents 前 N)"]
+            H2["窗口列表按钮"]
+            H3["Snap 热键<br/>(Win+* → Ctrl+Alt+* 回退)"]
+            H4["稳定性指标<br/>metrics"]
         end
     end
 
@@ -153,15 +161,17 @@ flowchart TD
     ROOM_D -.需要窗口层.-> ROOM_E
     ROOM_D ==> ROOM_F
     ROOM_C ==> ROOM_G
+    ROOM_D ==> ROOM_H
 
     classDef done fill:#d4edda,stroke:#2e7d32;
     classDef current fill:#fff3cd,stroke:#f9a825;
     classDef todo fill:#f8f9fa,stroke:#adb5bd;
-    class A1,A2,A3,B1,B2,B3,C1,C2,D1,D2,E1,E2,F1 done;
-    class G1,G2,G3 todo;
+    class A1,A2,A3,B1,B2,B3,C1,C2,D1,D2,E1,E2,F1,G1,G2,G3 done;
+    class H1,H2,H3,H4 current;
 ```
 
-> 图例：绿=已完成（M0–M5 全部）；灰=待办（M6 新翼：托盘镜像 / 启动器 UI / 每屏一栏）。
+> 图例：绿=已完成（M0–M7）；黄=当前推进（M8/M9：任务栏增强 + 稳定性指标）。
+> 剩余次级项（悬停预览 / 文件夹堆栈 / 可浏览桌面）见 `plan/plan-shell-gaps.md`。
 
 ---
 
@@ -202,4 +212,5 @@ flowchart TD
 - [x] M7 替代就绪：AppBar 停靠、`tray_host`（替换模式托盘宿主）、`start_menu`（ORB）。门槛见 `docs/replacement-readiness.md`。
 - [x] M8 稳定性 + 输入：`metrics`（内存/句柄/GDI 周期采样）、`hotkeys`（Win+←/→/↑ Snap）、`recents`（启动频次排序）。
 - [x] 运行对话框 `run_dialog`（Win+R，被占用时回退 Ctrl+Alt+R）；托盘图标条 `tray_bar`（任务栏右区绘制，companion 下无图标则不占位）。
-- [ ] 外壳功能补全（次级，见 `plan/plan-shell-gaps.md`）：任务栏快速启动 / 列表按钮、悬停窗口预览、文件夹堆栈、可浏览桌面。
+- [x] M9 任务栏增强：快速启动 `quick_launch`（把 recents 前 N 名钉到任务栏左侧，无历史则空）、窗口列表按钮 `task_list`（点击弹出全部分组窗口的菜单）；Snap 热键加 `Win+* → Ctrl+Alt+*` 回退。
+- [ ] 外壳功能补全（次级，见 `plan/plan-shell-gaps.md`）：悬停窗口预览、文件夹堆栈、可浏览桌面。

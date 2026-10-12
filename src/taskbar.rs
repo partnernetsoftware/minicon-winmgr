@@ -22,8 +22,8 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
-    DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-    DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
+    DEFAULT_CHARSET, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -58,6 +58,8 @@ const BTN_MIN: i32 = 120;
 const BTN_MAX: i32 = 200;
 const BTN_TOP: i32 = 6;
 const CLOCK_W: i32 = 44;
+/// Width of the window-list button that sits between the pins and the tasks.
+const LIST_W: i32 = 26;
 
 // --- palette defaults live in `config::Theme`; loaded once at startup --------
 fn theme() -> crate::config::Theme {
@@ -106,6 +108,10 @@ struct BarEntry {
     /// Monitor work area this bar is docked to.
     area: (i32, i32, i32, i32),
     rects: Vec<RECT>,
+    /// Quick-launch pin rects (left of the list button).
+    pin_rects: Vec<RECT>,
+    /// Window-list button rect.
+    list_rect: Option<RECT>,
     hover: Option<usize>,
     selected: Option<usize>,
 }
@@ -125,6 +131,12 @@ fn tasks() -> &'static Mutex<Vec<TaskItem>> {
 fn tray_icons() -> &'static Mutex<Vec<crate::tray::TrayIcon>> {
     static T: OnceLock<Mutex<Vec<crate::tray::TrayIcon>>> = OnceLock::new();
     T.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Quick-launch pins (most-used shortcuts), refreshed alongside the task list.
+fn pins() -> &'static Mutex<Vec<crate::quick_launch::Pin>> {
+    static P: OnceLock<Mutex<Vec<crate::quick_launch::Pin>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 struct Brushes {
@@ -395,6 +407,23 @@ pub fn refresh() {
         crate::tray_bar::strip_width(icons.len(), crate::tray_bar::CELL, crate::tray_bar::GAP);
     *tray_icons().lock().unwrap() = icons;
 
+    // Refresh quick-launch pins; task buttons start after them + the list button.
+    let pins_now = crate::quick_launch::pins();
+    let pins_w = if pins_now.is_empty() {
+        0
+    } else {
+        pins_now.len() as i32 * crate::quick_launch::CELL
+            + (pins_now.len() as i32 - 1) * crate::quick_launch::GAP
+    };
+    *pins().lock().unwrap() = pins_now;
+
+    let after_pins = if pins_w > 0 {
+        PAD + GRIP + pins_w + GAP
+    } else {
+        PAD + GRIP
+    };
+    let tasks_left = after_pins + LIST_W + GAP;
+
     let mut bars = bars().lock().unwrap();
     if bars.is_empty() {
         return;
@@ -406,7 +435,21 @@ pub fn refresh() {
         unsafe {
             let _ = GetClientRect(hwnd, &mut client);
         }
-        bar.rects = layout(client.right, n, tray_w);
+        let pin_count = pins().lock().unwrap().len();
+        bar.pin_rects = crate::quick_launch::layout(
+            PAD + GRIP,
+            pin_count,
+            crate::quick_launch::CELL,
+            crate::quick_launch::GAP,
+            BAR_H,
+        );
+        bar.list_rect = Some(RECT {
+            left: after_pins,
+            top: BTN_TOP,
+            right: after_pins + LIST_W,
+            bottom: BAR_H - BTN_TOP,
+        });
+        bar.rects = layout(tasks_left, client.right, n, tray_w);
         if bar.hover.is_some_and(|h| h >= n) {
             bar.hover = None;
         }
@@ -420,19 +463,21 @@ pub fn refresh() {
     }
     tracing::debug!(
         count = n,
+        pins = pins().lock().unwrap().len(),
         bars = bars.len(),
         groups = ?tasks().lock().unwrap().iter().map(|t| format!("{}#{}", t.key, t.label)).collect::<Vec<_>>(),
         "taskbar refreshed"
     );
 }
 
-/// Lays out task buttons across the available width, reserving `tray_w` pixels
-/// on the right for the notification-icon strip (plus its trailing margin).
-fn layout(client_w: i32, n: usize, tray_w: i32) -> Vec<RECT> {
+/// Lays out task buttons starting at `start_left` across the available width,
+/// reserving `tray_w` pixels on the right for the notification-icon strip
+/// (plus its trailing margin).
+fn layout(start_left: i32, client_w: i32, n: usize, tray_w: i32) -> Vec<RECT> {
     if n == 0 {
         return Vec::new();
     }
-    let left = PAD + GRIP;
+    let left = start_left;
     let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
     let avail = (client_w - left - PAD - RIGHT_W - tray).max(0);
     let total_gap = GAP * (n as i32 - 1);
@@ -495,17 +540,50 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONDOWN => {
             let x = get_x(lparam);
+            let y = get_y(lparam);
             // Brand dot opens the start menu.
             if x < PAD + GRIP {
                 crate::start_menu::toggle();
                 return LRESULT(0);
             }
-            let target = {
+            // Snapshot this bar's interactive geometry.
+            let (pin_rects, list_rect, hover) = {
                 let bars = bars().lock().unwrap();
-                let hover = bars.iter().find(|b| b.hwnd == key).and_then(|b| b.hover);
-                drop(bars);
-                hover.and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd))
+                match bars.iter().find(|b| b.hwnd == key) {
+                    Some(b) => (b.pin_rects.clone(), b.list_rect, b.hover),
+                    None => (Vec::new(), None, None),
+                }
             };
+            // Window-list button: popup over every task group.
+            if let Some(r) = list_rect
+                && x >= r.left
+                && x < r.right
+                && y >= r.top
+                && y < r.bottom
+            {
+                let entries: Vec<crate::task_list::Entry> = tasks()
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|t| crate::task_list::Entry {
+                        label: t.label.clone(),
+                        hwnd: t.hwnd,
+                    })
+                    .collect();
+                if let Some(target) = crate::task_list::popup(hwnd, &entries) {
+                    activate(hwnd_from(target));
+                }
+                return LRESULT(0);
+            }
+            // Quick-launch pins.
+            if let Some(i) = crate::quick_launch::hit(&pin_rects, x, y) {
+                let path = pins().lock().unwrap().get(i).map(|p| p.path.clone());
+                if let Some(path) = path {
+                    crate::quick_launch::launch_path(&path);
+                }
+                return LRESULT(0);
+            }
+            let target = hover.and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd));
             if let Some(target) = target {
                 activate(hwnd_from(target));
             }
@@ -678,11 +756,17 @@ unsafe fn paint(hwnd: HWND) {
 
         let fg = GetForegroundWindow().0 as isize;
         let tasks = tasks().lock().unwrap();
-        let (rects, hover, selected) = {
+        let (rects, pin_rects, list_rect, hover, selected) = {
             let bars = bars().lock().unwrap();
             match bars.iter().find(|b| b.hwnd == hwnd.0 as isize) {
-                Some(b) => (b.rects.clone(), b.hover, b.selected),
-                None => (Vec::new(), None, None),
+                Some(b) => (
+                    b.rects.clone(),
+                    b.pin_rects.clone(),
+                    b.list_rect,
+                    b.hover,
+                    b.selected,
+                ),
+                None => (Vec::new(), Vec::new(), None, None, None),
             }
         };
 
@@ -732,6 +816,44 @@ unsafe fn paint(hwnd: HWND) {
                 &mut tr,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
             );
+        }
+
+        // Quick-launch pins: surface squares with the label's first letter.
+        let pin_labels: Vec<String> = pins()
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| p.label.clone())
+            .collect();
+        for (i, r) in pin_rects.iter().enumerate() {
+            FillRect(hdc, r, hbrush(br.surface));
+            if let Some(label) = pin_labels.get(i) {
+                SetTextColor(hdc, COLORREF(theme().text));
+                let head: String = label.chars().take(1).collect();
+                let mut text: Vec<u16> = head.encode_utf16().collect();
+                let mut tr = *r;
+                DrawTextW(
+                    hdc,
+                    &mut text,
+                    &mut tr,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            }
+        }
+
+        // Window-list button: a three-bar "menu" glyph.
+        if let Some(r) = list_rect {
+            FillRect(hdc, &r, hbrush(br.surface));
+            let cx = (r.left + r.right) / 2;
+            for k in -1..=1 {
+                let bar = RECT {
+                    left: cx - 5,
+                    top: BAR_H / 2 + k * 4 - 1,
+                    right: cx + 5,
+                    bottom: BAR_H / 2 + k * 4 + 1,
+                };
+                FillRect(hdc, &bar, hbrush(br.accent));
+            }
         }
 
         // Notification-icon strip, sitting just left of the status text.
@@ -917,8 +1039,8 @@ mod tests {
 
     #[test]
     fn tray_strip_shrinks_button_area() {
-        let without = super::layout(420, 2, 0);
-        let with = super::layout(420, 2, 60);
+        let without = super::layout(22, 420, 2, 0);
+        let with = super::layout(22, 420, 2, 60);
         assert_eq!(without.len(), 2);
         assert_eq!(with.len(), 2);
         assert!(with[1].right < without[1].right);
