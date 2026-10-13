@@ -532,7 +532,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 // Re-arm the debounced preview timer for the new hover target.
                 let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
                 crate::hover_preview::hide();
-                if hover.is_some() {
+                if hover.is_some() && crate::hover_preview::enabled() {
                     let _ = unsafe { SetTimer(Some(hwnd), HOVER_TIMER_ID, HOVER_DELAY_MS, None) };
                 }
             }

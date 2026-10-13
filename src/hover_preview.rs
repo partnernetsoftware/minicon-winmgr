@@ -35,6 +35,15 @@ use crate::win_util::wide;
 pub const PREVIEW_W: i32 = 240;
 pub const PREVIEW_H: i32 = 160;
 
+/// Whether the hover preview is enabled. **Off by default** — the feature is
+/// low-value for most users; opt in with `MINICON_HOVER_PREVIEW=1`.
+pub fn enabled() -> bool {
+    matches!(
+        std::env::var("MINICON_HOVER_PREVIEW").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 /// Vertical gap between the button and the preview.
 const GAP: i32 = 6;
 /// Dark backing colour so letterboxed thumbnails read as a single card.
@@ -169,6 +178,10 @@ pub unsafe fn capture(hwnd: isize, w: i32, h: i32) -> Option<HBITMAP> {
 
 /// Creates the (hidden) preview popup window class + window.
 pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
+    if !enabled() {
+        tracing::info!("hover preview disabled (set MINICON_HOVER_PREVIEW=1 to enable)");
+        return Ok(());
+    }
     if preview().is_some() {
         return Ok(()); // already installed
     }

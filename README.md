@@ -26,7 +26,7 @@ A minimal, reliability-focused Windows shell / session manager written in Rust.
 - **M6/M7 — shell surface**: per-app grouped tasks, one bar per monitor, notification-area mirror + (replacement-mode) tray host, start menu (apps + Places + power) and Alt+Space launcher, AppBar docking.
 - **M8 — stability + input**: periodic memory/handle/GDI metrics, launch-frequency recents feeding ranking, window-snap hotkeys, Win+R run dialog, and a mirrored tray-icon strip on the bar's right zone.
 - **M9 — taskbar enhancements**: quick-launch pins (the most-used shortcuts, left of the bar), a window-list button (popup of every task group), and `Win+* → Ctrl+Alt+*` fallback for the snap hotkeys.
-- **M10 — hover preview**: hovering a task button for ~350ms shows a live thumbnail popup (`PrintWindow`), anchored above the bar and flipped/clamped to the monitor.
+- **M10 — hover preview (opt-in)**: hovering a task button for ~350ms shows a live thumbnail popup (`PrintWindow`), anchored above the bar and flipped/clamped to the monitor. **Off by default**; enable with `MINICON_HOVER_PREVIEW=1`.
 
 ### Hotkeys
 
@@ -70,7 +70,7 @@ Direct binary flags:
 | `--launch-run <query>` | launch the best Start Menu match |
 | `--help` | usage |
 
-Env: `MINICON_NO_TASKBAR=1`, `MINICON_ACRYLIC=1`, `MINICON_HEARTBEAT_SECS=N`, `MINICON_LOG_DIR=path`,
+Env: `MINICON_NO_TASKBAR=1`, `MINICON_ACRYLIC=1`, `MINICON_HOVER_PREVIEW=1`, `MINICON_HEARTBEAT_SECS=N`, `MINICON_LOG_DIR=path`,
 `MINICON_ALT_SHELL=path`, `MINICON_TRAY_HOST=1|0`, `MINICON_CONFIG=path`, `RUST_LOG=...`.
 
 Config file (`minicon.conf`, or `MINICON_CONFIG`): `key=value`, `#`/`;` comments.
