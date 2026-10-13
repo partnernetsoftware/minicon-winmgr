@@ -11,7 +11,7 @@
 //! driven by [`sections`], so replacing the placeholders later is a data change.
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use windows::Win32::Foundation::{
     COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
@@ -19,15 +19,16 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
     DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-    DrawTextW, EndPaint, FillRect, HBRUSH, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics,
-    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT,
-    WNDCLASS_STYLES, WNDCLASSW, WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetForegroundWindow,
+    GetSystemMetrics, IDYES, IsWindowVisible, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_OK, MB_YESNO,
+    MessageBoxW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, ShowWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU,
 };
 use windows::core::PCWSTR;
 
@@ -35,10 +36,12 @@ use crate::win_util::wide;
 
 // --- layout / identity ----------------------------------------------------
 const WIN_W: i32 = 420;
-const WIN_H: i32 = 360;
+const WIN_H: i32 = 420;
 const MARGIN: i32 = 22;
 const TITLE_H: i32 = 30;
 const ROW_H: i32 = 42;
+const ACTION_H: i32 = 30;
+const ACTION_GAP: i32 = 8;
 const FOOTER_H: i32 = 20;
 
 const CLASS_NAME: &str = "minicon_winmgr_settings";
@@ -48,7 +51,6 @@ const WINDOW_TITLE: &str = "设置";
 // Handle stored as `isize`; the message thread is the sole user, so this is
 // safe by construction.
 static SETTINGS: AtomicIsize = AtomicIsize::new(0);
-static VISIBLE: AtomicBool = AtomicBool::new(false);
 
 // --- pure data model (unit-testable, no Win32) ----------------------------
 
@@ -67,6 +69,23 @@ pub fn sections() -> &'static [(&'static str, &'static str)] {
     SECTIONS
 }
 
+/// An actionable row at the bottom of the dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Make this exe the Windows shell (`HKCU\...\Winlogon\Shell`).
+    Replace,
+    /// Restore the previously recorded shell (or the default explorer).
+    Rollback,
+}
+
+/// The action buttons, in display order.
+pub fn actions() -> &'static [(&'static str, Action)] {
+    &[
+        ("替代为 Windows 外壳", Action::Replace),
+        ("回滚到原外壳", Action::Rollback),
+    ]
+}
+
 /// Screen-space origin that centres a `win_w`×`win_h` window. Pure so it can be
 /// unit-tested without any Win32 state.
 fn centered_origin_for(screen_w: i32, screen_h: i32, win_w: i32, win_h: i32) -> (i32, i32) {
@@ -74,6 +93,42 @@ fn centered_origin_for(screen_w: i32, screen_h: i32, win_w: i32, win_h: i32) -> 
         ((screen_w - win_w) / 2).max(0),
         ((screen_h - win_h) / 2).max(0),
     )
+}
+
+/// Top of the first action row, below the placeholder rows.
+fn actions_top() -> i32 {
+    MARGIN + TITLE_H + 8 + sections().len() as i32 * ROW_H + 12
+}
+
+/// Full-width action button rects for `client`, one per [`actions`] entry.
+/// Pure (no Win32) so it can be unit-tested.
+fn action_rects(client: RECT) -> Vec<(RECT, Action)> {
+    let width = (client.right - client.left) - 2 * MARGIN;
+    let top0 = actions_top();
+    actions()
+        .iter()
+        .enumerate()
+        .map(|(i, (_, action))| {
+            let top = top0 + i as i32 * (ACTION_H + ACTION_GAP);
+            (
+                RECT {
+                    left: MARGIN,
+                    top,
+                    right: MARGIN + width,
+                    bottom: top + ACTION_H,
+                },
+                *action,
+            )
+        })
+        .collect()
+}
+
+/// Action whose button contains `(x, y)`, if any.
+fn hit_action(rects: &[(RECT, Action)], x: i32, y: i32) -> Option<Action> {
+    rects
+        .iter()
+        .find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .map(|(_, a)| *a)
 }
 
 fn centered_origin() -> (i32, i32) {
@@ -103,6 +158,13 @@ fn bg_brush() -> isize {
     static B: OnceLock<isize> = OnceLock::new();
     // SAFETY: solid brushes are process-lifetime GDI objects, never freed.
     *B.get_or_init(|| unsafe { CreateSolidBrush(COLORREF(theme().bg)).0 as isize })
+}
+
+/// Accent brush, used for action-button outlines.
+fn accent_brush() -> isize {
+    static B: OnceLock<isize> = OnceLock::new();
+    // SAFETY: solid brushes are process-lifetime GDI objects, never freed.
+    *B.get_or_init(|| unsafe { CreateSolidBrush(COLORREF(theme().accent)).0 as isize })
 }
 
 /// Creates a Segoe UI font at `height` px and `weight` (e.g. 400 normal, 700 bold).
@@ -213,21 +275,27 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Shows or hides the settings window.
+/// Shows or hides the settings window. If it is on screen but not focused,
+/// clicking the button raises it instead of hiding it.
 pub fn toggle() {
-    if visible() {
+    if visible() && is_foreground() {
         hide();
     } else {
         show();
     }
 }
 
-/// Whether the window is currently on screen.
+/// Actual on-screen state (queried from Win32, not a cached flag).
 fn visible() -> bool {
-    VISIBLE.load(Ordering::SeqCst)
+    window().is_some_and(|h| unsafe { IsWindowVisible(h).as_bool() })
 }
 
-/// Shows the window, brings it to the foreground, and repaints it.
+/// Whether the settings window currently owns the foreground.
+fn is_foreground() -> bool {
+    window().is_some_and(|h| unsafe { GetForegroundWindow() == h })
+}
+
+/// Shows the window, forces it to the foreground, and repaints it.
 fn show() {
     let Some(hwnd) = window() else {
         tracing::warn!("settings show ignored: window not installed");
@@ -236,9 +304,9 @@ fn show() {
     // SAFETY: `hwnd` is our live window.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
+        crate::win_util::force_foreground(hwnd);
+        let _ = InvalidateRect(Some(hwnd), None, true);
     }
-    VISIBLE.store(true, Ordering::SeqCst);
     tracing::info!("settings window shown");
 }
 
@@ -249,8 +317,106 @@ fn hide() {
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
-    VISIBLE.store(false, Ordering::SeqCst);
     tracing::debug!("settings window hidden");
+}
+
+/// Path of the file holding the shell value captured before a replacement.
+fn backup_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("shell-backup.txt"))
+}
+
+/// Simple modal message box (OK) for user feedback.
+fn info_box(message: &str) {
+    let text = wide(message);
+    let caption = wide("minicon-winmgr");
+    // SAFETY: both buffers outlive the call; no owner window.
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+/// Runs an action button.
+fn run_action(action: Action) {
+    match action {
+        Action::Replace => do_replace(),
+        Action::Rollback => do_rollback(),
+    }
+}
+
+fn do_replace() {
+    let Ok(exe) = std::env::current_exe() else {
+        info_box("无法获取当前程序路径。");
+        return;
+    };
+    let exe = exe.to_string_lossy().to_string();
+    // Capture the current value once, so rollback can restore it faithfully.
+    match crate::shell_registry::current_shell() {
+        Ok(Some(cur)) if cur == exe => {
+            info_box("已经是我们作为外壳了。");
+            return;
+        }
+        Ok(cur) => {
+            if let (Some(path), Some(value)) = (backup_path(), cur) {
+                let _ = std::fs::write(&path, value);
+                tracing::info!(backup = %path.display(), "shell backup written");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(%err, "could not read current shell; proceeding without backup");
+        }
+    }
+    match crate::shell_registry::replace(&exe) {
+        Ok(()) => {
+            tracing::info!(%exe, "settings: replaced shell");
+            info_box("已设为 Windows 外壳。\n下一次登录（或注销重登）后生效。");
+        }
+        Err(err) => {
+            tracing::warn!(%err, "settings: shell replace failed");
+            info_box(&format!("设置外壳失败：{err}"));
+        }
+    }
+}
+
+fn do_rollback() {
+    let restored = backup_path().and_then(|p| std::fs::read_to_string(p).ok());
+    let restored = restored
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    // Confirm, defaulting to "No" — a wrong rollback needs a re-login to undo.
+    let message = match &restored {
+        Some(v) => format!("回滚外壳到：\n{v}\n\n确定？"),
+        None => "回滚外壳到系统默认（explorer）？\n\n确定？".to_string(),
+    };
+    let text = wide(&message);
+    let caption = wide("回滚外壳");
+    // SAFETY: both buffers outlive the call.
+    let answer = unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2,
+        )
+    };
+    if answer != IDYES {
+        return;
+    }
+    match crate::shell_registry::restore(restored.as_deref()) {
+        Ok(()) => {
+            tracing::info!(?restored, "settings: shell rolled back");
+            info_box("已回滚。注销重登后生效（或立即运行 explorer.exe）。");
+        }
+        Err(err) => {
+            tracing::warn!(%err, "settings: shell rollback failed");
+            info_box(&format!("回滚失败：{err}"));
+        }
+    }
 }
 
 // --- painting -------------------------------------------------------------
@@ -329,6 +495,20 @@ fn paint(hwnd: HWND) {
             top += ROW_H;
         }
 
+        // Action buttons.
+        for (rect, action) in action_rects(client) {
+            FillRect(hdc, &rect, hbrush(bg_brush()));
+            FrameRect(hdc, &rect, hbrush(accent_brush()));
+            let label = actions()
+                .iter()
+                .find(|(_, a)| *a == action)
+                .map(|(l, _)| *l)
+                .unwrap_or("");
+            let mut text_rect = rect;
+            text_rect.left += 12;
+            draw_line(hdc, &text_rect, label, t.text, DT_LEFT);
+        }
+
         // Footer note.
         let footer_rect = RECT {
             left: MARGIN,
@@ -360,6 +540,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         // Background is fully cleared in `WM_PAINT`.
         WM_ERASEBKGND => LRESULT(1),
+        WM_LBUTTONDOWN => {
+            let x = get_x(lparam);
+            let y = get_y(lparam);
+            let mut client = RECT::default();
+            // SAFETY: `hwnd` is live; `client` receives its client rect.
+            let _ = unsafe { GetClientRect(hwnd, &mut client) };
+            if let Some(action) = hit_action(&action_rects(client), x, y) {
+                run_action(action);
+            }
+            LRESULT(0)
+        }
         WM_KEYDOWN if wparam.0 as u16 == VK_ESCAPE.0 => {
             hide();
             LRESULT(0)
@@ -373,7 +564,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             SETTINGS.store(0, Ordering::SeqCst);
-            VISIBLE.store(false, Ordering::SeqCst);
             tracing::info!("settings window destroyed");
             LRESULT(0)
         }
@@ -381,9 +571,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
+fn get_x(lparam: LPARAM) -> i32 {
+    (lparam.0 as usize & 0xFFFF) as u16 as i16 as i32
+}
+
+fn get_y(lparam: LPARAM) -> i32 {
+    ((lparam.0 as usize >> 16) & 0xFFFF) as u16 as i16 as i32
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{centered_origin_for, sections};
+    use super::{Action, action_rects, actions, centered_origin_for, hit_action, sections};
+    use windows::Win32::Foundation::RECT;
 
     #[test]
     fn sections_has_expected_rows() {
@@ -400,11 +599,36 @@ mod tests {
 
     #[test]
     fn centers_window_on_screen() {
-        assert_eq!(centered_origin_for(1920, 1080, 420, 360), (750, 360));
+        assert_eq!(centered_origin_for(1920, 1080, 420, 420), (750, 330));
     }
 
     #[test]
     fn clamps_when_window_larger_than_screen() {
-        assert_eq!(centered_origin_for(400, 300, 420, 360), (0, 0));
+        assert_eq!(centered_origin_for(400, 300, 420, 420), (0, 0));
+    }
+
+    #[test]
+    fn has_replace_and_rollback_actions() {
+        let kinds: Vec<Action> = actions().iter().map(|(_, a)| *a).collect();
+        assert!(kinds.contains(&Action::Replace));
+        assert!(kinds.contains(&Action::Rollback));
+    }
+
+    #[test]
+    fn action_rects_stack_without_overlap_and_hit_test() {
+        let client = RECT {
+            left: 0,
+            top: 0,
+            right: 420,
+            bottom: 420,
+        };
+        let rects = action_rects(client);
+        assert_eq!(rects.len(), actions().len());
+        assert!(rects[0].0.bottom <= rects[1].0.top, "rows must not overlap");
+        // A point inside the first button resolves to its action.
+        let (r0, a0) = rects[0];
+        let mid = ((r0.left + r0.right) / 2, (r0.top + r0.bottom) / 2);
+        assert_eq!(hit_action(&rects, mid.0, mid.1), Some(a0));
+        assert_eq!(hit_action(&rects, 0, 0), None);
     }
 }

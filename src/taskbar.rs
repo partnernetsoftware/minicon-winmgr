@@ -2,7 +2,7 @@
 //!
 //! Design language: `docs/ui-ux.md`. A minimal, text-first, 36px "efficiency
 //! bar": a brand dot, task buttons (hover + active states, click to focus),
-//! and a read-only right zone with task count and clock.
+//! and a read-only right zone holding just the clock.
 //!
 //! Multi-monitor: one bar is created per monitor, docked to that monitor's work
 //! area. The task list is shared; layout, hover, and keyboard cursor are kept
@@ -38,12 +38,12 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    HWND_TOPMOST, IsIconic, IsWindow, KillTimer, MF_STRING, PostMessageW, RegisterClassW,
-    SM_CXSCREEN, SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE,
-    SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_TIMER, WNDCLASS_STYLES,
-    WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    HWND_TOPMOST, IsWindow, KillTimer, MF_STRING, PostMessageW, RegisterClassW, SM_CXSCREEN,
+    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SetForegroundWindow,
+    SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_CLOSE,
+    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE,
+    WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_TIMER, WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -60,7 +60,10 @@ const GAP: i32 = 4;
 const GRIP: i32 = 12;
 /// Width of the settings button (left of the menu button).
 const SETTINGS_W: i32 = 26;
-const RIGHT_W: i32 = 92;
+/// Horizontal space reserved on the right edge for the clock. Task buttons may
+/// never intrude into it. The notification-icon strip is reserved on top of
+/// this (see `layout`), so it never overlaps the clock.
+const RIGHT_W: i32 = CLOCK_W + PAD;
 const BTN_MIN: i32 = 120;
 const BTN_MAX: i32 = 200;
 const BTN_TOP: i32 = 6;
@@ -1040,30 +1043,21 @@ unsafe fn paint(hwnd: HWND) {
             }
         }
 
-        // Notification-icon strip, sitting just left of the status text.
+        // Notification-icon strip, sitting just left of the clock.
         let icons = tray_icons().lock().unwrap();
         if !icons.is_empty() {
-            let tray_right = client.right - PAD - CLOCK_W - 72 - PAD;
+            let tray_right = client.right - PAD - CLOCK_W - PAD;
             crate::tray_bar::paint(hdc, BTN_TOP, tray_right, BAR_H - 2 * BTN_TOP, &icons);
         }
         drop(icons);
 
-        // Right zone: task count + clock, both right-aligned and muted.
+        // Right zone: the clock, right-aligned and muted.
         SetTextColor(hdc, COLORREF(theme().muted));
-        draw_right(
-            hdc,
-            &tasks.len().to_string(),
-            " 任务",
-            client.right - PAD - CLOCK_W - 72,
-            client.right - PAD - CLOCK_W,
-        );
-
         let now = GetLocalTime();
         let clock = format!("{:02}:{:02}", now.wHour, now.wMinute);
         draw_right(
             hdc,
             &clock,
-            "",
             client.right - PAD - CLOCK_W,
             client.right - PAD,
         );
@@ -1073,10 +1067,9 @@ unsafe fn paint(hwnd: HWND) {
     }
 }
 
-/// Draws `text` + `suffix` right-aligned within `[left, right]`.
-unsafe fn draw_right(hdc: HDC, text: &str, suffix: &str, left: i32, right: i32) {
-    let label = format!("{text}{suffix}");
-    let mut buf: Vec<u16> = label.encode_utf16().collect();
+/// Draws `text` right-aligned within `[left, right]`.
+unsafe fn draw_right(hdc: HDC, text: &str, left: i32, right: i32) {
+    let mut buf: Vec<u16> = text.encode_utf16().collect();
     let mut r = RECT {
         left,
         top: 0,
@@ -1168,10 +1161,7 @@ fn activate(target: HWND) {
             tracing::debug!(?target, "activate: target window no longer exists");
             return;
         }
-        if IsIconic(target).as_bool() {
-            let _ = ShowWindow(target, SW_RESTORE);
-        }
-        let _ = SetForegroundWindow(target);
+        crate::win_util::force_foreground(target);
     }
 }
 

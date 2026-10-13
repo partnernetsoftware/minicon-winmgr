@@ -194,6 +194,9 @@ flowchart TD
   - 风险：若进程**崩溃**（非正常退出）不会走 `WM_DESTROY`，工作区会保持收窄（表现为下方留一条空带）。恢复：重启 shell 或手动还原工作区。
 - **任务栏默认每窗口一个按钮**（对齐 Alt+Tab），按 pid 分组是 opt-in：`MINICON_GROUP_TASKS=1`。分组会把同进程多窗口折成 `(+N)`，曾被用户报"任务栏漏窗"。
 - **悬停预览默认关闭**：`MINICON_HOVER_PREVIEW=1` 才启用（用户判定该功能价值低）。
+- **前台锁坑**：任务栏/设置等是 top-most tool window，直接 `SetForegroundWindow` 常被系统前台锁拒绝（点了拉不起来）。统一用 `win_util::force_foreground`：先 `AttachThreadInput` 挂到当前前台线程再 `SetForegroundWindow`，之后脱开。
+- **显隐状态用真实查询**：`settings_ui::toggle` 不能缓存在内存标志里（切走后标志与真实可见性会不一致），改用 `IsWindowVisible` + `GetForegroundWindow`：可见但非前台 → 置前；可见且前台 → 隐藏。
+- **设置窗口含"替代/回滚"**：`do_replace` 先把当前 `Shell` 值备份到 exe 同目录 `shell-backup.txt` 再 `replace`；`do_rollback` 读该备份 `restore(Some)`，无备份则 `restore(None)`（回 explorer），且以 MessageBox 二次确认（默认"否"）。
 
 ---
 
