@@ -191,7 +191,16 @@ fn run_companion() {
     };
     tracing::info!("single-instance guard acquired");
 
-    if let Err(err) = window::run() {
+    // Undo a work area left shrunk by a previous run that was killed before it
+    // could restore it (task manager / `shellctl stop`).
+    crate::taskbar::recover_workarea();
+
+    let result = window::run();
+    // The message loop only closes the message-only window, so the taskbar
+    // windows never see WM_DESTROY and would not restore the reserved work
+    // area. Tear them down explicitly.
+    crate::taskbar::shutdown();
+    if let Err(err) = result {
         tracing::error!(%err, "message loop terminated with error");
         std::process::exit(1);
     }

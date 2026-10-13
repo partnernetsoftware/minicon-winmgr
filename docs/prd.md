@@ -190,8 +190,9 @@ flowchart TD
 - **激活窗口前必须 `IsWindow` 守卫**：句柄可能已关闭并被复用，否则会把前台切到错误窗口（`taskbar::activate` 已加）。
 - **悬停预览禁止在 `WM_MOUSEMOVE` 同步 `PrintWindow`**：用 `WM_TIMER` 节流（350ms），单窗口 show/hide 复用，`HBITMAP` 在 target 变化与 `WM_DESTROY` 时释放（`hover_preview`）。
 - **不改 `Cargo.toml` 的 feature 冻结约定**：禁止用 `windows::core::link!` 绕过未启用 feature，改用语义化 feature（如 `PrintWindow` 需 `Win32_Storage_Xps`）。
-- **AppBar 由 explorer 中转**：`SHAppBarMessage(ABM_NEW)` 需要 explorer 在场做 AppBar broker；explorer 不在（或被杀）时注册失败。因此：① 任务栏定位使用**显示器物理边界 `rcMonitor`**（`monitor::MonitorInfo::bounds`），悬浮时也贴底；② AppBar 失败时**由我们自己 `SPI_SETWORKAREA` 收窄工作区**（保留底边 BAR_H），并在 `WM_DESTROY`（最后一栏销毁）时 `restore_workarea` 还原。→ 无 explorer 也能让最大化窗口不压栏（readiness 门槛 #2）。
-  - 风险：若进程**崩溃**（非正常退出）不会走 `WM_DESTROY`，工作区会保持收窄（表现为下方留一条空带）。恢复：重启 shell 或手动还原工作区。
+- **AppBar 由 explorer 中转**：`SHAppBarMessage(ABM_NEW)` 需要 explorer 在场做 AppBar broker；explorer 不在（或被杀）时注册失败。因此：① 任务栏定位使用**显示器物理边界 `rcMonitor`**（`monitor::MonitorInfo::bounds`），悬浮时也贴底；② AppBar 失败时**由我们自己 `SPI_SETWORKAREA` 收窄工作区**（保留底边 BAR_H），退出时还原。→ 无 explorer 也能让最大化窗口不压栏（readiness 门槛 #2）。
+  - **还原路径（2026-10-13 修复）**：收窄时把 `orig`/`mine` 两个矩形写入 exe 旁的 `minicon-workarea.state`；正常退出由 `taskbar::shutdown()`（在 `run_companion` 里 `window::run()` 之后调用）**主动销毁各栏**触发 `restore_workarea` 并删状态文件——此前只靠栏窗口的 `WM_DESTROY`，而优雅退出走的是 **message-only 窗口**的 `WM_CLOSE`，栏永远收不到 `WM_DESTROY`，退出后工作区不会还原（实测确认）。
+  - **强杀/崩溃兜底**：进程被强杀（任务管理器、`shellctl stop` 的 `Stop-Process -Force`）不执行任何清理，故下次启动由 `taskbar::recover_workarea()` 读状态文件：**仅当**当前工作区仍等于我们上次设的 `mine` 才还原为 `orig`（避免覆盖其它外壳的正常改动），随后清掉状态文件。→ 崩溃后不再残留底部空带。
 - **任务栏默认每窗口一个按钮**（对齐 Alt+Tab），按 pid 分组是 opt-in：`MINICON_GROUP_TASKS=1`。分组会把同进程多窗口折成 `(+N)`，曾被用户报"任务栏漏窗"。
 - **悬停预览默认关闭**：`MINICON_HOVER_PREVIEW=1` 才启用（用户判定该功能价值低）。
 - **前台锁坑**：任务栏/设置等是 top-most tool window，直接 `SetForegroundWindow` 常被系统前台锁拒绝（点了拉不起来）。统一用 `win_util::force_foreground`：先 `AttachThreadInput` 挂到当前前台线程再 `SetForegroundWindow`，之后脱开。

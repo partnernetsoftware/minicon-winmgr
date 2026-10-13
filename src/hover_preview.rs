@@ -196,6 +196,11 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance,
             lpszClassName: PCWSTR(class_name.as_ptr()),
+            hCursor: windows::Win32::UI::WindowsAndMessaging::LoadCursorW(
+                None,
+                windows::Win32::UI::WindowsAndMessaging::IDC_ARROW,
+            )
+            .unwrap_or_default(),
             hbrBackground: background,
             style: WNDCLASS_STYLES::default(),
             ..Default::default()

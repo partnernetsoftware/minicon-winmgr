@@ -14,6 +14,7 @@
 //! GDI/HWND handles are stored as `isize` in process-lifetime statics; the
 //! message thread is the only user, so this is safe by construction.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -109,7 +110,8 @@ static ORIG_WORKAREA: Mutex<Option<RECT>> = Mutex::new(None);
 
 /// Reserves the bottom strip by shrinking the work area so maximized windows
 /// stop above our bar when AppBar docking failed. Captures the original area
-/// once so it can be restored faithfully.
+/// once so it can be restored faithfully, and persists both rectangles so a run
+/// that is *killed* (task manager, `shellctl stop`) can still be recovered.
 fn reserve_workarea(area: (i32, i32, i32, i32)) {
     let (x, y, w, h) = area;
     let mut guard = ORIG_WORKAREA.lock().unwrap();
@@ -143,6 +145,9 @@ fn reserve_workarea(area: (i32, i32, i32, i32)) {
             Some(&mut target as *mut RECT as *mut core::ffi::c_void),
             SPIF_SENDCHANGE,
         );
+        if let Some(orig) = *guard {
+            save_workarea_state(&orig, &target);
+        }
     }
     tracing::info!(bottom = y + h - BAR_H, "work area reserved above the bar");
 }
@@ -163,6 +168,128 @@ fn restore_workarea() {
         }
         tracing::info!("work area restored on teardown");
     }
+    clear_workarea_state();
+}
+
+/// Destroys every taskbar window and restores the reserved work area.
+///
+/// Normal shutdown posts `WM_CLOSE` to the *message-only* window (see
+/// `window`), so the bars never receive `WM_DESTROY` and `restore_workarea`
+/// would not run — the work area would stay shrunk, and the next run would
+/// shrink it again (the screen would creep up, one bar-height per restart).
+/// Call this once the message loop has ended, on the message thread.
+pub fn shutdown() {
+    let handles: Vec<isize> = bars().lock().unwrap().iter().map(|b| b.hwnd).collect();
+    for raw in handles {
+        // SAFETY: `DestroyWindow` runs `WM_DESTROY` synchronously here (same
+        // thread that created the window), which drops the bar and, for the
+        // last one, restores the work area.
+        let _ = unsafe { DestroyWindow(hwnd_from(raw)) };
+    }
+    // Belt and braces: restore even if the windows were already gone.
+    restore_workarea();
+}
+
+// --- work-area state file --------------------------------------------------
+//
+// A hard kill (task manager, `shellctl stop`) never runs our teardown, so the
+// shrunk work area would survive into the next session. We persist the two
+// rectangles and recover on the next start.
+
+/// File recording the work area we shrank and what it was before.
+const WORKAREA_STATE_FILE: &str = "minicon-workarea.state";
+
+fn workarea_state_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join(WORKAREA_STATE_FILE))
+}
+
+fn save_workarea_state(orig: &RECT, mine: &RECT) {
+    let Some(path) = workarea_state_path() else {
+        return;
+    };
+    let body = format!(
+        "orig={},{},{},{}\nmine={},{},{},{}\n",
+        orig.left, orig.top, orig.right, orig.bottom, mine.left, mine.top, mine.right, mine.bottom
+    );
+    if let Err(err) = std::fs::write(&path, body) {
+        tracing::warn!(%err, "could not persist work-area state");
+    }
+}
+
+fn clear_workarea_state() {
+    if let Some(path) = workarea_state_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn parse_rect(s: &str) -> Option<RECT> {
+    let mut it = s.split(',').map(|p| p.trim().parse::<i32>().ok());
+    let (left, top, right, bottom) = (it.next()??, it.next()??, it.next()??, it.next()??);
+    Some(RECT {
+        left,
+        top,
+        right,
+        bottom,
+    })
+}
+
+/// Undoes a work area left shrunk by a previous run that was killed before it
+/// could restore it. Only acts when the *current* work area still equals what
+/// we set, so a change made by another shell is never clobbered.
+pub fn recover_workarea() {
+    let Some(path) = workarea_state_path() else {
+        return;
+    };
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let mut orig = None;
+    let mut mine = None;
+    for line in body.lines() {
+        if let Some(v) = line.strip_prefix("orig=") {
+            orig = parse_rect(v);
+        } else if let Some(v) = line.strip_prefix("mine=") {
+            mine = parse_rect(v);
+        }
+    }
+    let (Some(orig), Some(mine)) = (orig, mine) else {
+        clear_workarea_state();
+        return;
+    };
+    let mut current = RECT::default();
+    // SAFETY: `current` outlives the call.
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut current as *mut RECT as *mut core::ffi::c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok();
+    let still_ours = ok
+        && current.left == mine.left
+        && current.top == mine.top
+        && current.right == mine.right
+        && current.bottom == mine.bottom;
+    if still_ours {
+        let mut r = orig;
+        // SAFETY: `r` outlives the call.
+        let _ = unsafe {
+            SystemParametersInfoW(
+                SPI_SETWORKAREA,
+                0,
+                Some(&mut r as *mut RECT as *mut core::ffi::c_void),
+                SPIF_SENDCHANGE,
+            )
+        };
+        tracing::warn!(
+            bottom = orig.bottom,
+            "recovered work area left shrunk by a previous run"
+        );
+    }
+    clear_workarea_state();
 }
 
 fn hbrush(v: isize) -> HBRUSH {
@@ -329,6 +456,13 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance,
             lpszClassName: PCWSTR(class_name.as_ptr()),
+            // Without a class cursor Windows shows the "app starting" (busy)
+            // cursor on hover; request the plain arrow.
+            hCursor: windows::Win32::UI::WindowsAndMessaging::LoadCursorW(
+                None,
+                windows::Win32::UI::WindowsAndMessaging::IDC_ARROW,
+            )
+            .unwrap_or_default(),
             // No class brush: we fill the whole client in WM_PAINT and handle
             // WM_ERASEBKGND ourselves, so the acrylic "glass" fill isn't erased
             // by an opaque background.
