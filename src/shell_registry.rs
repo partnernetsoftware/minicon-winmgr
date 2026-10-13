@@ -15,8 +15,8 @@ use std::error::Error;
 
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE, RegCloseKey,
-    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_SZ,
+    REG_VALUE_TYPE, RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::core::PCWSTR;
 
@@ -24,6 +24,10 @@ use crate::win_util::wide;
 
 const SUBKEY: &str = r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon";
 const VALUE_NAME: &str = "Shell";
+
+/// Machine-wide Winlogon key, home of `AutoRestartShell`.
+const MACHINE_SUBKEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
+const AUTO_RESTART_VALUE: &str = "AutoRestartShell";
 
 /// Reads the current per-user `Shell` value. `Ok(None)` means the value is not
 /// set (Windows falls back to `explorer.exe`).
@@ -146,10 +150,53 @@ fn write_string(value: Option<&str>) -> Result<(), Box<dyn Error>> {
                 let data = sz_bytes(v);
                 RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_SZ, Some(&data))
             }
-            None => RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_SZ, None),
+            // `None` means "restore the Windows default", so the value must be
+            // *deleted* — writing an empty REG_SZ would leave a broken value.
+            None => {
+                let deleted = RegDeleteValueW(hkey, PCWSTR(name.as_ptr()));
+                if deleted == ERROR_FILE_NOT_FOUND {
+                    ERROR_SUCCESS
+                } else {
+                    deleted
+                }
+            }
         };
         let _ = RegCloseKey(hkey);
 
+        if rc != ERROR_SUCCESS {
+            return Err(format!("RegSetValueExW failed (Win32 error {})", rc.0).into());
+        }
+        Ok(())
+    }
+}
+
+/// Enables or disables the machine-wide shell auto-restart
+/// (`HKLM\...\Winlogon\AutoRestartShell`).
+///
+/// With auto-restart left on, Windows re-launches a shell shortly after the
+/// running one is stopped, which would immediately undo a takeover. The value
+/// lives under `HKLM`, so this needs elevation; callers treat failure as a
+/// warning rather than a hard error.
+pub fn set_auto_restart(enabled: bool) -> Result<(), Box<dyn Error>> {
+    let subkey = wide(MACHINE_SUBKEY);
+    let name = wide(AUTO_RESTART_VALUE);
+    let data = u32::from(enabled).to_le_bytes();
+
+    // SAFETY: buffers outlive their calls; the key is closed before returning.
+    unsafe {
+        let mut hkey = HKEY::default();
+        let rc = RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(subkey.as_ptr()),
+            Some(0),
+            KEY_SET_VALUE,
+            &mut hkey,
+        );
+        if rc != ERROR_SUCCESS {
+            return Err(format!("RegOpenKeyExW(HKLM) failed (Win32 error {})", rc.0).into());
+        }
+        let rc = RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_DWORD, Some(&data));
+        let _ = RegCloseKey(hkey);
         if rc != ERROR_SUCCESS {
             return Err(format!("RegSetValueExW failed (Win32 error {})", rc.0).into());
         }

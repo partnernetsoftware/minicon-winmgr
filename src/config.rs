@@ -1,6 +1,19 @@
-//! Lightweight configuration: theme tokens, hotkey, taskbar visibility.
+//! Lightweight configuration: theme tokens, hotkey, taskbar visibility,
+//! and the taskbar's window-merge policy.
+//!
+//! Two files feed the effective configuration, lowest precedence first:
+//!
+//! 1. `minicon.conf` (hand-written; theme + hotkey). **Never rewritten** — it
+//!    has no writer, so the UI can never clobber a user's comments.
+//! 2. `minicon-settings.txt` (owned by the settings UI; key-level upsert).
+//!
+//! Environment variables sit on top of both (`env > settings > conf > default`)
+//! so debug/compat entry points such as `MINICON_GROUP_TASKS` keep working.
 //!
 //! INTERFACE FROZEN — implement the signatures below; edit only this file.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// Color tokens as `COLORREF`-style `0x00BBGGRR` values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +39,83 @@ impl Default for Theme {
     }
 }
 
+/// How task-window buttons are collapsed on the bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeStrategy {
+    /// One button per window (the default; matches Alt+Tab).
+    Never,
+    /// One button per window until the bar cannot fit them even at the densest
+    /// tier, then fall back to per-application grouping.
+    WhenFull,
+    /// One button per application.
+    Always,
+}
+
+impl MergeStrategy {
+    /// Parses the stored/typed spelling. Returns `None` for unknown values so
+    /// callers can fall back to the default.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "never" | "off" | "no" | "no_merge" => Some(MergeStrategy::Never),
+            "when_full" | "whenfull" | "auto" | "full" => Some(MergeStrategy::WhenFull),
+            "always" | "on" | "yes" | "merge" => Some(MergeStrategy::Always),
+            _ => None,
+        }
+    }
+
+    /// Canonical value written to the settings file.
+    pub fn as_key(self) -> &'static str {
+        match self {
+            MergeStrategy::Never => "never",
+            MergeStrategy::WhenFull => "when_full",
+            MergeStrategy::Always => "always",
+        }
+    }
+
+    /// User-facing label (also used by the settings radios).
+    pub fn label(self) -> &'static str {
+        match self {
+            MergeStrategy::Never => "从不合并",
+            MergeStrategy::WhenFull => "任务栏放不下时合并",
+            MergeStrategy::Always => "始终合并",
+        }
+    }
+}
+
+/// What distinguishes two windows that belong to the same application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupBy {
+    /// The owning executable path (groups Chrome/Electron's per-window
+    /// processes together). Falls back to the pid when the path is unreadable.
+    Exe,
+    /// The owning process id (keeps same-process windows together only).
+    Pid,
+}
+
+impl GroupBy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "exe" | "path" | "app" => Some(GroupBy::Exe),
+            "pid" | "process" | "proc" => Some(GroupBy::Pid),
+            _ => None,
+        }
+    }
+
+    pub fn as_key(self) -> &'static str {
+        match self {
+            GroupBy::Exe => "exe",
+            GroupBy::Pid => "pid",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GroupBy::Exe => "按应用（可执行文件）",
+            GroupBy::Pid => "按进程（pid）",
+        }
+    }
+}
+
 /// Full configuration, with defaults matching `docs/prd_4_1.md`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -33,6 +123,16 @@ pub struct Config {
     /// Hotkey spec, e.g. `"alt+`"`.
     pub hotkey: String,
     pub show_taskbar: bool,
+    /// Whether the mirrored notification-icon strip is drawn in the right zone
+    /// (`taskbar.tray`). Experimental/read-only — the strip currently shows only
+    /// per-process placeholder squares, so it is toggleable but off-meaning.
+    pub show_tray: bool,
+    /// Taskbar window-merge policy (`taskbar.group`).
+    pub merge: MergeStrategy,
+    /// Grouping key when merging (`taskbar.group_by`).
+    pub group_by: GroupBy,
+    /// Hover thumbnail preview (`behavior.hover_preview`); off by default.
+    pub hover_preview: bool,
 }
 
 impl Default for Config {
@@ -41,6 +141,10 @@ impl Default for Config {
             theme: Theme::default(),
             hotkey: "alt+`".to_string(),
             show_taskbar: true,
+            show_tray: true,
+            merge: MergeStrategy::Never,
+            group_by: GroupBy::Exe,
+            hover_preview: false,
         }
     }
 }
@@ -66,8 +170,8 @@ fn parse_color(s: &str) -> Option<u32> {
 /// Parses a boolean value accepting `true/false/1/0/yes/no` (case-insensitive).
 fn parse_bool(s: &str) -> Option<bool> {
     match s.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" => Some(true),
-        "false" | "0" | "no" => Some(false),
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
         _ => None,
     }
 }
@@ -108,12 +212,45 @@ fn apply(cfg: &mut Config, key: &str, value: &str) {
         "hotkey" => {
             cfg.hotkey = value.trim().to_string();
         }
-        "show_taskbar" => {
+        "show_taskbar" | "taskbar.show" => {
             if let Some(b) = parse_bool(value) {
                 cfg.show_taskbar = b;
             }
         }
+        "taskbar.tray" => {
+            if let Some(b) = parse_bool(value) {
+                cfg.show_tray = b;
+            }
+        }
+        "taskbar.group" => {
+            if let Some(m) = MergeStrategy::parse(value) {
+                cfg.merge = m;
+            }
+        }
+        "taskbar.group_by" => {
+            if let Some(g) = GroupBy::parse(value) {
+                cfg.group_by = g;
+            }
+        }
+        "behavior.hover_preview" => {
+            if let Some(b) = parse_bool(value) {
+                cfg.hover_preview = b;
+            }
+        }
         _ => {}
+    }
+}
+
+/// Applies every `key = value` line of `text` onto `cfg` (unknown keys ignored).
+fn apply_text(cfg: &mut Config, text: &str) {
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            apply(cfg, key, value);
+        }
     }
 }
 
@@ -121,34 +258,204 @@ fn apply(cfg: &mut Config, key: &str, value: &str) {
 /// color values may be `0xRRGGBB`.
 pub fn parse(text: &str) -> Config {
     let mut cfg = Config::default();
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            apply(&mut cfg, key, value);
-        }
-    }
+    apply_text(&mut cfg, text);
     cfg
 }
 
-/// Loads configuration, falling back to defaults when absent or invalid.
+/// Applies environment overrides on top of the file-derived configuration.
+fn apply_env(cfg: &mut Config) {
+    if std::env::var_os("MINICON_NO_TASKBAR").is_some() {
+        cfg.show_taskbar = false;
+    }
+    if let Ok(v) = std::env::var("MINICON_TASKBAR")
+        && let Some(b) = parse_bool(&v)
+    {
+        cfg.show_taskbar = b;
+    }
+    // Compat/debug entry point: `MINICON_GROUP_TASKS=1` == `taskbar.group=always`.
+    if let Ok(v) = std::env::var("MINICON_GROUP_TASKS")
+        && let Some(b) = parse_bool(&v)
+    {
+        cfg.merge = if b {
+            MergeStrategy::Always
+        } else {
+            MergeStrategy::Never
+        };
+    }
+    if let Ok(v) = std::env::var("MINICON_GROUP_BY")
+        && let Some(g) = GroupBy::parse(&v)
+    {
+        cfg.group_by = g;
+    }
+    if let Ok(v) = std::env::var("MINICON_HOVER_PREVIEW")
+        && let Some(b) = parse_bool(&v)
+    {
+        cfg.hover_preview = b;
+    }
+    if let Ok(v) = std::env::var("MINICON_TRAY")
+        && let Some(b) = parse_bool(&v)
+    {
+        cfg.show_tray = b;
+    }
+}
+
+fn read_text(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// Hand-written config path: `MINICON_CONFIG` or `<exe_dir>/minicon.conf`.
+fn conf_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("MINICON_CONFIG") {
+        return Some(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("minicon.conf"))
+}
+
+/// Path of the UI-owned settings file: `MINICON_SETTINGS` or
+/// `<exe_dir>/minicon-settings.txt`.
+pub fn settings_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("MINICON_SETTINGS") {
+        return Some(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("minicon-settings.txt"))
+}
+
+/// Loads the effective configuration from the files, then the environment.
+///
+/// Precedence (lowest first): defaults → `minicon.conf` → `minicon-settings.txt`
+/// → environment variables.
 pub fn load() -> Config {
-    let path = if let Some(p) = std::env::var_os("MINICON_CONFIG") {
-        std::path::PathBuf::from(p)
-    } else {
-        match std::env::current_exe() {
-            Ok(exe) => match exe.parent() {
-                Some(dir) => dir.join("minicon.conf"),
-                None => return Config::default(),
-            },
-            Err(_) => return Config::default(),
-        }
+    let mut cfg = match conf_path().as_deref().and_then(read_text) {
+        Some(text) => parse(&text),
+        None => Config::default(),
     };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => parse(&text),
-        Err(_) => Config::default(),
+    if let Some(text) = settings_path().as_deref().and_then(read_text) {
+        apply_text(&mut cfg, &text);
+    }
+    apply_env(&mut cfg);
+    cfg
+}
+
+// --- live configuration ----------------------------------------------------
+// The message thread is the sole writer (settings UI); other modules take a
+// snapshot with [`current`]. This mirrors how the other UI statics are used.
+
+fn runtime() -> &'static Mutex<Config> {
+    static R: OnceLock<Mutex<Config>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(load()))
+}
+
+/// Snapshot of the live configuration (settings UI changes applied).
+pub fn current() -> Config {
+    runtime().lock().unwrap().clone()
+}
+
+/// Replaces the live config and persists the single changed key.
+///
+/// `key`/`value` describe the one field that changed, so persistence is a
+/// key-level upsert that never touches the user's other lines.
+fn update(f: impl FnOnce(&mut Config), key: &str, value: &str) -> bool {
+    let mut guard = runtime().lock().unwrap();
+    let before = guard.clone();
+    f(&mut guard);
+    if *guard == before {
+        return false;
+    }
+    drop(guard);
+    persist(key, value);
+    true
+}
+
+/// Sets the merge policy. Returns whether anything changed.
+pub fn set_merge(m: MergeStrategy) -> bool {
+    update(|c| c.merge = m, "taskbar.group", m.as_key())
+}
+
+/// Sets the grouping key. Returns whether anything changed.
+pub fn set_group_by(g: GroupBy) -> bool {
+    update(|c| c.group_by = g, "taskbar.group_by", g.as_key())
+}
+
+/// Sets taskbar visibility (restart-effective). Returns whether it changed.
+pub fn set_show_taskbar(b: bool) -> bool {
+    update(
+        |c| c.show_taskbar = b,
+        "taskbar.show",
+        if b { "true" } else { "false" },
+    )
+}
+
+/// Sets whether the notification-icon strip is shown (effective immediately).
+/// Returns whether anything changed.
+pub fn set_show_tray(b: bool) -> bool {
+    update(
+        |c| c.show_tray = b,
+        "taskbar.tray",
+        if b { "true" } else { "false" },
+    )
+}
+
+/// Sets the hover-preview preference (effective immediately). Returns whether
+/// anything changed.
+pub fn set_hover_preview(b: bool) -> bool {
+    update(
+        |c| c.hover_preview = b,
+        "behavior.hover_preview",
+        if b { "true" } else { "false" },
+    )
+}
+
+/// Key-level upsert of `key = value` into `text`, preserving every other line
+/// (comments included). Pure, so the round-trip is unit-tested.
+pub fn upsert(text: &str, key: &str, value: &str) -> String {
+    let mut out = String::new();
+    let mut replaced = false;
+    for raw in text.lines() {
+        let is_target = raw
+            .split_once('=')
+            .map(|(k, _)| k.trim() == key)
+            .unwrap_or(false);
+        if is_target {
+            out.push_str(key);
+            out.push_str(" = ");
+            out.push_str(value);
+            out.push('\n');
+            replaced = true;
+        } else {
+            out.push_str(raw);
+            out.push('\n');
+        }
+    }
+    if !replaced {
+        out.push_str(key);
+        out.push_str(" = ");
+        out.push_str(value);
+        out.push('\n');
+    }
+    out
+}
+
+/// Writes one setting to the settings file, backfilling a `.bak` of the prior
+/// contents first. Best effort: failures are logged, never fatal.
+fn persist(key: &str, value: &str) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = upsert(&existing, key, value);
+    if !existing.is_empty() {
+        let mut bak = path.clone().into_os_string();
+        bak.push(".bak");
+        let bak = PathBuf::from(bak);
+        if let Err(err) = std::fs::write(&bak, &existing) {
+            tracing::warn!(path = %bak.display(), %err, "settings backup write failed");
+        }
+    }
+    match std::fs::write(&path, &updated) {
+        Ok(()) => tracing::info!(path = %path.display(), key, value, "setting persisted"),
+        Err(err) => tracing::warn!(path = %path.display(), %err, "setting write failed"),
     }
 }
 
@@ -245,5 +552,102 @@ theme.surface = #2C2626
     #[test]
     fn line_without_equals_is_ignored() {
         assert_eq!(parse("garbage line\n"), Config::default());
+    }
+
+    // --- merge policy ------------------------------------------------------
+
+    #[test]
+    fn merge_defaults_to_never() {
+        assert_eq!(Config::default().merge, MergeStrategy::Never);
+        assert_eq!(Config::default().group_by, GroupBy::Exe);
+    }
+
+    #[test]
+    fn merge_keys_parse() {
+        assert_eq!(parse("taskbar.group = always").merge, MergeStrategy::Always);
+        assert_eq!(
+            parse("taskbar.group = when_full").merge,
+            MergeStrategy::WhenFull
+        );
+        assert_eq!(parse("taskbar.group = never").merge, MergeStrategy::Never);
+        // Unknown value falls back to the default.
+        assert_eq!(
+            parse("taskbar.group = nonsense").merge,
+            MergeStrategy::Never
+        );
+    }
+
+    #[test]
+    fn merge_strategy_round_trips_through_key() {
+        for m in [
+            MergeStrategy::Never,
+            MergeStrategy::WhenFull,
+            MergeStrategy::Always,
+        ] {
+            assert_eq!(MergeStrategy::parse(m.as_key()), Some(m));
+            assert!(!m.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn group_by_keys_parse() {
+        assert_eq!(parse("taskbar.group_by = pid").group_by, GroupBy::Pid);
+        assert_eq!(parse("taskbar.group_by = exe").group_by, GroupBy::Exe);
+        assert_eq!(parse("taskbar.group_by = ???").group_by, GroupBy::Exe);
+        for g in [GroupBy::Exe, GroupBy::Pid] {
+            assert_eq!(GroupBy::parse(g.as_key()), Some(g));
+        }
+    }
+
+    #[test]
+    fn tray_toggle_parses_and_defaults_on() {
+        assert!(Config::default().show_tray);
+        assert!(!parse("taskbar.tray = false\n").show_tray);
+        assert!(parse("taskbar.tray = yes\n").show_tray);
+        // Unknown value leaves the default in place.
+        assert!(parse("taskbar.tray = maybe\n").show_tray);
+    }
+
+    #[test]
+    fn later_file_wins_over_earlier() {
+        // Simulate conf then settings: the settings text is applied last.
+        let mut cfg = parse("taskbar.group = never\n");
+        apply_text(&mut cfg, "taskbar.group = always\n");
+        assert_eq!(cfg.merge, MergeStrategy::Always);
+    }
+
+    // --- persistence -------------------------------------------------------
+
+    #[test]
+    fn upsert_replaces_only_the_target_line() {
+        let text = "# my theme\ntheme.accent = #F58B4C\ntaskbar.group = never\n";
+        let out = upsert(text, "taskbar.group", "always");
+        assert_eq!(
+            out,
+            "# my theme\ntheme.accent = #F58B4C\ntaskbar.group = always\n"
+        );
+        // The comment and the untouched key survive verbatim.
+        assert!(out.contains("# my theme"));
+        assert!(out.contains("theme.accent = #F58B4C"));
+    }
+
+    #[test]
+    fn upsert_appends_when_absent() {
+        let out = upsert("theme.accent = #F58B4C\n", "taskbar.group", "always");
+        assert_eq!(out, "theme.accent = #F58B4C\ntaskbar.group = always\n");
+    }
+
+    #[test]
+    fn upsert_is_idempotent() {
+        let once = upsert("", "taskbar.group", "always");
+        let twice = upsert(&once, "taskbar.group", "always");
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn upsert_round_trips_through_parse() {
+        let text = upsert("# keep me\n", "taskbar.group_by", "pid");
+        let cfg = parse(&text);
+        assert_eq!(cfg.group_by, GroupBy::Pid);
     }
 }

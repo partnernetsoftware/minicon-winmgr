@@ -14,8 +14,17 @@
   - **坑**：`SetWinEventHook` 的 `eventmin ≤ eventmax`，否则直接失败（曾把 0x8000 当 min、0x0017 当 max → 失败）。
 
 ## 2. 稳定性证据（实测）
-- `cargo test` = **97 passed / 0 failed**；`cargo fmt --check` 通过；`cargo clippy --all-targets -- -D warnings` 干净。
+- `cargo test`：**以实测为准（当前 161 passed / 0 failed），改动后不得低于该值**；`cargo fmt --check` 通过；`cargo clippy --all-targets -- -D warnings` 干净。
 - 分钟级采样：`handles` / `gdi_objects` **持平**（无泄漏）。
+- **资源基线（2026-10-13 实测，debug 构建常驻实例）**：工作集 37.6 MB / **私有 14.5 MB** / 句柄 380 / 线程 14；
+  30 秒连续采样**完全平稳**（无泄漏）。横向对比同机：explorer 173.95 MB(ws) / 58.75 MB(私有) / 2012 句柄 / 52 线程；
+  StartMenuExperienceHost 58.17 / 14.31；ShellExperienceHost 50.46 / 10.21。
+  → **minicon 约为 explorer 的 1/4（私有字节）**，与"开始菜单宿主"单进程相当。
+- **为什么工作集不小（重要认知）**：进程加载 68 个模块共约 89 MB 映像，但几乎全是**共享系统 DLL 页**
+  （`windows.storage` 8.5M、`shell32` 7.5M、`d2d1` 5.9M、`uiautomationcore` 4.1M、`combase`、`CoreUIComponents`、
+  `textinputframework`、输入法钩子 `wetype_tip_core.dll`…），由 Shell API / Direct2D / WinRT / IME 钩子带入，
+  **不是本程序私有**。本程序 exe 自身 debug 4.4 MB / **release 1.89 MB**。
+  → 优化方向：**发版用 release**（exe 自身 4.4→1.89 MB），私有字节下降空间有限且已足够低。
 - 优雅退出路径：`message loop exited → work area restored on teardown → stopped`。
 
 ## 3. 工作区自管（无 explorer 也能当唯一 shell）
@@ -56,6 +65,18 @@
    热键不可用（用户无感）。
 7. **任务栏默认每窗口一个按钮**（对齐 Alt+Tab）；分组 `(+N)` 会藏窗口，故分组 opt-in（`MINICON_GROUP_TASKS=1`）。
 8. **悬停预览默认关闭**（用户判定价值低，`MINICON_HOVER_PREVIEW=1` 开）。
+9. **任务按钮位置固定**：按钮顺序按"首次出现"固定，激活窗口不重排。`EnumWindows` 是 **Z 序**（顶层在前），
+   直接当按钮顺序会让按钮"跟着焦点跑"；`refresh()` 经 `stable_order()` 只追加新窗口到最右。
+10. **外壳进程必须"脱附"启动**：拉起 `explorer.exe` 只能用
+    `CreateProcessW(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)` 且**不继承句柄**、用完关闭两个 handle。
+    用 `std::process::Command::spawn` 曾让**调用者自己收到 SIGTERM**（子进程继承管道/控制台，被一起回收）。
+    原因：外壳必须比启动者活得更久。
+11. **还原外壳前必须有"接管记录"，否则拒绝**：`give_back` 读取 exe 旁 `shell-backup.txt`，
+    **文件缺失 = 本程序从未接管过 → 直接返回错误**，绝不改写并非由本程序配置的 `Shell`
+    （曾发生的真实事故：无备份时把 Shell 值删掉，而本机 Shell 本就指向 minicon → 被清空）。
+    备份**只写一次、永不覆盖**，以免重复接管把"原值"冲成自己。
+12. **`Shell` 写 `None` = 删除该值**，不是写空 `REG_SZ`：`shell_registry::write_string(None)` 走
+    `RegDeleteValueW`（`ERROR_FILE_NOT_FOUND` 视为成功）。写空字符串会让 Winlogon 找不到有效外壳。
 
 ## 6. 待加固
 - 长跑观察 ≥ 数小时（成功度量之一）。

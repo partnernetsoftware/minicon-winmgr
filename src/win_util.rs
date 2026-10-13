@@ -96,19 +96,35 @@ pub unsafe fn window_exe_path(hwnd: HWND) -> Option<String> {
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if pid == 0 {
+            tracing::warn!(?hwnd, "window_exe_path: no process id for window");
             return None;
         }
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let process = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(handle) => handle,
+            Err(err) => {
+                tracing::warn!(pid, %err, "window_exe_path: OpenProcess denied");
+                return None;
+            }
+        };
         let mut buf = [0u16; MAX_IMAGE_PATH];
         let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(
+        let queried = QueryFullProcessImageNameW(
             process,
             PROCESS_NAME_WIN32,
             PWSTR(buf.as_mut_ptr()),
             &mut len,
-        )
-        .is_ok();
+        );
         let _ = CloseHandle(process);
-        (ok && len > 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
+        match queried {
+            Ok(()) if len > 0 => Some(String::from_utf16_lossy(&buf[..len as usize])),
+            Ok(()) => {
+                tracing::warn!(pid, "window_exe_path: empty image path");
+                None
+            }
+            Err(err) => {
+                tracing::warn!(pid, %err, "window_exe_path: QueryFullProcessImageNameW failed");
+                None
+            }
+        }
     }
 }

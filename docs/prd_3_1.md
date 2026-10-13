@@ -15,6 +15,23 @@
   最大化窗口仍停在栏上方（见 [`prd_2_1.md`](prd_2_1.md) §3）。
 - 之后按需回滚/保留，`Shell` 现值以 `--shell-status` 为准。
 
+## 1b. 立即接管（本会话，无需注销/重登）
+注册表只在**登录时**被读取，因此"把 `Shell` 指向本程序"本身不会立刻生效。
+`src/shell_swap.rs` 补齐了**当前会话的即时交接**：
+
+- **接管**（`take_over`）：① 首次把原 `Shell` 值备份到 exe 旁 `shell-backup.txt`（**只写一次，永不覆盖**）；
+  ② 写注册表指向本程序（持久意图）；③ 尽力关闭外壳自动重启（HKLM `AutoRestartShell`，**需提权**）；
+  ④ **立即停止本会话正在运行的外壳**：`EnumWindows` 找 `Shell_TrayWnd` / `Shell_SecondaryTrayWnd` / `Progman`
+  → `WM_CLOSE` → 超时 `TerminateProcess`。
+- **归还**（`give_back`）：读备份 → `restore` 注册表 → 重新开启自动重启 → **脱附启动** `explorer.exe`。
+- 只作用于**当前会话桌面**（按顶层窗口枚举，绝不触及其他登录用户）。
+- **脱附启动**：`CreateProcessW(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`，不继承句柄——
+  外壳必须比启动者活得久，否则会被一起回收（早期用 `Command::spawn` 曾让调用者收到 SIGTERM）。
+
+实测（2026-10-13，debug 构建）：备份→写注册表→`stopped 0`（本机无原生外壳窗口，非错误）；
+`give_back` 按备份**精确恢复**注册表值、脱附拉起 explorer（已存在实例时单实例交接、不新增常驻进程）、
+退出码 0、无 SIGTERM。`AutoRestartShell` 因 HKLM 需提权未改动（`Win32 error 5`），属预期。
+
 ## 2. 硬门槛（全绿方可长期保留替换）
 | # | 项 | 状态 | 说明 |
 |---|----|------|------|
@@ -24,27 +41,30 @@
 | 4 | 有开始菜单 / 启动器 | ✅ | `start_menu`（品牌点）+ `launcher_ui`（Alt+Space）+ `run_dialog` |
 | 5 | 会话生命周期 | ✅ | WTS 会话变更 + `WM_QUERYENDSESSION/ENDSESSION` |
 | 6 | 一键回滚 | ✅ | 见下 |
-| 7 | 稳定性长跑 | ⏳ | 需 ≥ 数小时常驻、无 panic / 泄漏 / 卡死 |
+| 7 | 稳定性长跑 | ⏳ | 需 ≥ 数小时常驻、无 panic / 泄漏 / 卡死（**已部分取证**：30 秒连续采样工作集/句柄/线程完全持平，见 [`prd_2_1.md`](prd_2_1.md) §2；数小时长跑仍待观察） |
 
-## 3. 切换流程
+## 3. 切换流程（立即生效）
 1. `--shell-status` 记录当前值。
-2. `--shell-set minicon`（需 `MINICON_CONFIRM_SHELL=yes`）。
-3. 注销 / 重登，确认任务栏 / 托盘 / 开始菜单齐全。
-4. 异常 → 回滚命令。
+2. `--shell-takeover`（需 `MINICON_CONFIRM_SHELL=yes`）：写注册表**并立即停止本会话外壳**，无需注销。
+3. 确认任务栏 / 托盘 / 开始菜单齐全。
+4. 异常 → 归还命令。
 
-## 4. 回滚（任何异常立即执行）
+## 4. 归还 / 回滚（任何异常立即执行）
 ```
-MINICON_CONFIRM_SHELL=yes "<repo>\target\debug\minicon-winmgr.exe" --shell-rollback default
+MINICON_CONFIRM_SHELL=yes "<repo>\target\debug\minicon-winmgr.exe" --shell-give-back
 ```
-- `default` = 删除该值 → 回到系统默认 `explorer.exe`。
-- 或 `--shell-rollback "<切换前记录的值>"` 恢复到替换前的第三方外壳。
-- 登录后没桌面时：`Ctrl+Shift+Esc` → 运行新任务 → 执行上面命令（或直接 `explorer.exe`）。
+- `--shell-give-back`：读 `shell-backup.txt` → 恢复注册表 → 脱附重启 `explorer.exe`，**当前会话立即恢复**。
+  **无备份记录时拒绝执行**（返回错误），绝不改写并非由本程序配置的 `Shell`。
+- 底层等价命令（不带即时交接）：`--shell-rollback default`（删除该值 → 系统默认 `explorer.exe`）；
+  或 `--shell-rollback "<切换前记录的值>"` 恢复到替换前的第三方外壳。
+- 登录后没桌面时：`Ctrl+Shift+Esc` → 运行新任务 → 执行 `explorer.exe`（或上面命令）。
 
 ## 5. GUI 内入口（设置窗）
-`settings_ui` 底部两个动作（`src/settings_ui.rs`）：
-- **替代为 Windows 外壳**：先把当前 `Shell` 值**备份到 exe 旁的 `shell-backup.txt`**，再 `replace`。
-- **回滚到原外壳**：读 `shell-backup.txt` → `restore(Some)`；无备份则 `restore(None)`（回 explorer）。
-  带 **MessageBox 二次确认（默认"否"）**。
+`settings_ui` 底部两个动作（`src/settings_ui.rs`），均**立即生效**：
+- **接管桌面（立即生效）**：先备份当前 `Shell` 到 exe 旁 `shell-backup.txt`（只写一次），
+  再 `replace` 注册表，随后**停止本会话外壳**（见 §1b）。
+- **还原系统桌面（立即生效）**：读 `shell-backup.txt` → `restore` → 重新开启自动重启 → 脱附重启 `explorer.exe`；
+  **无备份则拒绝**。带 **MessageBox 二次确认（默认"否"）**。
 
 ## 6. 开发期热替换
 `scripts/hotswap.py`：Windows 不能覆盖运行中的 exe，但能改名——脚本先**改名移走在跑的 exe**，

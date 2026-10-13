@@ -7,13 +7,27 @@
 
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetWindowRect, MF_STRING,
-    SetForegroundWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS,
-    TrackPopupMenu,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetWindowRect, MF_MENUBARBREAK,
+    MF_STRING, SetForegroundWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TRACK_POPUP_MENU_FLAGS, TrackPopupMenu,
 };
 use windows::core::PCWSTR;
 
 use crate::win_util::wide;
+
+/// Rows per column before the popup wraps into a new column.
+///
+/// A single `TrackPopupMenu` column that runs past the screen bottom is a known
+/// failure mode with 30+ windows. Wrapping into columns at a fixed row count
+/// keeps the popup on screen without any custom scrolling surface. 24 rows at
+/// the default menu item height is comfortably inside a 1080p work area.
+pub const PER_COLUMN: usize = 24;
+
+/// Whether entry `i` starts a new (vertically separated) column. Pure, so the
+/// wrap points are unit-tested.
+fn starts_new_column(i: usize, per_col: usize) -> bool {
+    per_col > 0 && i > 0 && i.is_multiple_of(per_col)
+}
 
 /// One row in the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,8 +54,15 @@ pub fn popup(anchor: HWND, entries: &[Entry]) -> Option<isize> {
 
         for (i, entry) in entries.iter().enumerate() {
             let label = wide(&entry.label);
+            // Wrap into a fresh column every `PER_COLUMN` rows so a long list
+            // never runs off the bottom of the screen (see `starts_new_column`).
+            let flags = if starts_new_column(i, PER_COLUMN) {
+                MF_STRING | MF_MENUBARBREAK
+            } else {
+                MF_STRING
+            };
             // Menu ids are 1-based; `(i + 1)` is at most `entries.len()`.
-            let _ = AppendMenuW(menu, MF_STRING, i + 1, PCWSTR(label.as_ptr()));
+            let _ = AppendMenuW(menu, flags, i + 1, PCWSTR(label.as_ptr()));
         }
 
         // Prefer the cursor; fall back to the bottom-left of the anchor.
@@ -92,10 +113,33 @@ pub fn popup_flags() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{TPM_RETURNCMD, popup_flags};
+    use super::{PER_COLUMN, TPM_RETURNCMD, popup_flags, starts_new_column};
 
     #[test]
     fn flags_include_return_cmd() {
         assert_ne!(popup_flags() & TPM_RETURNCMD.0, 0);
+    }
+
+    #[test]
+    fn first_column_never_breaks() {
+        // The very first row must not start with a column break.
+        assert!(!starts_new_column(0, PER_COLUMN));
+        for i in 1..PER_COLUMN {
+            assert!(!starts_new_column(i, PER_COLUMN));
+        }
+    }
+
+    #[test]
+    fn breaks_land_on_every_column_boundary() {
+        assert!(starts_new_column(PER_COLUMN, PER_COLUMN));
+        assert!(starts_new_column(PER_COLUMN * 2, PER_COLUMN));
+        assert!(starts_new_column(PER_COLUMN * 3, PER_COLUMN));
+        assert!(!starts_new_column(PER_COLUMN + 1, PER_COLUMN));
+    }
+
+    #[test]
+    fn zero_width_column_never_breaks() {
+        // Defensive: a non-positive width would otherwise divide by zero.
+        assert!(!starts_new_column(5, 0));
     }
 }

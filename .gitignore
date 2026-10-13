@@ -2,3 +2,4 @@
 .workbuddy/
 scripts/capture.py
 scripts/hotswap.py
+scripts/*.py

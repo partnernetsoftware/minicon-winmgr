@@ -14,6 +14,7 @@
 //! GDI/HWND handles are stored as `isize` in process-lifetime statics; the
 //! message thread is the only user, so this is safe by construction.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -24,27 +25,30 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
     DEFAULT_CHARSET, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DT_TOP, DT_VCENTER, DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ,
+    InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, RegisterHotKey, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    UnregisterHotKey, VK_ESCAPE, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT,
+    UnregisterHotKey, VIRTUAL_KEY, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_ESCAPE,
+    VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT,
 };
 use windows::Win32::UI::Shell::{
     ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_POSCHANGED, APPBARDATA,
-    SHAppBarMessage,
+    SHAppBarMessage, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyMenu,
-    DestroyWindow, DrawIconEx, GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
-    GetWindowRect, HICON, HWND_TOPMOST, IsWindow, KillTimer, MF_GRAYED, MF_SEPARATOR, MF_STRING,
-    PostMessageW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
-    SWP_NOACTIVATE, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_TIMER,
-    WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    AppendMenuW, CS_DBLCLKS, CreatePopupMenu, CreateWindowExW, DI_NORMAL, DefWindowProcW,
+    DestroyMenu, DestroyWindow, DrawIconEx, GetClientRect, GetCursorPos, GetForegroundWindow,
+    GetSystemMetrics, GetWindowRect, GetWindowTextW, HICON, HWND_TOPMOST, IsWindow, KillTimer,
+    MF_GRAYED, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE, SetForegroundWindow,
+    SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_CLOSE,
+    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_TIMER, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -65,8 +69,25 @@ const SETTINGS_W: i32 = 26;
 /// never intrude into it. The notification-icon strip is reserved on top of
 /// this (see `layout`), so it never overlaps the clock.
 const RIGHT_W: i32 = CLOCK_W + PAD;
-const BTN_MIN: i32 = 120;
-const BTN_MAX: i32 = 200;
+/// Button-width tiers ("density ladder"). The bar starts at [`Density::Full`]
+/// (comfortable buttons carrying a title) and drops to [`Density::Compact`]
+/// (narrower, tighter padding) and finally to [`Density::IconOnly`] (the title
+/// is dropped, the icon grows to fill a square) before any task is pushed
+/// behind the overflow button — "shrink the padding, then the title, and only
+/// then hide it".
+const D0_ENTRY: i32 = 120;
+const D0_FLOOR: i32 = 112;
+const D0_CEIL: i32 = 200;
+/// Up-threshold from `Compact`/`IconOnly` back to `Compact`.
+const D1_ENTRY: i32 = 88;
+const D1_FLOOR: i32 = 80;
+const D1_CEIL: i32 = 119;
+/// `IconOnly` square widths (the tier is entered at 40 and never narrower).
+const D2_FLOOR: i32 = 40;
+const D2_CEIL: i32 = 48;
+/// Icon edge length inside an icon-only square (bigger than the 16px slot the
+/// title-bearing tiers use, within the 20–24 range the PRD allows).
+const ICON_ONLY_SIZE: i32 = 20;
 const BTN_TOP: i32 = 6;
 /// Width of the clock text (`yy-mm-dd HH:MM`).
 const CLOCK_W: i32 = 132;
@@ -81,6 +102,103 @@ const OVERFLOW_W: i32 = 44;
 const ICON_W: i32 = 16;
 const ICON_PAD: i32 = 8;
 const ICON_GAP: i32 = 7;
+
+/// Button-form tier. The first two carry the app icon and title (`Compact`
+/// tightens the padding so more windows fit); `IconOnly` drops the title and
+/// enlarges the icon so the *identity* still survives the squeeze.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Density {
+    /// Comfortable buttons (`D0_*`); the starting tier.
+    #[default]
+    Full,
+    /// Narrower buttons with tighter padding (`D1_*`).
+    Compact,
+    /// Title-less icon squares (`D2_*`), the densest tier before overflow.
+    IconOnly,
+}
+
+impl Density {
+    /// Width at which this tier is abandoned (hysteresis floor).
+    fn floor(self) -> i32 {
+        match self {
+            Density::Full => D0_FLOOR,
+            Density::Compact => D1_FLOOR,
+            Density::IconOnly => D2_FLOOR,
+        }
+    }
+
+    /// Maximum button width in this tier.
+    fn ceil(self) -> i32 {
+        match self {
+            Density::Full => D0_CEIL,
+            Density::Compact => D1_CEIL,
+            Density::IconOnly => D2_CEIL,
+        }
+    }
+
+    /// Icon metrics: `(icon edge, inset from the button's left edge, icon→title
+    /// gap)`. Icon-only inflates the icon to fill its square and ignores the
+    /// inset/gap (it is centred, with no title following it).
+    fn icon_metrics(self) -> (i32, i32, i32) {
+        match self {
+            Density::Full => (ICON_W, ICON_PAD, ICON_GAP),
+            Density::Compact => (ICON_W, 6, 5),
+            Density::IconOnly => (ICON_ONLY_SIZE, 0, 0),
+        }
+    }
+
+    /// Whether this tier drops the title in favour of a centred icon square.
+    fn is_icon_only(self) -> bool {
+        matches!(self, Density::IconOnly)
+    }
+}
+
+/// Per-button width budget: the space each button gets if the `gap`s between
+/// buttons are deducted from `avail`. `i32::MAX` for an empty list.
+fn budget(avail: i32, n: usize, gap: i32) -> i32 {
+    if n == 0 {
+        return i32::MAX;
+    }
+    (avail - gap * (n as i32 - 1)) / n as i32
+}
+
+/// Picks the density tier for `budget`, applying hysteresis against `prev`: the
+/// down-threshold is lower than the up-threshold (an 8px dead zone) so adding or
+/// removing a single window cannot make the whole bar flip between tiers.
+fn density_for(budget: i32, prev: Density) -> Density {
+    match prev {
+        // Down from Full only below the floor; up from Compact only at the entry.
+        Density::Full => {
+            if budget >= D0_FLOOR {
+                Density::Full
+            } else if budget >= D1_FLOOR {
+                Density::Compact
+            } else {
+                Density::IconOnly
+            }
+        }
+        Density::Compact => {
+            if budget >= D0_ENTRY {
+                Density::Full
+            } else if budget >= D1_FLOOR {
+                Density::Compact
+            } else {
+                Density::IconOnly
+            }
+        }
+        // Up from IconOnly: a wide gap back to Full (skipping Compact), but
+        // 88px re-enters Compact; the down-threshold stays 80 (8px dead zone).
+        Density::IconOnly => {
+            if budget >= D0_ENTRY {
+                Density::Full
+            } else if budget >= D1_ENTRY {
+                Density::Compact
+            } else {
+                Density::IconOnly
+            }
+        }
+    }
+}
 
 // --- palette defaults live in `config::Theme`; loaded once at startup --------
 fn theme() -> crate::config::Theme {
@@ -346,6 +464,8 @@ struct BarEntry {
     pin_rects: Vec<RECT>,
     /// Window-list button rect.
     list_rect: Option<RECT>,
+    /// Current button-width tier for this bar (hysteresis state).
+    density: Density,
     hover: Option<usize>,
     /// Quick-launch pin under the cursor, if any.
     pin_hover: Option<usize>,
@@ -374,6 +494,15 @@ fn tray_icons() -> &'static Mutex<Vec<crate::tray::TrayIcon>> {
 fn pins() -> &'static Mutex<Vec<PinItem>> {
     static P: OnceLock<Mutex<Vec<PinItem>>> = OnceLock::new();
     P.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Per-group label anchors: group key → the window handle whose title names the
+/// button. Locked to the first window seen and kept until that window closes, so
+/// activating another member never renames the button (fixes the old
+/// "label follows Z-order" drift).
+fn group_anchors() -> &'static Mutex<HashMap<String, isize>> {
+    static A: OnceLock<Mutex<HashMap<String, isize>>> = OnceLock::new();
+    A.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Left edge of the quick-launch strip, just right of the brand grip.
@@ -434,26 +563,46 @@ fn font() -> isize {
     })
 }
 
-/// Whether the taskbar host should be shown. On by default; disable with
-/// `MINICON_NO_TASKBAR=1` or `MINICON_TASKBAR=0`.
-pub fn enabled() -> bool {
-    if std::env::var_os("MINICON_NO_TASKBAR").is_some() {
-        return false;
-    }
-    match std::env::var("MINICON_TASKBAR") {
-        Ok(v) => !matches!(
-            v.to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        Err(_) => crate::config::load().show_taskbar,
-    }
+/// A smaller variant of [`font`], used for the `(+N)` count badge drawn on an
+/// icon-only square's corner where the 12px face would not fit.
+fn small_font() -> isize {
+    static F: OnceLock<isize> = OnceLock::new();
+    *F.get_or_init(|| {
+        let face = wide("Segoe UI");
+        // SAFETY: `face` outlives the call; the font is process-lifetime.
+        unsafe {
+            CreateFontW(
+                -9,
+                0,
+                0,
+                0,
+                400, // FW_NORMAL
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                0,
+                PCWSTR(face.as_ptr()),
+            )
+            .0 as isize
+        }
+    })
 }
 
-/// Whether task buttons are grouped per process. **Off by default** (one button
-/// per window, matching Alt+Tab); opt in with `MINICON_GROUP_TASKS=1`.
-fn grouping_enabled() -> bool {
-    std::env::var("MINICON_GROUP_TASKS")
-        .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+/// Whether the taskbar host should be shown. On by default; disable via the
+/// settings file (`taskbar.show = false`), `MINICON_NO_TASKBAR=1`, or
+/// `MINICON_TASKBAR=0` (env precedence is resolved inside `config`).
+pub fn enabled() -> bool {
+    crate::config::current().show_taskbar
+}
+
+/// The effective merge policy and grouping key, from the live configuration.
+fn merge_policy() -> (crate::config::MergeStrategy, crate::config::GroupBy) {
+    let cfg = crate::config::current();
+    (cfg.merge, cfg.group_by)
 }
 
 /// Work areas to dock a bar to: one per monitor (primary first), or the full
@@ -498,7 +647,10 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             // WM_ERASEBKGND ourselves, so the acrylic "glass" fill isn't erased
             // by an opaque background.
             hbrBackground: HBRUSH::default(),
-            style: WNDCLASS_STYLES::default(),
+            // `CS_DBLCLKS` is what lets the bar receive `WM_LBUTTONDBLCLK`; the
+            // only double-click action is the clock (date/time settings). Every
+            // other zone keys off `WM_LBUTTONDOWN`, so the extra message is inert.
+            style: CS_DBLCLKS,
             ..Default::default()
         };
         if RegisterClassW(&wnd_class) == 0 {
@@ -578,6 +730,11 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("MINICON_ACRYLIC requested but unavailable; using opaque bar");
         }
     }
+    // The icon-only hover tip is a process-lifetime popup; a failure is
+    // non-fatal (icon-only squares simply show no label).
+    if let Err(err) = crate::bar_tip::install(hinstance) {
+        tracing::warn!(%err, "bar tip install failed");
+    }
     refresh();
     Ok(())
 }
@@ -644,6 +801,205 @@ fn acrylic_requested() -> bool {
     })
 }
 
+/// Keeps task-button positions stable across refreshes.
+///
+/// `EnumWindows` yields windows in **Z-order** (top-most first), so feeding the
+/// fresh enumeration straight into the button list would reshuffle the buttons
+/// every time a window is activated or raised — the order would "follow"
+/// whatever is currently focused. The real taskbar instead keeps a fixed order:
+/// buttons already on screen stay put, and windows seen for the first time are
+/// appended to the right in enumeration order.
+///
+/// Matching is by [`TaskItem::key`] (window handle, or the owning pid when
+/// grouping is enabled).
+fn stable_order(prev: &[TaskItem], current: Vec<TaskItem>) -> Vec<TaskItem> {
+    let mut slots: Vec<Option<TaskItem>> = current.into_iter().map(Some).collect();
+    let mut index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(slots.len());
+    for (i, slot) in slots.iter().enumerate() {
+        // Every slot is `Some` until it is taken below.
+        index.insert(slot.as_ref().unwrap().key.clone(), i);
+    }
+    let mut out = Vec::with_capacity(slots.len());
+    // Survivors: keep the previously-shown order.
+    for p in prev {
+        if let Some(&i) = index.get(p.key.as_str())
+            && let Some(item) = slots[i].take()
+        {
+            out.push(item);
+        }
+    }
+    // Newcomers: append in (Z-order) enumeration order.
+    for slot in slots.iter_mut() {
+        if let Some(item) = slot.take() {
+            out.push(item);
+        }
+    }
+    out
+}
+
+/// Builds one button per window (merge = `never`).
+fn build_ungrouped(windows: Vec<crate::window_snapshot::WindowInfo>) -> Vec<TaskItem> {
+    windows
+        .into_iter()
+        .map(|w| {
+            let h = w.hwnd.0 as isize;
+            TaskItem {
+                key: h.to_string(),
+                hwnd: h,
+                members: vec![h],
+                icon: crate::window_icon::for_window(w.hwnd),
+                label: w.title,
+            }
+        })
+        .collect()
+}
+
+/// The grouping key for one window when grouping by application: its exe path
+/// (lower-cased), or a `pid:<n>` fallback when the image path cannot be read.
+/// `cache` memoises the per-pid lookup within a single refresh.
+fn group_key_for(
+    w: &crate::window_snapshot::WindowInfo,
+    cache: &mut HashMap<u32, String>,
+) -> String {
+    if let Some(v) = cache.get(&w.pid) {
+        return v.clone();
+    }
+    // SAFETY: `w.hwnd` is a live top-level window from our snapshot.
+    let key = unsafe { crate::win_util::window_exe_path(w.hwnd) }
+        .map(|p| p.to_ascii_lowercase())
+        .unwrap_or_else(|| format!("pid:{}", w.pid));
+    cache.insert(w.pid, key.clone());
+    key
+}
+
+/// Picks a group's label anchor: the previous anchor while it is still a live
+/// member, otherwise the first member seen this refresh. Pure so the
+/// "label must not drift" rule is unit-tested.
+fn choose_anchor(prev: Option<isize>, members: &[isize]) -> isize {
+    prev.filter(|a| members.contains(a))
+        .or_else(|| members.first().copied())
+        .unwrap_or(0)
+}
+
+/// A grouped button's label: the anchor title, with `(+N)` when the group holds
+/// more than one window (the only place a count belongs in the UI).
+fn group_label(base: &str, count: usize) -> String {
+    let extra = count.saturating_sub(1);
+    if extra > 0 {
+        format!("{base} (+{extra})")
+    } else {
+        base.to_string()
+    }
+}
+
+/// Builds one button per application group, labelling each with its anchor's
+/// title (see [`group_anchors`]) plus `(+N)` when it holds several windows.
+fn build_grouped(
+    windows: Vec<crate::window_snapshot::WindowInfo>,
+    by: crate::config::GroupBy,
+) -> Vec<TaskItem> {
+    let groups = match by {
+        crate::config::GroupBy::Pid => crate::grouping::group_by_pid(windows),
+        crate::config::GroupBy::Exe => {
+            let mut cache: HashMap<u32, String> = HashMap::new();
+            crate::grouping::group_by(windows, |w| group_key_for(w, &mut cache))
+        }
+    };
+
+    let mut anchors = group_anchors().lock().unwrap();
+    let mut next: HashMap<String, isize> = HashMap::with_capacity(groups.len());
+    let items = groups
+        .into_iter()
+        .map(|group| {
+            let members: Vec<isize> = group.windows.iter().map(|w| w.hwnd.0 as isize).collect();
+            // Keep the previous anchor while it is still alive; otherwise adopt
+            // the first window we see now (which then sticks).
+            let anchor = choose_anchor(anchors.get(&group.key).copied(), &members);
+            next.insert(group.key.clone(), anchor);
+            let anchor_win = group
+                .windows
+                .iter()
+                .find(|w| w.hwnd.0 as isize == anchor)
+                .or_else(|| group.windows.first());
+            let base = anchor_win.map(|w| w.title.clone()).unwrap_or_default();
+            let label = group_label(&base, group.windows.len());
+            TaskItem {
+                key: group.key,
+                hwnd: anchor,
+                members,
+                label,
+                icon: anchor_win
+                    .map(|w| crate::window_icon::for_window(w.hwnd))
+                    .unwrap_or(0),
+            }
+        })
+        .collect();
+    // Forget anchors for groups that vanished; record the current set.
+    *anchors = next;
+    items
+}
+
+/// Client width used to judge overflow for `when_full`: the first bar with a
+/// real width, else the primary screen. Pins are ignored (a slightly
+/// conservative start), so the decision does not wobble as pins change.
+fn reference_client_width() -> i32 {
+    {
+        let bars = bars().lock().unwrap();
+        for b in bars.iter() {
+            let mut r = RECT::default();
+            // SAFETY: `b.hwnd` is a live bar window owned by this process.
+            unsafe {
+                let _ = GetClientRect(hwnd_from(b.hwnd), &mut r);
+            }
+            if r.right > 0 {
+                return r.right;
+            }
+        }
+    }
+    // SAFETY: pure metric query.
+    unsafe { GetSystemMetrics(SM_CXSCREEN) }
+}
+
+/// Room (px) available to the task strip on the reference bar, ignoring pins
+/// (a slightly conservative start, per the PRD): the reference client width
+/// minus the fixed left cluster, the clock zone, and the tray strip.
+fn reference_task_avail(tray_w: i32) -> i32 {
+    let start_left = PAD + SETTINGS_W + GRIP + LIST_W + GAP;
+    let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
+    (reference_client_width() - start_left - PAD - RIGHT_W - tray).max(0)
+}
+
+/// Whether `n` per-window buttons overflow the densest (icon-only) tier given
+/// the strip width `avail`. This is exactly [`layout`]'s overflow test: the
+/// per-button budget falls below the 40px icon-square floor.
+fn overflows(avail: i32, n: usize, gap: i32) -> bool {
+    budget(avail, n, gap) < Density::IconOnly.floor()
+}
+
+/// Whether `n` per-window buttons would spill past the bar even at the densest
+/// tier — the trigger for `when_full` to fall back to grouping.
+fn would_overflow(client_w: i32, n: usize, tray_w: i32) -> bool {
+    let start_left = PAD + SETTINGS_W + GRIP + LIST_W + GAP;
+    let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
+    let avail = (client_w - start_left - PAD - RIGHT_W - tray).max(0);
+    overflows(avail, n, GAP)
+}
+
+/// Whether laying out `n` per-window buttons in `avail` would fall to the
+/// icon-only tier. Under `never` this triggers a *local* fold per application,
+/// so several identical squares (same app, one window each) never appear.
+fn fold_needed(avail: i32, n: usize, gap: i32) -> bool {
+    budget(avail, n, gap) < D1_FLOOR
+}
+
+/// Whether the quick-launch pins must be folded this round: with the pins the
+/// task strip still overflows, but without them it does not. The pin data is
+/// untouched — only its reserved width is dropped.
+fn hide_pins(avail_with_pins: i32, avail_without_pins: i32, n: usize, gap: i32) -> bool {
+    overflows(avail_with_pins, n, gap) && !overflows(avail_without_pins, n, gap)
+}
+
 /// Re-enumerates task windows, recomputes every bar's layout, and repaints.
 pub fn refresh() {
     // Window handles are recycled, so a cached icon may belong to a window that
@@ -652,52 +1008,60 @@ pub fn refresh() {
     crate::window_icon::begin_refresh();
     crate::window_icon::clear_path_icons();
     let windows = crate::window_snapshot::taskbar_windows();
-    // Default: one button per window (matches Alt+Tab). Per-pid grouping is
-    // opt-in via `MINICON_GROUP_TASKS=1`.
-    let tasks_now: Vec<TaskItem> = if grouping_enabled() {
-        crate::grouping::group_by_pid(windows)
-            .into_iter()
-            .map(|group| {
-                let first = group.windows.first();
-                let base = first.map(|w| w.title.clone()).unwrap_or_default();
-                let extra = group.windows.len().saturating_sub(1);
-                let label = if extra > 0 {
-                    format!("{base} (+{extra})")
-                } else {
-                    base
-                };
-                TaskItem {
-                    key: group.key,
-                    hwnd: first.map(|w| w.hwnd.0 as isize).unwrap_or(0),
-                    members: group.windows.iter().map(|w| w.hwnd.0 as isize).collect(),
-                    label,
-                    icon: first
-                        .map(|w| crate::window_icon::for_window(w.hwnd))
-                        .unwrap_or(0),
-                }
-            })
-            .collect()
+
+    // Notification icons first: their reserved strip width feeds the task
+    // layout *and* the `when_full` overflow decision. Hidden entirely when the
+    // user turned the tray off (`taskbar.tray = false`).
+    let show_tray = crate::config::current().show_tray;
+    let icons = if show_tray {
+        crate::tray::enumerate()
     } else {
-        windows
-            .into_iter()
-            .map(|w| TaskItem {
-                key: (w.hwnd.0 as isize).to_string(),
-                hwnd: w.hwnd.0 as isize,
-                members: vec![w.hwnd.0 as isize],
-                icon: crate::window_icon::for_window(w.hwnd),
-                label: w.title,
-            })
-            .collect()
+        Vec::new()
     };
-
-    let n = tasks_now.len();
-    *tasks().lock().unwrap() = tasks_now;
-
-    // Refresh the mirrored notification icons and their reserved strip width.
-    let icons = crate::tray::enumerate();
     let tray_w =
         crate::tray_bar::strip_width(icons.len(), crate::tray_bar::CELL, crate::tray_bar::GAP);
     *tray_icons().lock().unwrap() = icons;
+
+    let ref_avail = reference_task_avail(tray_w);
+    // Conservative fold basis: subtract the pins' width too, so the "would this
+    // land in icon-only?" test matches the *actual* strip when the pins are
+    // shown. Without this, a pin-heavy bar could reach icon-only with per-window
+    // buttons and paint several identical squares for the same application.
+    let raw_pins_w = {
+        let count = crate::quick_launch::pins().len();
+        if count == 0 {
+            0
+        } else {
+            count as i32 * crate::quick_launch::CELL + (count as i32 - 1) * crate::quick_launch::GAP
+        }
+    };
+    let fold_avail = (ref_avail - if raw_pins_w > 0 { raw_pins_w + GAP } else { 0 }).max(0);
+    let (merge, group_by) = merge_policy();
+    let use_grouping = match merge {
+        // `never` normally keeps one button per window — but once the density
+        // would drop to icon-only, identical squares for the same application
+        // become indistinguishable, so the application folds locally (+N).
+        crate::config::MergeStrategy::Never => fold_needed(fold_avail, windows.len(), GAP),
+        crate::config::MergeStrategy::Always => true,
+        // Group only once a per-window bar would overflow at the densest tier.
+        crate::config::MergeStrategy::WhenFull => {
+            would_overflow(reference_client_width(), windows.len(), tray_w)
+        }
+    };
+    let tasks_now = if use_grouping {
+        build_grouped(windows, group_by)
+    } else {
+        build_ungrouped(windows)
+    };
+
+    // EnumWindows is Z-ordered; preserve button positions across refreshes so
+    // activating a window never reshuffles the bar (see `stable_order`).
+    let tasks_now = {
+        let prev = tasks().lock().unwrap();
+        stable_order(prev.as_slice(), tasks_now)
+    };
+    let n = tasks_now.len();
+    *tasks().lock().unwrap() = tasks_now;
 
     // Refresh quick-launch pins; task buttons start after them + the list button.
     // Icons are resolved here (filesystem IO) rather than in `paint`.
@@ -717,6 +1081,12 @@ pub fn refresh() {
     };
     *pins().lock().unwrap() = pins_now;
 
+    // Fold the quick-launch strip this round when it is the sole cause of task
+    // overflow (fold the tray first — it is gone before this; the pins next;
+    // the task strip last). The pin data stays; only its width is dropped.
+    let hide_pins_now = pins_w > 0 && hide_pins(ref_avail - pins_w - GAP, ref_avail, n, GAP);
+    let pins_w = if hide_pins_now { 0 } else { pins_w };
+
     let after_pins = if pins_w > 0 {
         pins_left() + pins_w + GAP
     } else {
@@ -728,31 +1098,40 @@ pub fn refresh() {
     if bars.is_empty() {
         return;
     }
-    for bar in bars.iter_mut() {
+    let mut first_density = Density::Full;
+    for (index, bar) in bars.iter_mut().enumerate() {
         let hwnd = hwnd_from(bar.hwnd);
         let mut client = RECT::default();
         // SAFETY: `hwnd` is a live bar window owned by this process.
         unsafe {
             let _ = GetClientRect(hwnd, &mut client);
         }
-        let pin_count = pins().lock().unwrap().len();
-        bar.pin_rects = crate::quick_launch::layout(
-            pins_left(),
-            pin_count,
-            crate::quick_launch::CELL,
-            crate::quick_launch::GAP,
-            BAR_H,
-        );
+        bar.pin_rects = if hide_pins_now {
+            Vec::new()
+        } else {
+            let pin_count = pins().lock().unwrap().len();
+            crate::quick_launch::layout(
+                pins_left(),
+                pin_count,
+                crate::quick_launch::CELL,
+                crate::quick_launch::GAP,
+                BAR_H,
+            )
+        };
         bar.list_rect = Some(RECT {
             left: after_pins,
             top: BTN_TOP,
             right: after_pins + LIST_W,
             bottom: BAR_H - BTN_TOP,
         });
-        let bl = layout(tasks_left, client.right, n, tray_w);
+        let bl = layout(tasks_left, client.right, n, tray_w, bar.density);
         bar.rects = bl.rects;
         bar.overflow = bl.overflow;
         bar.hidden_from = bl.hidden_from;
+        bar.density = bl.density;
+        if index == 0 {
+            first_density = bar.density;
+        }
         if bar.hover.is_some_and(|h| h >= n) {
             bar.hover = None;
         }
@@ -768,6 +1147,7 @@ pub fn refresh() {
         count = n,
         pins = pins().lock().unwrap().len(),
         bars = bars.len(),
+        density = ?first_density,
         groups = ?tasks().lock().unwrap().iter().map(|t| format!("{}#{}", t.key, t.label)).collect::<Vec<_>>(),
         "taskbar refreshed"
     );
@@ -781,6 +1161,8 @@ struct ButtonLayout {
     overflow: Option<RECT>,
     /// Number of tasks represented by visible buttons (== `rects.len()`).
     hidden_from: usize,
+    /// Density tier chosen for this layout (fed back as the next `prev`).
+    density: Density,
 }
 
 /// One task-button rect at position `i` given a fixed button width.
@@ -797,36 +1179,53 @@ fn rect_at(left: i32, i: usize, bw: i32) -> RECT {
 /// Lays out task buttons starting at `start_left`, reserving `tray_w` pixels on
 /// the right for the notification strip and `RIGHT_W` for the clock.
 ///
-/// Product rule: the right zone (clock) must **never** be overlapped. If all
-/// `n` buttons cannot fit at `BTN_MIN`, we show as many as fit plus an
-/// overflow button (`»`) that opens the full list for the hidden ones.
-fn layout(start_left: i32, client_w: i32, n: usize, tray_w: i32) -> ButtonLayout {
+/// Product rule: the right zone (clock) must **never** be overlapped. The tier
+/// is chosen from the per-button budget with hysteresis against `prev`; if even
+/// the densest tier cannot hold every button, as many as fit are shown in
+/// compact form plus an overflow button (`»`) opening the full list.
+fn layout(start_left: i32, client_w: i32, n: usize, tray_w: i32, prev: Density) -> ButtonLayout {
     if n == 0 {
         return ButtonLayout {
             rects: Vec::new(),
             overflow: None,
             hidden_from: 0,
+            density: prev,
         };
     }
     let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
     let avail = (client_w - start_left - PAD - RIGHT_W - tray).max(0);
-    let gap_total = GAP * (n as i32 - 1);
+    let bud = budget(avail, n, GAP);
+    let density = density_for(bud, prev);
 
-    // All fit at the minimum width → use the proportional width (clamped).
-    if n as i32 * BTN_MIN + gap_total <= avail {
-        let bw = ((avail - gap_total) / n as i32).clamp(BTN_MIN, BTN_MAX);
+    // The whole set fits in the chosen tier → proportional width, clamped to it.
+    if bud >= density.floor() {
+        let bw = bud.clamp(density.floor(), density.ceil());
         let rects = (0..n).map(|i| rect_at(start_left, i, bw)).collect();
         return ButtonLayout {
             rects,
             overflow: None,
             hidden_from: n,
+            density,
         };
     }
 
-    // Overflow: keep full-width buttons at BTN_MIN and add one overflow button.
-    let k = (((avail - OVERFLOW_W - GAP) / (BTN_MIN + GAP)).max(0) as usize).min(n);
-    let rects: Vec<RECT> = (0..k).map(|i| rect_at(start_left, i, BTN_MIN)).collect();
-    let ox = start_left + k as i32 * (BTN_MIN + GAP);
+    // Overflow: as many icon squares as fit, plus one overflow button. Keep at
+    // least one button visible when that does not cross the clock, so an extreme
+    // bar never degrades to a lone `»`. Only the icon-only tier can reach here
+    // (`bud < floor`), so the squares are 40px wide.
+    let bw = density.floor();
+    let room = avail - OVERFLOW_W - GAP;
+    let mut k = if room >= 0 {
+        (room / (bw + GAP)) as usize
+    } else {
+        0
+    };
+    k = k.min(n);
+    if k == 0 && n >= 1 && avail >= bw + GAP + OVERFLOW_W {
+        k = 1;
+    }
+    let rects: Vec<RECT> = (0..k).map(|i| rect_at(start_left, i, bw)).collect();
+    let ox = start_left + k as i32 * (bw + GAP);
     let overflow = (k < n).then(|| RECT {
         left: ox,
         top: BTN_TOP,
@@ -837,6 +1236,7 @@ fn layout(start_left: i32, client_w: i32, n: usize, tray_w: i32) -> ButtonLayout
         rects,
         overflow,
         hidden_from: k,
+        density,
     }
 }
 
@@ -851,7 +1251,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             track_leave(hwnd);
             let x = get_x(lparam);
             let y = get_y(lparam);
-            let (changed, hover) = {
+            let (changed, hover, density) = {
                 let mut bars = bars().lock().unwrap();
                 match bars.iter_mut().find(|b| b.hwnd == key) {
                     Some(bar) => {
@@ -863,17 +1263,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         let changed = hover != bar.hover || pin_hover != bar.pin_hover;
                         bar.hover = hover;
                         bar.pin_hover = pin_hover;
-                        (changed, hover)
+                        (changed, hover, bar.density)
                     }
-                    None => (false, None),
+                    None => (false, None, Density::Full),
                 }
             };
             if changed {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
-                // Re-arm the debounced preview timer for the new hover target.
+                // Re-arm the debounced hover timer for the new target. An
+                // icon-only square shows a title tip; the labelled tiers keep
+                // the (opt-in) thumbnail preview.
                 let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
                 crate::hover_preview::hide();
-                if hover.is_some() && crate::hover_preview::enabled() {
+                crate::bar_tip::hide();
+                let want =
+                    hover.is_some() && (density.is_icon_only() || crate::hover_preview::enabled());
+                if want {
                     let _ = unsafe { SetTimer(Some(hwnd), HOVER_TIMER_ID, HOVER_DELAY_MS, None) };
                 }
             }
@@ -881,21 +1286,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_TIMER if wparam.0 == HOVER_TIMER_ID => {
             let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
-            let hover = bars()
+            let state = bars()
                 .lock()
                 .unwrap()
                 .iter()
                 .find(|b| b.hwnd == key)
-                .and_then(|b| b.hover);
-            if let Some(i) = hover {
+                .and_then(|b| b.hover.map(|i| (i, b.density)));
+            if let Some((i, density)) = state {
                 let btn = bars()
                     .lock()
                     .unwrap()
                     .iter()
                     .find(|b| b.hwnd == key)
                     .and_then(|b| b.rects.get(i).copied());
-                let target = tasks().lock().unwrap().get(i).map(|t| t.hwnd);
-                if let (Some(r), Some(target)) = (btn, target) {
+                if let Some(r) = btn {
                     let mut wr = RECT::default();
                     // SAFETY: `hwnd` is our live bar; converting client→screen.
                     unsafe {
@@ -907,7 +1311,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         right: r.right + wr.left,
                         bottom: r.bottom + wr.top,
                     };
-                    crate::hover_preview::show(target, anchor);
+                    if density.is_icon_only() {
+                        // A title-less square gets a label bubble (always).
+                        if let Some(label) = tasks().lock().unwrap().get(i).map(|t| t.label.clone())
+                        {
+                            crate::bar_tip::show(&label, anchor);
+                        }
+                    } else if crate::hover_preview::enabled()
+                        && let Some(target) = tasks().lock().unwrap().get(i).map(|t| t.hwnd)
+                    {
+                        crate::hover_preview::show(target, anchor);
+                    }
                 }
             }
             LRESULT(0)
@@ -920,6 +1334,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_MOUSELEAVE => {
             let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
             crate::hover_preview::hide();
+            crate::bar_tip::hide();
             let changed = {
                 let mut bars = bars().lock().unwrap();
                 match bars.iter_mut().find(|b| b.hwnd == key) {
@@ -940,6 +1355,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_LBUTTONDOWN => {
             let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
             crate::hover_preview::hide();
+            crate::bar_tip::hide();
             let x = get_x(lparam);
             let y = get_y(lparam);
             // Settings button (leftmost) opens the settings window.
@@ -1017,15 +1433,52 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 return LRESULT(0);
             }
-            let target = hover.and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd));
-            if let Some(target) = target {
-                activate(hwnd_from(target));
+            let target = hover.and_then(|i| {
+                tasks()
+                    .lock()
+                    .unwrap()
+                    .get(i)
+                    .map(|t| (t.hwnd, t.members.clone()))
+            });
+            if let Some((target, members)) = target {
+                let fg = unsafe { GetForegroundWindow() }.0 as isize;
+                // A grouped button whose group already owns the foreground opens
+                // the member list (a second click picks one); otherwise it just
+                // switches back to the group. Locks are released before the
+                // cross-process title queries below.
+                if members.len() > 1 && members.contains(&fg) {
+                    let entries: Vec<crate::task_list::Entry> = members
+                        .iter()
+                        .map(|&h| crate::task_list::Entry {
+                            label: window_title(hwnd_from(h)),
+                            hwnd: h,
+                        })
+                        .collect();
+                    if let Some(sel) = crate::task_list::popup(hwnd, &entries) {
+                        activate(hwnd_from(sel));
+                    }
+                } else if target != 0 {
+                    activate(hwnd_from(target));
+                }
+            }
+            LRESULT(0)
+        }
+        // Double-clicking the clock opens Windows' own date/time settings — the
+        // same destination as a double-click on the stock tray clock. The bar
+        // class carries `CS_DBLCLKS`, so the second press arrives here rather
+        // than as another `WM_LBUTTONDOWN`; nothing else reacts to double-clicks.
+        WM_LBUTTONDBLCLK => {
+            let mut client = RECT::default();
+            let _ = unsafe { GetClientRect(hwnd, &mut client) };
+            if clock_hit(client.right, get_x(lparam)) {
+                open_date_time_settings();
             }
             LRESULT(0)
         }
         WM_RBUTTONDOWN => {
             let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
             crate::hover_preview::hide();
+            crate::bar_tip::hide();
             let x = get_x(lparam);
             let y = get_y(lparam);
             // Hit-test against the live geometry rather than the (possibly
@@ -1045,15 +1498,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let task_hit = rects
                 .iter()
                 .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
+            // Clone the hit item's fields out of the lock before any cross-process
+            // work: `window_menu`/`group_menu` must never run holding a lock.
             let target = task_hit.and_then(|i| {
                 tasks()
                     .lock()
                     .unwrap()
                     .get(i)
-                    .map(|t| (t.hwnd, t.label.clone()))
+                    .map(|t| (t.hwnd, t.label.clone(), t.members.clone()))
             });
-            if let Some((target, label)) = target {
-                window_menu(hwnd, hwnd_from(target), &label);
+            if let Some((target, label, members)) = target {
+                if members.len() > 1 {
+                    group_menu(hwnd, hwnd_from(target), &label, &members);
+                } else {
+                    window_menu(hwnd, hwnd_from(target), &label);
+                }
                 refresh();
             }
             LRESULT(0)
@@ -1085,27 +1544,38 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if n > 0 {
                 let mut bars = bars().lock().unwrap();
                 if let Some(bar) = bars.iter_mut().find(|b| b.hwnd == key) {
-                    match vk {
-                        k if k == VK_LEFT.0 || k == VK_RIGHT.0 => {
-                            bar.selected = step_index(bar.selected, n, k == VK_RIGHT.0);
-                            changed = true;
-                        }
-                        k if k == VK_RETURN.0 => {
-                            let target = bar
-                                .selected
-                                .and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd));
-                            bar.selected = None;
-                            if let Some(target) = target {
-                                drop(bars);
-                                activate(hwnd_from(target));
-                                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
-                                return LRESULT(0);
+                    // Once navigating, `1..9` jump straight to the n-th visible
+                    // button (no activation — `Enter` still does that, matching
+                    // the Left/Right cursor). Ignored outside navigation.
+                    if bar.selected.is_some()
+                        && let Some(i) = digit_index(vk, bar.rects.len())
+                    {
+                        bar.selected = Some(i);
+                        changed = true;
+                        tracing::debug!(index = i, "keyboard digit jump");
+                    } else {
+                        match vk {
+                            k if k == VK_LEFT.0 || k == VK_RIGHT.0 => {
+                                bar.selected = step_index(bar.selected, n, k == VK_RIGHT.0);
+                                changed = true;
                             }
+                            k if k == VK_RETURN.0 => {
+                                let target = bar
+                                    .selected
+                                    .and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd));
+                                bar.selected = None;
+                                if let Some(target) = target {
+                                    drop(bars);
+                                    activate(hwnd_from(target));
+                                    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                                    return LRESULT(0);
+                                }
+                            }
+                            k if k == VK_ESCAPE.0 => {
+                                changed = bar.selected.take().is_some();
+                            }
+                            _ => {}
                         }
-                        k if k == VK_ESCAPE.0 => {
-                            changed = bar.selected.take().is_some();
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -1134,6 +1604,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_KILLFOCUS => {
             let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
             crate::hover_preview::hide();
+            crate::bar_tip::hide();
             let changed = {
                 let mut bars = bars().lock().unwrap();
                 bars.iter_mut()
@@ -1247,7 +1718,7 @@ unsafe fn paint(hwnd: HWND) {
 
         let fg = GetForegroundWindow().0 as isize;
         let tasks = tasks().lock().unwrap();
-        let (rects, overflow, pin_rects, list_rect, hover, pin_hover, selected) = {
+        let (rects, overflow, pin_rects, list_rect, hover, pin_hover, selected, density) = {
             let bars = bars().lock().unwrap();
             match bars.iter().find(|b| b.hwnd == hwnd.0 as isize) {
                 Some(b) => (
@@ -1258,10 +1729,21 @@ unsafe fn paint(hwnd: HWND) {
                     b.hover,
                     b.pin_hover,
                     b.selected,
+                    b.density,
                 ),
-                None => (Vec::new(), None, Vec::new(), None, None, None, None),
+                None => (
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Density::Full,
+                ),
             }
         };
+        let (icon_size, icon_pad, icon_gap) = density.icon_metrics();
 
         for (i, item) in tasks.iter().enumerate() {
             let Some(r) = rects.get(i).copied() else {
@@ -1291,17 +1773,74 @@ unsafe fn paint(hwnd: HWND) {
                 FrameRect(hdc, &r, hbrush(br.accent));
             }
 
-            // Identity slot: the application icon, vertically centred. Drawn at
-            // its natural colors -- it is the one element allowed to be loud,
-            // because it answers "which app" before the title is read.
+            // Identity slot: the application icon. Drawn at its natural colors —
+            // it is the one element allowed to be loud, because it answers
+            // "which app" before the title is read.
             let has_icon = item.icon != 0;
+
+            if density.is_icon_only() {
+                // No title: the icon grows to fill the square, dead-centre.
+                let cx = (r.left + r.right - icon_size) / 2;
+                let cy = (r.top + r.bottom - icon_size) / 2;
+                if has_icon {
+                    // SAFETY: the handle is owned by the target window or its
+                    // class and outlives the call; GDI only reads it.
+                    let _ = DrawIconEx(
+                        hdc,
+                        cx,
+                        cy,
+                        HICON(item.icon as *mut core::ffi::c_void),
+                        icon_size,
+                        icon_size,
+                        0,
+                        None,
+                        DI_NORMAL,
+                    );
+                } else {
+                    // No icon: fall back to the title's initial, centred.
+                    SetTextColor(hdc, COLORREF(theme().text));
+                    let head: String = item.label.chars().take(1).collect();
+                    let mut text: Vec<u16> = head.encode_utf16().collect();
+                    let mut tr = r;
+                    DrawTextW(
+                        hdc,
+                        &mut text,
+                        &mut tr,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    );
+                }
+                // Groups carry a `(+N)` count in the square's top-right corner
+                // (the only place the count is legitimate in icon-only form).
+                if item.members.len() > 1 {
+                    let count = format!("+{}", item.members.len() - 1);
+                    let mut text: Vec<u16> = count.encode_utf16().collect();
+                    let mut tr = RECT {
+                        left: r.left + icon_size / 2,
+                        top: r.top - 1,
+                        right: r.right - 2,
+                        bottom: r.top + 11,
+                    };
+                    let old_small =
+                        SelectObject(hdc, HGDIOBJ(small_font() as *mut core::ffi::c_void));
+                    SetTextColor(hdc, COLORREF(theme().accent));
+                    DrawTextW(
+                        hdc,
+                        &mut text,
+                        &mut tr,
+                        DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX,
+                    );
+                    SelectObject(hdc, old_small);
+                }
+                continue;
+            }
+
             if has_icon {
                 // SAFETY: the handle belongs to the target window or its class
                 // and stays valid for the duration of the call; the icon cache
                 // never destroys what it hands out.
                 let _ = DrawIconEx(
                     hdc,
-                    r.left + ICON_PAD,
+                    r.left + icon_pad,
                     (r.top + r.bottom - ICON_W) / 2,
                     HICON(item.icon as *mut core::ffi::c_void),
                     ICON_W,
@@ -1323,7 +1862,7 @@ unsafe fn paint(hwnd: HWND) {
             let mut text: Vec<u16> = item.label.encode_utf16().collect();
             let mut tr = r;
             tr.left += if has_icon {
-                ICON_PAD + ICON_W + ICON_GAP
+                icon_pad + ICON_W + icon_gap
             } else {
                 9
             };
@@ -1445,6 +1984,53 @@ unsafe fn paint(hwnd: HWND) {
     }
 }
 
+/// The clock's horizontal band inside a bar whose client area is `client_w`
+/// pixels wide. Kept next to the paint code (`WM_PAINT` uses these same two
+/// edges) so the double-click hit test can never drift from what is drawn.
+fn clock_span(client_w: i32) -> (i32, i32) {
+    (client_w - PAD - CLOCK_W, client_w - PAD)
+}
+
+/// Whether client-space `x` falls inside the clock band.
+fn clock_hit(client_w: i32, x: i32) -> bool {
+    let (left, right) = clock_span(client_w);
+    x >= left && x < right
+}
+
+/// Opens Windows' own date/time settings — the classic "Date and Time" dialog
+/// that a double-click on the stock tray clock opens.
+///
+/// Deliberately routed through `control.exe` rather than launching
+/// `timedate.cpl` directly: a bare `.cpl` needs its file association, which is
+/// missing on stripped-down installs and fails with `SE_ERR_NOASSOC` (31) —
+/// as does the `ms-settings:dateandtime` protocol there.
+fn open_date_time_settings() {
+    let verb = wide("open");
+    let file = wide("control.exe");
+    let params = wide("timedate.cpl");
+    // SAFETY: all three wide buffers outlive the call; a null `directory` is
+    // valid for the shell `open` verb.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as isize;
+    if code > 32 {
+        tracing::info!("tray clock: opened date/time settings");
+    } else {
+        tracing::warn!(
+            code,
+            "tray clock: ShellExecuteW(control.exe timedate.cpl) failed"
+        );
+    }
+}
+
 /// Draws `text` right-aligned within `[left, right]`.
 unsafe fn draw_right(hdc: HDC, text: &str, left: i32, right: i32) {
     let mut buf: Vec<u16> = text.encode_utf16().collect();
@@ -1486,6 +2072,46 @@ const MENU_PIN: usize = 5;
 const MENU_OPEN_PIN: usize = 6;
 const MENU_UNPIN: usize = 7;
 
+/// Group right-click ("batch") menu item ids, kept clear of the single-window
+/// ids above so the two menus can never be confused.
+const MENU_GROUP_OPEN_ALL: usize = 8;
+const MENU_GROUP_RESTORE_ALL: usize = 9;
+const MENU_GROUP_MINIMIZE_ALL: usize = 10;
+const MENU_GROUP_CLOSE_ALL: usize = 11;
+const MENU_GROUP_PIN_ALL: usize = 12;
+
+/// A batch operation applied to every window in a grouped button.
+///
+/// The `*All` names are part of the frozen menu contract (and read best next to
+/// the single-window actions), so the shared postfix is deliberate.
+#[allow(clippy::enum_variant_names)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupAction {
+    /// Restore and foreground every member (one `activate`).
+    OpenAll,
+    /// `SW_RESTORE` every member.
+    RestoreAll,
+    /// `SW_MINIMIZE` every member.
+    MinimizeAll,
+    /// `WM_CLOSE` every member.
+    CloseAll,
+    /// Pin the anchor application to quick launch.
+    PinAll,
+}
+
+/// Maps a menu command id to a [`GroupAction`]. Pure, so the id↔action table is
+/// unit-tested and cannot silently drift from what `group_menu` builds.
+fn group_menu_action(id: usize) -> Option<GroupAction> {
+    Some(match id {
+        MENU_GROUP_OPEN_ALL => GroupAction::OpenAll,
+        MENU_GROUP_RESTORE_ALL => GroupAction::RestoreAll,
+        MENU_GROUP_MINIMIZE_ALL => GroupAction::MinimizeAll,
+        MENU_GROUP_CLOSE_ALL => GroupAction::CloseAll,
+        MENU_GROUP_PIN_ALL => GroupAction::PinAll,
+        _ => return None,
+    })
+}
+
 /// Longest label stored for a pin, so a stray title cannot bloat the file.
 const PIN_LABEL_MAX: usize = 60;
 
@@ -1514,6 +2140,7 @@ fn window_menu(owner: HWND, target: HWND, title: &str) {
     let pinned = exe.as_deref().is_some_and(crate::quick_launch::is_pinned);
     // Nothing to pin without a path, and a full strip cannot take more.
     let pin_disabled = exe.is_none() || (!pinned && crate::quick_launch::is_full());
+    tracing::debug!(exe = ?exe, pinned, pin_disabled, "window menu: pin entry state");
 
     // SAFETY: the menu is created and destroyed within this call; `owner` and
     // `target` are live windows owned by this process.
@@ -1586,6 +2213,135 @@ fn window_menu(owner: HWND, target: HWND, title: &str) {
     }
 }
 
+/// Shows the right-click "batch" menu for a grouped button and applies the
+/// choice to every member. `members` is a clone taken before any bar/task lock
+/// was released; `anchor` names the group for labelling and pinning.
+fn group_menu(owner: HWND, anchor: HWND, label: &str, members: &[isize]) {
+    // Resolve the anchor's image path before building the menu: a cross-process
+    // query wants no locks held.
+    // SAFETY: `anchor` is a live task window from our list.
+    let exe = unsafe { crate::win_util::window_exe_path(anchor) };
+    let pinned = exe.as_deref().is_some_and(crate::quick_launch::is_pinned);
+    let pin_disabled = exe.is_none() || (!pinned && crate::quick_launch::is_full());
+
+    // SAFETY: the menu is created and destroyed within this call; `owner` is a
+    // live bar window owned by this process.
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let open_all = wide("打开组内全部窗口");
+        let restore_all = wide("全部还原");
+        let minimize_all = wide("全部最小化");
+        let close_all = wide("全部关闭");
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            MENU_GROUP_OPEN_ALL,
+            PCWSTR(open_all.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            MENU_GROUP_RESTORE_ALL,
+            PCWSTR(restore_all.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            MENU_GROUP_MINIMIZE_ALL,
+            PCWSTR(minimize_all.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            MENU_GROUP_CLOSE_ALL,
+            PCWSTR(close_all.as_ptr()),
+        );
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let pin_text = wide("添加到快速启动");
+        let pin_flags = if pin_disabled {
+            MF_STRING | MF_GRAYED
+        } else {
+            MF_STRING
+        };
+        let _ = AppendMenuW(
+            menu,
+            pin_flags,
+            MENU_GROUP_PIN_ALL,
+            PCWSTR(pin_text.as_ptr()),
+        );
+
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        // Required so the popup dismisses correctly when clicking away.
+        let _ = SetForegroundWindow(owner);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            Some(0),
+            owner,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+
+        let Some(action) = group_menu_action((cmd.0 & 0xFFFF) as usize) else {
+            return;
+        };
+        tracing::info!(?action, members = members.len(), "group menu action");
+        match action {
+            GroupAction::OpenAll => {
+                // Restore every member, then foreground the last one so the
+                // whole group comes forward without flashing a window per step.
+                let mut last = 0;
+                for &m in members {
+                    let h = hwnd_from(m);
+                    if IsWindow(Some(h)).as_bool() {
+                        let _ = ShowWindow(h, SW_RESTORE);
+                        last = m;
+                    }
+                }
+                if last != 0 {
+                    activate(hwnd_from(last));
+                }
+            }
+            GroupAction::RestoreAll => {
+                for &m in members {
+                    let h = hwnd_from(m);
+                    if IsWindow(Some(h)).as_bool() {
+                        let _ = ShowWindow(h, SW_RESTORE);
+                    }
+                }
+            }
+            GroupAction::MinimizeAll => {
+                for &m in members {
+                    let h = hwnd_from(m);
+                    if IsWindow(Some(h)).as_bool() {
+                        let _ = ShowWindow(h, SW_MINIMIZE);
+                    }
+                }
+            }
+            GroupAction::CloseAll => {
+                for &m in members {
+                    let h = hwnd_from(m);
+                    if IsWindow(Some(h)).as_bool() {
+                        let _ = PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            GroupAction::PinAll => match exe {
+                // Silently fails (and logs) when the strip is full or already
+                // holds this application.
+                Some(path) if !crate::quick_launch::add(label, &path) => {
+                    tracing::debug!(path, "group menu: pin skipped (duplicate or full)")
+                }
+                Some(_) => refresh(),
+                None => tracing::debug!("group menu: pin skipped (no exe path)"),
+            },
+        }
+    }
+}
+
 /// Shows the right-click menu for the quick-launch pin at `index`: open it, or
 /// drop it from the strip.
 fn pin_menu(owner: HWND, index: usize) {
@@ -1643,10 +2399,22 @@ fn activate(target: HWND) {
     }
 }
 
+/// Current title of a live top-level window (empty when unavailable). Used to
+/// build the member list of a grouped button.
+fn window_title(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    // SAFETY: `buf` outlives the call; `hwnd` comes from our task list.
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if len <= 0 {
+        String::new()
+    } else {
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
 fn get_x(lparam: LPARAM) -> i32 {
     (lparam.0 as usize & 0xFFFF) as u16 as i16 as i32
 }
-
 fn get_y(lparam: LPARAM) -> i32 {
     ((lparam.0 as usize >> 16) & 0xFFFF) as u16 as i16 as i32
 }
@@ -1667,9 +2435,93 @@ fn step_index(current: Option<usize>, n: usize, forward: bool) -> Option<usize> 
     }
 }
 
+/// `VK_1..VK_9`, in order, so `position` yields the intended button index
+/// (digit `1` → index `0`).
+const DIGIT_VKS: [VIRTUAL_KEY; 9] = [VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9];
+
+/// Keyboard `1..9` jump: maps a virtual key to the first nine buttons. `None`
+/// for any other key, and for a digit with no visible button behind it.
+fn digit_index(vk: u16, visible: usize) -> Option<usize> {
+    let i = DIGIT_VKS.iter().position(|k| k.0 == vk)?;
+    (i < visible).then_some(i)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::step_index;
+    use super::{
+        Density, GroupAction, budget, choose_anchor, density_for, digit_index, fold_needed,
+        group_label, group_menu_action, hide_pins, layout, overflows, stable_order, step_index,
+    };
+
+    /// Minimal task item carrying just the fields `stable_order` looks at.
+    fn item(key: &str) -> super::TaskItem {
+        super::TaskItem {
+            key: key.to_string(),
+            hwnd: 0,
+            members: Vec::new(),
+            label: key.to_string(),
+            icon: 0,
+        }
+    }
+
+    fn keys(items: &[super::TaskItem]) -> Vec<String> {
+        items.iter().map(|t| t.key.clone()).collect()
+    }
+
+    #[test]
+    fn stable_order_keeps_positions_when_z_order_flips() {
+        // `c` jumps to the front in Z-order (it was activated); the bar must
+        // ignore that and keep a, b, c where they were.
+        let prev = vec![item("a"), item("b"), item("c")];
+        let current = vec![item("c"), item("a"), item("b")];
+        assert_eq!(keys(&stable_order(&prev, current)), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn stable_order_appends_new_windows_at_the_end() {
+        let prev = vec![item("a"), item("c")];
+        let current = vec![item("x"), item("c"), item("y"), item("a")];
+        // a, c keep their slots; x, y are appended in enumeration order.
+        assert_eq!(keys(&stable_order(&prev, current)), ["a", "c", "x", "y"]);
+    }
+
+    #[test]
+    fn stable_order_drops_closed_windows_without_moving_the_rest() {
+        let prev = vec![item("a"), item("b"), item("c")];
+        let current = vec![item("c"), item("a")];
+        assert_eq!(keys(&stable_order(&prev, current)), ["a", "c"]);
+    }
+
+    #[test]
+    fn first_refresh_keeps_enumeration_order() {
+        let out = stable_order(&[], vec![item("a"), item("b")]);
+        assert_eq!(keys(&out), ["a", "b"]);
+    }
+
+    #[test]
+    fn anchor_sticks_to_the_first_window_seen() {
+        // No previous anchor: the first member wins.
+        assert_eq!(choose_anchor(None, &[10, 20, 30]), 10);
+        // The stored anchor is kept while it is still a member — so activating
+        // another window in the group cannot rename the button.
+        assert_eq!(choose_anchor(Some(20), &[10, 20, 30]), 20);
+    }
+
+    #[test]
+    fn anchor_advances_when_the_anchor_window_closes() {
+        // The old anchor (20) is gone; the next surviving member takes over.
+        assert_eq!(choose_anchor(Some(20), &[10, 30]), 10);
+        // A group with no members falls back to 0 (never drawn).
+        assert_eq!(choose_anchor(Some(20), &[]), 0);
+    }
+
+    #[test]
+    fn group_label_carries_the_extra_count_only_when_merged() {
+        assert_eq!(group_label("Editor", 1), "Editor");
+        assert_eq!(group_label("Editor", 3), "Editor (+2)");
+        // Defensive: an empty group never gains a suffix.
+        assert_eq!(group_label("Editor", 0), "Editor");
+    }
 
     #[test]
     fn empty_list_has_no_selection() {
@@ -1699,9 +2551,8 @@ mod tests {
     fn tray_strip_reduces_visible_buttons() {
         // Narrow bar + 4 tasks: reserving tray space must reduce how many
         // buttons stay visible (the rest go behind the overflow button).
-        let without = super::layout(200, 700, 4, 0);
-        let with = super::layout(200, 700, 4, 80);
-        assert!(without.overflow.is_some());
+        let without = layout(200, 560, 4, 0, Density::Full);
+        let with = layout(200, 560, 4, 80, Density::Full);
         assert!(with.overflow.is_some());
         assert!(
             with.rects.len() < without.rects.len(),
@@ -1710,14 +2561,35 @@ mod tests {
     }
 
     #[test]
+    fn icon_only_tier_shows_squares_when_everything_fits() {
+        // A budget in [40, 80) lands in icon-only: the title is dropped but all
+        // buttons still fit, drawn as 40–48px squares.
+        let bl = layout(200, 560, 4, 0, Density::Full);
+        assert_eq!(bl.density, Density::IconOnly);
+        assert!(bl.overflow.is_none(), "all four should fit as squares");
+        assert_eq!(bl.rects.len(), 4);
+        for r in &bl.rects {
+            assert!(
+                (45..=48).contains(&(r.right - r.left)),
+                "icon-only squares clamp to [40,48]"
+            );
+        }
+    }
+
+    #[test]
     fn many_windows_fall_back_to_overflow_and_keep_the_right_zone() {
-        // A narrow bar with many tasks: not all buttons fit at BTN_MIN, so an
-        // overflow button appears and nothing reaches the right (clock) zone.
+        // A narrow bar with many tasks: the densest tier still cannot hold them,
+        // so an overflow button appears and nothing reaches the right (clock)
+        // zone.
         let n = 20;
-        let bl = super::layout(200, 900, n, 0);
+        let bl = layout(200, 900, n, 0, Density::Full);
         assert!(bl.overflow.is_some(), "expected an overflow button");
         assert!(bl.rects.len() < n, "some tasks must be hidden");
         assert_eq!(bl.hidden_from, bl.rects.len());
+        assert!(
+            !bl.rects.is_empty(),
+            "at least one button must stay visible"
+        );
         // The overflow button's right edge must stay left of the clock zone.
         let right_limit = 900 - super::PAD - super::RIGHT_W;
         let last_visible = bl.rects.last().map(|r| r.right).unwrap_or(0);
@@ -1728,9 +2600,197 @@ mod tests {
 
     #[test]
     fn few_windows_fit_without_overflow() {
-        let bl = super::layout(200, 1600, 3, 0);
+        let bl = layout(200, 1600, 3, 0, Density::Full);
         assert!(bl.overflow.is_none());
         assert_eq!(bl.rects.len(), 3);
         assert_eq!(bl.hidden_from, 3);
+        assert_eq!(bl.density, Density::Full);
+    }
+
+    #[test]
+    fn budget_divides_after_deducting_gaps() {
+        // 4 buttons, 3 gaps of 4px: 300 - 12 = 288, /4 = 72.
+        assert_eq!(budget(300, 4, 4), 72);
+        // Empty list is unbounded.
+        assert_eq!(budget(300, 0, 4), i32::MAX);
+    }
+
+    #[test]
+    fn density_hysteresis_has_a_dead_zone() {
+        // Leaving Full needs budget < 112; returning to Full needs budget >= 120.
+        assert_eq!(density_for(112, Density::Full), Density::Full);
+        assert_eq!(density_for(111, Density::Full), Density::Compact);
+        assert_eq!(density_for(119, Density::Compact), Density::Compact);
+        assert_eq!(density_for(120, Density::Compact), Density::Full);
+        // A single window added/removed (small budget swing) cannot flip tiers.
+        assert_eq!(density_for(115, Density::Full), Density::Full);
+        assert_eq!(density_for(115, Density::Compact), Density::Compact);
+
+        // Icon-only boundaries: enter below 80, leave at 88 (an 8px dead zone).
+        assert_eq!(density_for(80, Density::Full), Density::Compact);
+        assert_eq!(density_for(79, Density::Full), Density::IconOnly);
+        assert_eq!(density_for(80, Density::Compact), Density::Compact);
+        assert_eq!(density_for(79, Density::Compact), Density::IconOnly);
+        assert_eq!(density_for(87, Density::IconOnly), Density::IconOnly);
+        assert_eq!(density_for(88, Density::IconOnly), Density::Compact);
+        assert_eq!(density_for(119, Density::IconOnly), Density::Compact);
+        assert_eq!(density_for(120, Density::IconOnly), Density::Full);
+    }
+
+    #[test]
+    fn density_for_is_idempotent() {
+        for b in [0, 40, 79, 80, 87, 88, 111, 112, 119, 120, 200, 400] {
+            for prev in [Density::Full, Density::Compact, Density::IconOnly] {
+                let once = density_for(b, prev);
+                assert_eq!(density_for(b, once), once, "not idempotent at {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn density_never_thins_as_budget_grows() {
+        // More room must never produce a denser (narrower) tier than the tier at
+        // the previous (smaller) budget.
+        let order = |d: Density| match d {
+            Density::Full => 0,
+            Density::Compact => 1,
+            Density::IconOnly => 2,
+        };
+        let mut prev = density_for(0, Density::Full);
+        for b in (7..400).step_by(7) {
+            let d = density_for(b, prev);
+            assert!(
+                order(d) <= order(prev),
+                "tier got denser as budget grew at {b}"
+            );
+            prev = d;
+        }
+    }
+
+    #[test]
+    fn compact_tier_fits_more_than_the_old_fixed_minimum() {
+        // 6 tasks with the default start: 6*120 would not fit, but the compact
+        // tier (>=80px) does — so all six stay visible instead of spilling.
+        let bl = layout(200, 1000, 6, 0, Density::Full);
+        let avail = 1000 - 200 - super::PAD - super::RIGHT_W;
+        assert!(6 * super::D0_ENTRY > avail, "test needs a tight bar");
+        assert_eq!(bl.rects.len(), 6);
+        assert!(bl.overflow.is_none());
+        assert_eq!(bl.density, Density::Compact);
+    }
+
+    #[test]
+    fn clock_band_is_flush_to_the_right_pad() {
+        let client_w = 1680;
+        let (left, right) = super::clock_span(client_w);
+        assert_eq!(right, client_w - super::PAD);
+        assert_eq!(left, client_w - super::PAD - super::CLOCK_W);
+        // Inside: the first and last pixels the clock is drawn over.
+        assert!(super::clock_hit(client_w, left));
+        assert!(super::clock_hit(client_w, right - 1));
+        // Outside on both sides.
+        assert!(!super::clock_hit(client_w, left - 1));
+        assert!(!super::clock_hit(client_w, right));
+    }
+
+    #[test]
+    fn clock_band_does_not_swallow_the_notification_strip() {
+        // The tray strip ends at `client.right - PAD - CLOCK_W - PAD`; its last
+        // pixel must stay outside the clock band so the two never overlap.
+        let client_w = 1600;
+        let tray_last = client_w - super::PAD - super::CLOCK_W - super::PAD;
+        assert!(!super::clock_hit(client_w, tray_last));
+    }
+
+    // --- density / fold pure helpers ---------------------------------------
+
+    #[test]
+    fn overflows_only_below_the_icon_square_floor() {
+        // n=4, gaps 3*4=12: avail 200 → budget 47 (fits); avail 160 → 37 (spills).
+        assert!(!overflows(200, 4, 4));
+        assert!(overflows(160, 4, 4));
+        // An empty list never overflows.
+        assert!(!overflows(0, 0, 4));
+    }
+
+    #[test]
+    fn fold_needed_matches_the_compact_floor() {
+        // budget >= 80 → compact or full, no fold.
+        assert!(!fold_needed(80 * 4 + 12, 4, 4));
+        // budget == 79 → icon-only tier, fold.
+        assert!(fold_needed(79 * 4 + 12, 4, 4));
+        // Empty list: nothing to fold.
+        assert!(!fold_needed(0, 0, 4));
+    }
+
+    #[test]
+    fn hide_pins_only_when_they_are_the_sole_cause_of_overflow() {
+        // With pins it spills but without them it fits → fold the pins.
+        assert!(hide_pins(160, 200, 4, 4));
+        // Both fit → nothing to fold.
+        assert!(!hide_pins(200, 220, 4, 4));
+        // Still spills without pins → folding buys nothing.
+        assert!(!hide_pins(120, 160, 4, 4));
+    }
+
+    #[test]
+    fn icon_only_overflow_uses_40px_squares() {
+        // 20 windows on a 900px bar: the densest icons still spill, so the
+        // visible squares must be exactly 40px (never narrower) plus one `»`.
+        let bl = layout(200, 900, 20, 0, Density::Full);
+        assert!(bl.overflow.is_some());
+        assert_eq!(bl.density, Density::IconOnly);
+        assert!(!bl.rects.is_empty());
+        for r in &bl.rects {
+            assert_eq!(r.right - r.left, 40);
+        }
+    }
+
+    // --- keyboard digit jump -----------------------------------------------
+
+    #[test]
+    fn digit_index_maps_1_to_9_in_order() {
+        assert_eq!(digit_index(super::VK_1.0, 5), Some(0));
+        assert_eq!(digit_index(super::VK_5.0, 9), Some(4));
+        assert_eq!(digit_index(super::VK_9.0, 9), Some(8));
+    }
+
+    #[test]
+    fn digit_index_ignores_out_of_range_and_other_keys() {
+        // Past the visible count is ignored.
+        assert_eq!(digit_index(super::VK_9.0, 3), None);
+        assert_eq!(digit_index(super::VK_1.0, 0), None);
+        // A non-digit key is never a jump.
+        assert_eq!(digit_index(super::VK_LEFT.0, 9), None);
+    }
+
+    // --- group menu --------------------------------------------------------
+
+    #[test]
+    fn group_menu_action_maps_every_id_and_rejects_others() {
+        assert_eq!(
+            group_menu_action(super::MENU_GROUP_OPEN_ALL),
+            Some(GroupAction::OpenAll)
+        );
+        assert_eq!(
+            group_menu_action(super::MENU_GROUP_RESTORE_ALL),
+            Some(GroupAction::RestoreAll)
+        );
+        assert_eq!(
+            group_menu_action(super::MENU_GROUP_MINIMIZE_ALL),
+            Some(GroupAction::MinimizeAll)
+        );
+        assert_eq!(
+            group_menu_action(super::MENU_GROUP_CLOSE_ALL),
+            Some(GroupAction::CloseAll)
+        );
+        assert_eq!(
+            group_menu_action(super::MENU_GROUP_PIN_ALL),
+            Some(GroupAction::PinAll)
+        );
+        // Single-window ids and 0 (menu dismissed) must not alias a group action.
+        assert_eq!(group_menu_action(super::MENU_RESTORE), None);
+        assert_eq!(group_menu_action(0), None);
+        assert_eq!(group_menu_action(999), None);
     }
 }

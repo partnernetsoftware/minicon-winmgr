@@ -1,14 +1,19 @@
-//! Settings dialog (placeholder content for now).
+//! Settings dialog.
 //!
 //! INTERFACE FROZEN — implement the signatures below; edit only this file.
 //!
 //! Opened from the taskbar's settings button (left of the menu button).
-//! Self-contained: owns its window class and a single reused window; the
-//! placeholders will be replaced by real settings later.
+//! Self-contained: owns its window class and a single reused window.
 //!
 //! Style: a plain framed window (caption + system menu) drawn with GDI to match
-//! the taskbar's dark theme. Content is a static table of `label / value` rows
-//! driven by [`sections`], so replacing the placeholders later is a data change.
+//! the taskbar's dark theme. Content is a list of rows driven by [`build_rows`]:
+//! headings, read-only info, and — the reason this window exists — real
+//! single-choice radios and checkboxes implemented as pure geometry + hit
+//! testing (there are no stock controls on a GDI-drawn surface).
+//!
+//! Applying a setting updates the live configuration, persists the single
+//! changed key to `minicon-settings.txt`, and refreshes the taskbar so merge
+//! changes take effect without a restart.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -17,10 +22,11 @@ use windows::Win32::Foundation::{
     COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
+    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen, CreateSolidBrush,
     DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-    DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DrawTextW, Ellipse, EndPaint, FillRect, FrameRect, GetStockObject, HBRUSH, HDC, HGDIOBJ,
+    InvalidateRect, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -32,17 +38,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
+use crate::config::{self, GroupBy, MergeStrategy};
 use crate::win_util::wide;
 
 // --- layout / identity ----------------------------------------------------
-const WIN_W: i32 = 420;
-const WIN_H: i32 = 420;
+const WIN_W: i32 = 460;
+const WIN_H: i32 = 700;
 const MARGIN: i32 = 22;
 const TITLE_H: i32 = 30;
-const ROW_H: i32 = 42;
+const ROW_H: i32 = 28;
 const ACTION_H: i32 = 30;
 const ACTION_GAP: i32 = 8;
-const FOOTER_H: i32 = 20;
+/// Left inset of the control glyph (radio dot / checkbox) inside a row.
+const GLYPH_LEFT: i32 = 5;
+/// Left inset of the row text, clear of the control glyph.
+const TEXT_LEFT: i32 = 26;
 
 const CLASS_NAME: &str = "minicon_winmgr_settings";
 const WINDOW_TITLE: &str = "设置";
@@ -54,19 +64,108 @@ static SETTINGS: AtomicIsize = AtomicIsize::new(0);
 
 // --- pure data model (unit-testable, no Win32) ----------------------------
 
-/// A placeholder settings row: `(section label, current value)`.
-///
-/// The value column renders as muted "not yet wired up" text; swapping this
-/// table for real settings is the intended extension point.
-pub fn sections() -> &'static [(&'static str, &'static str)] {
-    const SECTIONS: &[(&str, &str)] = &[
-        ("外观", "主题"),
-        ("任务栏", "显示与位置"),
-        ("行为", "启动器"),
-        ("快捷键", "查看"),
-        ("关于", "版本"),
-    ];
-    SECTIONS
+/// What clicking a row does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingAction {
+    SetMerge(MergeStrategy),
+    SetGroupBy(GroupBy),
+    ToggleShowTaskbar,
+    ToggleShowTray,
+    ToggleHoverPreview,
+}
+
+/// One row in the settings list.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Row {
+    /// A section label; not interactive.
+    Heading(&'static str),
+    /// A radio option; `enabled` is false when its group is inapplicable.
+    Radio {
+        text: &'static str,
+        on: bool,
+        enabled: bool,
+        action: SettingAction,
+    },
+    /// A checkbox.
+    Toggle {
+        text: &'static str,
+        on: bool,
+        action: SettingAction,
+    },
+    /// A read-only `label: value` row.
+    Info { text: &'static str, value: String },
+}
+
+/// Builds the settings rows for the given configuration snapshot.
+pub fn build_rows(cfg: &config::Config) -> Vec<Row> {
+    // The grouping key only matters when merging is on.
+    let by_enabled = cfg.merge != MergeStrategy::Never;
+    vec![
+        Row::Heading("任务栏"),
+        Row::Toggle {
+            text: "显示任务栏（重启后生效）",
+            on: cfg.show_taskbar,
+            action: SettingAction::ToggleShowTaskbar,
+        },
+        Row::Toggle {
+            text: "显示通知图标条（实验性）",
+            on: cfg.show_tray,
+            action: SettingAction::ToggleShowTray,
+        },
+        Row::Heading("窗口合并"),
+        Row::Radio {
+            text: MergeStrategy::Never.label(),
+            on: cfg.merge == MergeStrategy::Never,
+            enabled: true,
+            action: SettingAction::SetMerge(MergeStrategy::Never),
+        },
+        Row::Radio {
+            text: MergeStrategy::WhenFull.label(),
+            on: cfg.merge == MergeStrategy::WhenFull,
+            enabled: true,
+            action: SettingAction::SetMerge(MergeStrategy::WhenFull),
+        },
+        Row::Radio {
+            text: MergeStrategy::Always.label(),
+            on: cfg.merge == MergeStrategy::Always,
+            enabled: true,
+            action: SettingAction::SetMerge(MergeStrategy::Always),
+        },
+        Row::Heading("合并依据"),
+        Row::Radio {
+            text: GroupBy::Exe.label(),
+            on: cfg.group_by == GroupBy::Exe,
+            enabled: by_enabled,
+            action: SettingAction::SetGroupBy(GroupBy::Exe),
+        },
+        Row::Radio {
+            text: GroupBy::Pid.label(),
+            on: cfg.group_by == GroupBy::Pid,
+            enabled: by_enabled,
+            action: SettingAction::SetGroupBy(GroupBy::Pid),
+        },
+        Row::Heading("行为"),
+        Row::Toggle {
+            text: "悬停显示缩略图预览",
+            on: cfg.hover_preview,
+            action: SettingAction::ToggleHoverPreview,
+        },
+        Row::Heading("外观"),
+        Row::Info {
+            text: "主题色",
+            value: "深色（主题改动需重启生效）".to_string(),
+        },
+        Row::Heading("快捷键"),
+        Row::Info {
+            text: "唤出键",
+            value: cfg.hotkey.clone(),
+        },
+        Row::Heading("关于"),
+        Row::Info {
+            text: "版本",
+            value: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    ]
 }
 
 /// An actionable row at the bottom of the dialog.
@@ -81,8 +180,8 @@ pub enum Action {
 /// The action buttons, in display order.
 pub fn actions() -> &'static [(&'static str, Action)] {
     &[
-        ("替代为 Windows 外壳", Action::Replace),
-        ("回滚到原外壳", Action::Rollback),
+        ("接管桌面（立即生效）", Action::Replace),
+        ("还原系统桌面（立即生效）", Action::Rollback),
     ]
 }
 
@@ -95,16 +194,38 @@ fn centered_origin_for(screen_w: i32, screen_h: i32, win_w: i32, win_h: i32) -> 
     )
 }
 
-/// Top of the first action row, below the placeholder rows.
-fn actions_top() -> i32 {
-    MARGIN + TITLE_H + 8 + sections().len() as i32 * ROW_H + 12
+/// Toggles a boolean preference (pure, so the checkbox behavior is testable).
+fn toggle_flag(v: bool) -> bool {
+    !v
+}
+
+/// Equal-height row rects for `n` rows inside `client`, stacked from the top.
+/// Pure (no Win32) so it can be unit-tested.
+fn row_rects(client: RECT, n: usize) -> Vec<RECT> {
+    let width = (client.right - client.left) - 2 * MARGIN;
+    let mut top = MARGIN + TITLE_H + 8;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(RECT {
+            left: MARGIN,
+            top,
+            right: MARGIN + width,
+            bottom: top + ROW_H,
+        });
+        top += ROW_H;
+    }
+    out
+}
+
+/// Top of the action-button stack, below `n` rows.
+fn actions_top(n: usize) -> i32 {
+    MARGIN + TITLE_H + 8 + n as i32 * ROW_H + 16
 }
 
 /// Full-width action button rects for `client`, one per [`actions`] entry.
-/// Pure (no Win32) so it can be unit-tested.
-fn action_rects(client: RECT) -> Vec<(RECT, Action)> {
+fn action_rects(client: RECT, n_rows: usize) -> Vec<(RECT, Action)> {
     let width = (client.right - client.left) - 2 * MARGIN;
-    let top0 = actions_top();
+    let top0 = actions_top(n_rows);
     actions()
         .iter()
         .enumerate()
@@ -121,6 +242,25 @@ fn action_rects(client: RECT) -> Vec<(RECT, Action)> {
             )
         })
         .collect()
+}
+
+/// The action a row triggers, or `None` when it is not clickable.
+fn row_action(rows: &[Row], i: usize) -> Option<SettingAction> {
+    match rows.get(i)? {
+        Row::Radio {
+            action, enabled, ..
+        } if *enabled => Some(*action),
+        Row::Toggle { action, .. } => Some(*action),
+        _ => None,
+    }
+}
+
+/// Index of the clickable row containing `(x, y)`, if any.
+fn hit_row(rows: &[Row], rects: &[RECT], x: i32, y: i32) -> Option<usize> {
+    rects
+        .iter()
+        .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .filter(|&i| row_action(rows, i).is_some())
 }
 
 /// Action whose button contains `(x, y)`, if any.
@@ -160,11 +300,18 @@ fn bg_brush() -> isize {
     *B.get_or_init(|| unsafe { CreateSolidBrush(COLORREF(theme().bg)).0 as isize })
 }
 
-/// Accent brush, used for action-button outlines.
+/// Accent brush, used for control glyphs and action-button outlines.
 fn accent_brush() -> isize {
     static B: OnceLock<isize> = OnceLock::new();
     // SAFETY: solid brushes are process-lifetime GDI objects, never freed.
     *B.get_or_init(|| unsafe { CreateSolidBrush(COLORREF(theme().accent)).0 as isize })
+}
+
+/// 1px accent pen for the hollow outline of unselected radios / checkboxes.
+fn accent_pen() -> isize {
+    static P: OnceLock<isize> = OnceLock::new();
+    // SAFETY: the pen is a process-lifetime GDI object, never freed.
+    *P.get_or_init(|| unsafe { CreatePen(PS_SOLID, 1, COLORREF(theme().accent)).0 as isize })
 }
 
 /// Creates a Segoe UI font at `height` px and `weight` (e.g. 400 normal, 700 bold).
@@ -273,7 +420,7 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
 
         tracing::info!(
             hwnd = ?hwnd,
-            rows = sections().len(),
+            rows = build_rows(&config::current()).len(),
             "settings window created (hidden)"
         );
     }
@@ -332,12 +479,6 @@ fn hide() {
     tracing::debug!("settings window hidden");
 }
 
-/// Path of the file holding the shell value captured before a replacement.
-fn backup_path() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("shell-backup.txt"))
-}
-
 /// Simple modal message box (OK) for user feedback.
 fn info_box(message: &str) {
     let text = wide(message);
@@ -353,6 +494,33 @@ fn info_box(message: &str) {
     }
 }
 
+/// Applies a settings-row action: update the live config, persist the changed
+/// key, then refresh the taskbar so merge changes are visible immediately.
+fn run_setting(action: SettingAction, hwnd: HWND) {
+    let changed = match action {
+        SettingAction::SetMerge(m) => config::set_merge(m),
+        SettingAction::SetGroupBy(g) => config::set_group_by(g),
+        SettingAction::ToggleShowTaskbar => {
+            config::set_show_taskbar(toggle_flag(config::current().show_taskbar))
+        }
+        SettingAction::ToggleShowTray => {
+            config::set_show_tray(toggle_flag(config::current().show_tray))
+        }
+        SettingAction::ToggleHoverPreview => {
+            config::set_hover_preview(toggle_flag(config::current().hover_preview))
+        }
+    };
+    if changed {
+        tracing::info!(?action, "setting applied");
+        // Rebuild the bar: merge/grouping changes must not wait for a refresh tick.
+        crate::taskbar::refresh();
+        // SAFETY: `hwnd` is our live settings window.
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, true);
+        }
+    }
+}
+
 /// Runs an action button.
 fn run_action(action: Action) {
     match action {
@@ -362,51 +530,16 @@ fn run_action(action: Action) {
 }
 
 fn do_replace() {
-    let Ok(exe) = std::env::current_exe() else {
-        info_box("无法获取当前程序路径。");
-        return;
-    };
-    let exe = exe.to_string_lossy().to_string();
-    // Capture the current value once, so rollback can restore it faithfully.
-    match crate::shell_registry::current_shell() {
-        Ok(Some(cur)) if cur == exe => {
-            info_box("已经是我们作为外壳了。");
-            return;
-        }
-        Ok(cur) => {
-            if let (Some(path), Some(value)) = (backup_path(), cur) {
-                let _ = std::fs::write(&path, value);
-                tracing::info!(backup = %path.display(), "shell backup written");
-            }
-        }
-        Err(err) => {
-            tracing::warn!(%err, "could not read current shell; proceeding without backup");
-        }
-    }
-    match crate::shell_registry::replace(&exe) {
-        Ok(()) => {
-            tracing::info!(%exe, "settings: replaced shell");
-            info_box("已设为 Windows 外壳。\n下一次登录（或注销重登）后生效。");
-        }
-        Err(err) => {
-            tracing::warn!(%err, "settings: shell replace failed");
-            info_box(&format!("设置外壳失败：{err}"));
-        }
-    }
-}
-
-fn do_rollback() {
-    let restored = backup_path().and_then(|p| std::fs::read_to_string(p).ok());
-    let restored = restored
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    // Confirm, defaulting to "No" — a wrong rollback needs a re-login to undo.
-    let message = match &restored {
-        Some(v) => format!("回滚外壳到：\n{v}\n\n确定？"),
-        None => "回滚外壳到系统默认（explorer）？\n\n确定？".to_string(),
-    };
-    let text = wide(&message);
-    let caption = wide("回滚外壳");
+    // Taking over is immediate now: the desktop shell that is running in this
+    // session gets stopped, not just the registry value written. That closes
+    // the user's desktop, so it is confirmed first (default: No).
+    let text = wide(
+        "接管桌面：立即把当前桌面外壳换成 minicon-winmgr。\n\n\
+         现在运行的桌面外壳（explorer）会立刻关闭，任务栏与桌面图标随之消失，\
+         由 minicon 的任务栏接管。下一次登录仍使用 minicon。\n\n\
+         确定？",
+    );
+    let caption = wide("接管桌面");
     // SAFETY: both buffers outlive the call.
     let answer = unsafe {
         MessageBoxW(
@@ -419,14 +552,90 @@ fn do_rollback() {
     if answer != IDYES {
         return;
     }
-    match crate::shell_registry::restore(restored.as_deref()) {
-        Ok(()) => {
-            tracing::info!(?restored, "settings: shell rolled back");
-            info_box("已回滚。注销重登后生效（或立即运行 explorer.exe）。");
+
+    match crate::shell_swap::take_over() {
+        Ok(report) => {
+            tracing::info!(
+                exe = %report.exe,
+                stopped = report.stopped,
+                "settings: shell taken over"
+            );
+            let mut message = String::from("已接管桌面（立即生效）。\n");
+            if report.stopped == 0 {
+                message.push_str("本会话没有正在运行的桌面外壳，无需关闭。\n");
+            } else {
+                message.push_str(&format!("已关闭 {} 个桌面外壳进程。\n", report.stopped));
+            }
+            if !report.auto_restart_disabled {
+                message.push_str(
+                    "注意：未能关闭系统外壳自动重启（需要管理员权限），\
+                     Windows 可能随后重新拉起 explorer。\n",
+                );
+            }
+            message.push_str("\n可用「还原系统桌面（立即生效）」一键恢复。");
+            info_box(&message);
         }
         Err(err) => {
-            tracing::warn!(%err, "settings: shell rollback failed");
-            info_box(&format!("回滚失败：{err}"));
+            tracing::warn!(%err, "settings: shell takeover failed");
+            info_box(&format!("接管桌面失败：{err}"));
+        }
+    }
+}
+
+fn do_rollback() {
+    // Confirm, defaulting to "No" — this restarts Explorer over our bar.
+    // Distinguish "no takeover was ever recorded" (give-back refuses, so we stop
+    // up front rather than promising a restore we will not perform) from a
+    // recorded-but-empty value (which restores the Windows default shell).
+    let backed_up = crate::shell_swap::backup_path().and_then(|p| std::fs::read_to_string(p).ok());
+    let message = match backed_up
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(v) => format!("还原系统桌面：立即把外壳还原为\n{v}\n并重新启动 explorer。\n\n确定？"),
+        None if backed_up.is_some() => {
+            "还原系统桌面：立即把外壳还原为系统默认（explorer）\n并重新启动 explorer。\n\n确定？"
+                .to_string()
+        }
+        None => {
+            info_box("没有记录到接管前的桌面外壳（本程序未曾接管过桌面），无法还原。");
+            return;
+        }
+    };
+    let text = wide(&message);
+    let caption = wide("还原系统桌面");
+    // SAFETY: both buffers outlive the call.
+    let answer = unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2,
+        )
+    };
+    if answer != IDYES {
+        return;
+    }
+    match crate::shell_swap::give_back() {
+        Ok(report) => {
+            tracing::info!(
+                restored = ?report.restored,
+                started = report.started,
+                "settings: shell given back"
+            );
+            let mut message = String::from("已还原系统桌面（立即生效）。\n");
+            message.push_str(if report.started {
+                "已重新启动 explorer。"
+            } else {
+                "本会话已有桌面外壳在运行。"
+            });
+            message.push_str("\n若桌面外观未恢复，注销重登即可。");
+            info_box(&message);
+        }
+        Err(err) => {
+            tracing::warn!(%err, "settings: shell give-back failed");
+            info_box(&format!("还原失败：{err}"));
         }
     }
 }
@@ -452,7 +661,60 @@ unsafe fn draw_line(hdc: HDC, rect: &RECT, text: &str, color: u32, flags: DRAW_T
     }
 }
 
-/// Full window repaint: background, title, the placeholder rows, and the footer.
+/// Draws a radio dot at the left of `r`: filled accent when `on`, hollow when
+/// off.
+///
+/// # Safety
+/// `hdc` must be a live device context.
+unsafe fn draw_radio(hdc: HDC, r: &RECT, on: bool) {
+    let cx = r.left + GLYPH_LEFT + 6;
+    let cy = (r.top + r.bottom) / 2;
+    let rad = 6;
+    // SAFETY: all GDI objects are process-lifetime; `hdc` is live.
+    unsafe {
+        let brush = if on {
+            accent_brush()
+        } else {
+            GetStockObject(NULL_BRUSH).0 as isize
+        };
+        let old_brush = SelectObject(hdc, HGDIOBJ(brush as *mut core::ffi::c_void));
+        let old_pen = SelectObject(hdc, HGDIOBJ(accent_pen() as *mut core::ffi::c_void));
+        let _ = Ellipse(hdc, cx - rad, cy - rad, cx + rad, cy + rad);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+    }
+}
+
+/// Draws a checkbox at the left of `r`: an accent frame, filled when `on`.
+///
+/// # Safety
+/// `hdc` must be a live device context.
+unsafe fn draw_checkbox(hdc: HDC, r: &RECT, on: bool) {
+    let cy = (r.top + r.bottom) / 2;
+    let half = 7;
+    let boxr = RECT {
+        left: r.left + GLYPH_LEFT,
+        top: cy - half,
+        right: r.left + GLYPH_LEFT + 2 * half,
+        bottom: cy + half,
+    };
+    // SAFETY: GDI calls on a live `hdc`; brushes are process-lifetime.
+    unsafe {
+        FillRect(hdc, &boxr, hbrush(bg_brush()));
+        FrameRect(hdc, &boxr, hbrush(accent_brush()));
+        if on {
+            let inner = RECT {
+                left: boxr.left + 4,
+                top: boxr.top + 4,
+                right: boxr.right - 4,
+                bottom: boxr.bottom - 4,
+            };
+            FillRect(hdc, &inner, hbrush(accent_brush()));
+        }
+    }
+}
+
+/// Full window repaint: background, title, settings rows, action buttons.
 fn paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     // SAFETY: `hwnd` is our live window; `ps` receives the paint state.
@@ -461,12 +723,13 @@ fn paint(hwnd: HWND) {
     // SAFETY: `hwnd` is live; `client` receives its client rect.
     let _ = unsafe { GetClientRect(hwnd, &mut client) };
     let t = theme();
+    let rows = build_rows(&config::current());
+    let rects = row_rects(client, rows.len());
 
     // SAFETY: all GDI handles below are process-lifetime; the client rect is
     // ours; `client` is fully painted before `EndPaint`.
     unsafe {
         FillRect(hdc, &client, hbrush(bg_brush()));
-
         SetBkMode(hdc, TRANSPARENT);
 
         // Title.
@@ -480,35 +743,52 @@ fn paint(hwnd: HWND) {
         draw_line(hdc, &title_rect, WINDOW_TITLE, t.text, DT_LEFT);
         SelectObject(hdc, old_title);
 
-        // Placeholder rows: label left, muted value right.
         let old_body = SelectObject(hdc, HGDIOBJ(body_font() as *mut core::ffi::c_void));
-        let label_left = MARGIN;
         let value_right = client.right - MARGIN;
-        let label_right = client.left + (client.right - client.left) / 2;
-        let mut top = MARGIN + TITLE_H + 8;
-        for (label, value) in sections() {
-            let mid = top + ROW_H / 2;
-            let label_rect = RECT {
-                left: label_left,
-                top: mid - 10,
-                right: label_right,
-                bottom: mid + 10,
-            };
-            draw_line(hdc, &label_rect, label, t.text, DT_LEFT);
-
-            let value_rect = RECT {
-                left: label_right,
-                top: mid - 10,
-                right: value_right,
-                bottom: mid + 10,
-            };
-            draw_line(hdc, &value_rect, value, t.muted, DT_RIGHT);
-
-            top += ROW_H;
+        for (row, r) in rows.iter().zip(rects.iter()) {
+            match row {
+                Row::Heading(text) => {
+                    draw_line(hdc, r, text, t.muted, DT_LEFT);
+                }
+                Row::Info { text, value } => {
+                    let label_rect = RECT {
+                        right: r.right,
+                        ..*r
+                    };
+                    draw_line(hdc, &label_rect, text, t.text, DT_LEFT);
+                    let val_rect = RECT {
+                        left: r.left + 120,
+                        right: value_right,
+                        ..*r
+                    };
+                    draw_line(hdc, &val_rect, value, t.muted, DT_RIGHT);
+                }
+                Row::Radio {
+                    text, on, enabled, ..
+                } => {
+                    draw_radio(hdc, r, *on);
+                    let tr = RECT {
+                        left: r.left + TEXT_LEFT,
+                        right: r.right,
+                        ..*r
+                    };
+                    let color = if *enabled { t.text } else { t.muted };
+                    draw_line(hdc, &tr, text, color, DT_LEFT);
+                }
+                Row::Toggle { text, on, .. } => {
+                    draw_checkbox(hdc, r, *on);
+                    let tr = RECT {
+                        left: r.left + TEXT_LEFT,
+                        right: r.right,
+                        ..*r
+                    };
+                    draw_line(hdc, &tr, text, t.text, DT_LEFT);
+                }
+            }
         }
 
         // Action buttons.
-        for (rect, action) in action_rects(client) {
+        for (rect, action) in action_rects(client, rows.len()) {
             FillRect(hdc, &rect, hbrush(bg_brush()));
             FrameRect(hdc, &rect, hbrush(accent_brush()));
             let label = actions()
@@ -521,26 +801,11 @@ fn paint(hwnd: HWND) {
             draw_line(hdc, &text_rect, label, t.text, DT_LEFT);
         }
 
-        // Footer note.
-        let footer_rect = RECT {
-            left: MARGIN,
-            top: client.bottom - MARGIN - FOOTER_H,
-            right: value_right,
-            bottom: client.bottom - MARGIN,
-        };
-        draw_line(
-            hdc,
-            &footer_rect,
-            "（占位内容，待接入真实设置）",
-            t.muted,
-            DT_LEFT,
-        );
-
         SelectObject(hdc, old_body);
         let _ = EndPaint(hwnd, &ps);
     }
 
-    tracing::debug!(rows = sections().len(), "settings window painted");
+    tracing::debug!(rows = rows.len(), "settings window painted");
 }
 
 /// Window procedure for the settings window.
@@ -558,7 +823,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let mut client = RECT::default();
             // SAFETY: `hwnd` is live; `client` receives its client rect.
             let _ = unsafe { GetClientRect(hwnd, &mut client) };
-            if let Some(action) = hit_action(&action_rects(client), x, y) {
+            let rows = build_rows(&config::current());
+            let rects = row_rects(client, rows.len());
+            if let Some(i) = hit_row(&rows, &rects, x, y)
+                && let Some(action) = row_action(&rows, i)
+            {
+                run_setting(action, hwnd);
+                return LRESULT(0);
+            }
+            if let Some(action) = hit_action(&action_rects(client, rows.len()), x, y) {
                 run_action(action);
             }
             LRESULT(0)
@@ -593,30 +866,125 @@ fn get_y(lparam: LPARAM) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, action_rects, actions, centered_origin_for, hit_action, sections};
+    use super::{
+        Action, MergeStrategy, Row, SettingAction, action_rects, actions, build_rows,
+        centered_origin_for, hit_action, hit_row, row_action, row_rects, toggle_flag,
+    };
+    use crate::config::Config;
     use windows::Win32::Foundation::RECT;
 
-    #[test]
-    fn sections_has_expected_rows() {
-        assert_eq!(sections().len(), 5);
-    }
-
-    #[test]
-    fn section_rows_are_non_empty() {
-        for (label, value) in sections() {
-            assert!(!label.is_empty(), "section label must not be empty");
-            assert!(!value.is_empty(), "section value must not be empty");
+    fn client() -> RECT {
+        RECT {
+            left: 0,
+            top: 0,
+            right: super::WIN_W,
+            bottom: super::WIN_H,
         }
     }
 
     #[test]
+    fn rows_cover_the_expected_settings() {
+        let rows = build_rows(&Config::default());
+        // The merge radios are present and default to "never".
+        let never = rows.iter().find(
+            |r| matches!(r, Row::Radio { text, .. } if *text == MergeStrategy::Never.label()),
+        );
+        assert!(matches!(never, Some(Row::Radio { on: true, .. })));
+        // Grouping basis is disabled while merging is off.
+        let exe = rows
+            .iter()
+            .find(|r| matches!(r, Row::Radio { text, .. } if *text == "按应用（可执行文件）"));
+        assert!(matches!(exe, Some(Row::Radio { enabled: false, .. })));
+    }
+
+    #[test]
+    fn grouping_basis_enables_when_merging() {
+        let cfg = Config {
+            merge: MergeStrategy::Always,
+            ..Config::default()
+        };
+        let rows = build_rows(&cfg);
+        let pid = rows
+            .iter()
+            .find(|r| matches!(r, Row::Radio { text, .. } if *text == "按进程（pid）"));
+        assert!(matches!(pid, Some(Row::Radio { enabled: true, .. })));
+    }
+
+    #[test]
+    fn row_rects_stack_without_overlap() {
+        let rects = row_rects(client(), 4);
+        assert_eq!(rects.len(), 4);
+        for w in rects.windows(2) {
+            assert!(w[0].bottom <= w[1].top, "rows must not overlap");
+        }
+    }
+
+    #[test]
+    fn hit_row_resolves_clickable_rows_and_ignores_others() {
+        let cfg = Config::default();
+        let rows = build_rows(&cfg);
+        let rects = row_rects(client(), rows.len());
+        // Find a heading (non-clickable) and click its centre: no hit.
+        let heading = rows
+            .iter()
+            .position(|r| matches!(r, Row::Heading(_)))
+            .unwrap();
+        let hr = rects[heading];
+        let hc = ((hr.left + hr.right) / 2, (hr.top + hr.bottom) / 2);
+        assert_eq!(hit_row(&rows, &rects, hc.0, hc.1), None);
+        // A merge radio resolves to its action.
+        let radio = rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    Row::Radio {
+                        action: SettingAction::SetMerge(_),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let rr = rects[radio];
+        let rc = ((rr.left + rr.right) / 2, (rr.top + rr.bottom) / 2);
+        assert_eq!(hit_row(&rows, &rects, rc.0, rc.1), Some(radio));
+        // A disabled row (grouping basis with merge off) is not clickable.
+        let disabled = rows
+            .iter()
+            .position(|r| matches!(r, Row::Radio { enabled: false, .. }))
+            .unwrap();
+        let dr = rects[disabled];
+        let dc = ((dr.left + dr.right) / 2, (dr.top + dr.bottom) / 2);
+        assert_eq!(hit_row(&rows, &rects, dc.0, dc.1), None);
+    }
+
+    #[test]
+    fn row_action_is_none_for_non_interactive_rows() {
+        let rows = build_rows(&Config::default());
+        for (i, r) in rows.iter().enumerate() {
+            let expected = match r {
+                Row::Heading(_) | Row::Info { .. } => false,
+                Row::Radio { enabled, .. } => *enabled,
+                Row::Toggle { .. } => true,
+            };
+            assert_eq!(row_action(&rows, i).is_some(), expected);
+        }
+    }
+
+    #[test]
+    fn toggle_flag_negates() {
+        assert!(toggle_flag(false));
+        assert!(!toggle_flag(true));
+    }
+
+    #[test]
     fn centers_window_on_screen() {
-        assert_eq!(centered_origin_for(1920, 1080, 420, 420), (750, 330));
+        assert_eq!(centered_origin_for(1920, 1080, 460, 660), (730, 210));
     }
 
     #[test]
     fn clamps_when_window_larger_than_screen() {
-        assert_eq!(centered_origin_for(400, 300, 420, 420), (0, 0));
+        assert_eq!(centered_origin_for(400, 300, 460, 660), (0, 0));
     }
 
     #[test]
@@ -628,13 +996,7 @@ mod tests {
 
     #[test]
     fn action_rects_stack_without_overlap_and_hit_test() {
-        let client = RECT {
-            left: 0,
-            top: 0,
-            right: 420,
-            bottom: 420,
-        };
-        let rects = action_rects(client);
+        let rects = action_rects(client(), build_rows(&Config::default()).len());
         assert_eq!(rects.len(), actions().len());
         assert!(rects[0].0.bottom <= rects[1].0.top, "rows must not overlap");
         // A point inside the first button resolves to its action.

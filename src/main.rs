@@ -3,6 +3,7 @@
 // to the parent console on demand (see `attach_console_if_needed`).
 #![windows_subsystem = "windows"]
 
+mod bar_tip;
 mod config;
 mod dwm;
 mod grouping;
@@ -19,6 +20,7 @@ mod run_dialog;
 mod session;
 mod settings_ui;
 mod shell_registry;
+mod shell_swap;
 mod single_instance;
 mod start_menu;
 mod task_list;
@@ -46,6 +48,8 @@ enum Cli {
     ShellList,
     ShellSet(Option<String>),
     ShellReplace,
+    ShellTakeover,
+    ShellGiveBack,
     ShellRollback(Option<String>),
     Launch(Option<String>),
     LaunchRun(Option<String>),
@@ -61,6 +65,8 @@ impl Cli {
             Some("--shell-list") => Cli::ShellList,
             Some("--shell-set") => Cli::ShellSet(args.next()),
             Some("--shell-replace") => Cli::ShellReplace,
+            Some("--shell-takeover") => Cli::ShellTakeover,
+            Some("--shell-give-back") => Cli::ShellGiveBack,
             Some("--shell-rollback") => Cli::ShellRollback(args.next()),
             Some("--launch") => Cli::Launch(args.next()),
             Some("--launch-run") => Cli::LaunchRun(args.next()),
@@ -92,6 +98,8 @@ fn main() {
         Cli::ShellList => cmd_shell_list(),
         Cli::ShellSet(target) => cmd_shell_set(target),
         Cli::ShellReplace => cmd_shell_replace(),
+        Cli::ShellTakeover => cmd_shell_takeover(),
+        Cli::ShellGiveBack => cmd_shell_give_back(),
         Cli::ShellRollback(prev) => cmd_shell_rollback(prev),
         Cli::Launch(query) => cmd_launch(query),
         Cli::LaunchRun(query) => cmd_launch_run(query),
@@ -347,6 +355,69 @@ fn cmd_shell_replace() {
     println!("rollback with: minicon-winmgr --shell-rollback default");
 }
 
+/// Guarded write: point the per-user Shell at this executable **and** take over
+/// the current desktop now (stop the running shell in this session).
+fn cmd_shell_takeover() {
+    if !confirmed() {
+        refuse(
+            "taking over the shell requires explicit confirmation",
+            "set MINICON_CONFIRM_SHELL=yes and re-run --shell-takeover",
+        );
+    }
+    tracing::warn!("TAKING OVER the shell now (confirmed)");
+    match shell_swap::take_over() {
+        Ok(report) => {
+            println!("Shell set to {}", report.exe);
+            println!(
+                "stopped {} shell process(es) in this session",
+                report.stopped
+            );
+            if report.auto_restart_disabled {
+                println!("shell auto-restart disabled");
+            } else {
+                println!(
+                    "warn: could not disable shell auto-restart (needs elevation); \
+                     Windows may relaunch explorer"
+                );
+            }
+            println!("give the desktop back with: minicon-winmgr --shell-give-back");
+        }
+        Err(err) => {
+            eprintln!("minicon-winmgr: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Guarded write: restore the recorded shell **and** bring the desktop back now.
+fn cmd_shell_give_back() {
+    if !confirmed() {
+        refuse(
+            "restoring the Shell requires explicit confirmation",
+            "set MINICON_CONFIRM_SHELL=yes and re-run --shell-give-back",
+        );
+    }
+    tracing::warn!("GIVING BACK the shell now (confirmed)");
+    match shell_swap::give_back() {
+        Ok(report) => {
+            let shown = report
+                .restored
+                .as_deref()
+                .unwrap_or("(default: explorer.exe)");
+            println!("Shell restored to {shown}");
+            if report.started {
+                println!("launched explorer.exe");
+            } else {
+                println!("a shell is already running in this session");
+            }
+        }
+        Err(err) => {
+            eprintln!("minicon-winmgr: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Guarded write: restore a previous Shell value (or delete it with "default").
 fn cmd_shell_rollback(previous: Option<String>) {
     if !confirmed() {
@@ -394,6 +465,10 @@ fn print_help() {
            minicon-winmgr --shell-set <t>     set Shell to explorer|alt|minicon|<path>\n\
                                               (needs {CONFIRM_ENV}=yes)\n\
            minicon-winmgr --shell-replace     set Shell to this exe (needs {CONFIRM_ENV}=yes)\n\
+           minicon-winmgr --shell-takeover    replace the shell AND take over now\n\
+                                              (needs {CONFIRM_ENV}=yes)\n\
+           minicon-winmgr --shell-give-back   restore the shell AND bring the desktop back\n\
+                                              (needs {CONFIRM_ENV}=yes)\n\
            minicon-winmgr --shell-rollback <value|default>\n\
                                               restore Shell (needs {CONFIRM_ENV}=yes)\n\
            minicon-winmgr --launch <query>    list Start Menu matches for a query\n\
@@ -412,6 +487,7 @@ fn print_help() {
            MINICON_HEARTBEAT_SECS=N heartbeat/snapshot interval (default 30)\n\
            MINICON_LOG_DIR=path     log directory (default <exe_dir>/logs)\n\
            MINICON_ALT_SHELL=path   exe for the 'alt' shell profile (optional)\n\
+           MINICON_CONFIRM_SHELL=yes  required to run any --shell-* write command\n\
            RUST_LOG=...             tracing filter (default info)\n"
     );
 }

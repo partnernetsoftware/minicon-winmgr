@@ -36,12 +36,10 @@ pub const PREVIEW_W: i32 = 240;
 pub const PREVIEW_H: i32 = 160;
 
 /// Whether the hover preview is enabled. **Off by default** — the feature is
-/// low-value for most users; opt in with `MINICON_HOVER_PREVIEW=1`.
+/// low-value for most users. Toggle it in the settings window or opt in with
+/// `MINICON_HOVER_PREVIEW=1` (env wins; see `config`).
 pub fn enabled() -> bool {
-    matches!(
-        std::env::var("MINICON_HOVER_PREVIEW").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
+    crate::config::current().hover_preview
 }
 
 /// Vertical gap between the button and the preview.

@@ -70,4 +70,4 @@
 - 大改动拆成**并行 subagent**，每个只改**唯一文件**；接线（`window.rs`/`taskbar.rs`）由主代理单点做。
 - 每个 subagent：禁改 `Cargo.toml`、禁 `cargo add`、禁 `cargo fmt`、禁起 GUI；可跑 `cargo check`；纯逻辑必须带单测。
 - 收尾：`cargo fmt --check` + `cargo clippy -D warnings` + `cargo test`，并**真跑一次新 exe** 核日志。
-- 验收基线：`cargo test` 97 passed；改动后不得低于此数，`clippy -D warnings` 必须干净。
+- 验收基线：`cargo test` **以实测为准（当前 161 passed），改动后不得低于该值**；`clippy -D warnings` 必须干净。

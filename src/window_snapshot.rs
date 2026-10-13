@@ -5,6 +5,7 @@
 //! M2 only observes — it never moves, hides, or selects windows.
 
 use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetWindow, GetWindowLongPtrW,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
@@ -73,8 +74,40 @@ fn is_app_window(hwnd: HWND) -> bool {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
         let is_tool = ex & WS_EX_TOOLWINDOW.0 != 0;
         let is_app = ex & WS_EX_APPWINDOW.0 != 0;
-        (!has_owner || is_app) && !is_tool
+        is_taskbar_eligible(has_owner, is_tool, is_app, is_cloaked(hwnd))
     }
+}
+
+/// Pure "belongs on the taskbar" predicate, split out so it can be unit-tested
+/// without a live window.
+///
+/// `cloaked` is the DWM-hidden flag: cloaked windows are not on screen (they
+/// are kept around by the shell for UWP apps, virtual desktops, and the Start
+/// menu host). The classic owner/`WS_EX_TOOLWINDOW` test alone lets them
+/// through — the Start menu's `Windows.UI.Core.CoreWindow` has neither an owner
+/// nor `WS_EX_TOOLWINDOW`, so it would otherwise get a task button that cannot
+/// be activated or closed.
+fn is_taskbar_eligible(has_owner: bool, is_tool: bool, is_app: bool, cloaked: bool) -> bool {
+    (!has_owner || is_app) && !is_tool && !cloaked
+}
+
+/// Whether DWM currently cloaks `hwnd` (hidden UWP shell window / other desktop).
+///
+/// Best-effort: when the attribute is unsupported the call fails and the window
+/// is treated as *not* cloaked, matching the pre-existing behaviour.
+fn is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked: u32 = 0;
+    // SAFETY: `hwnd` is a live top-level window; `cloaked` is a `u32` the API
+    // fills in when `DWMWA_CLOAKED` is supported.
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&mut cloaked as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    result.is_ok() && cloaked != 0
 }
 
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -116,4 +149,34 @@ unsafe fn window_text(hwnd: HWND) -> String {
         return String::new();
     }
     String::from_utf16_lossy(&buf[..got as usize])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_taskbar_eligible;
+
+    #[test]
+    fn plain_ownerless_window_is_eligible() {
+        assert!(is_taskbar_eligible(false, false, false, false));
+    }
+
+    #[test]
+    fn tool_window_is_never_eligible() {
+        assert!(!is_taskbar_eligible(false, true, false, false));
+        assert!(!is_taskbar_eligible(true, true, false, false));
+    }
+
+    #[test]
+    fn owned_window_needs_the_appwindow_flag() {
+        assert!(!is_taskbar_eligible(true, false, false, false));
+        assert!(is_taskbar_eligible(true, false, true, false));
+    }
+
+    #[test]
+    fn cloaked_window_is_never_eligible() {
+        // The Start menu host's `Windows.UI.Core.CoreWindow`: no owner, no
+        // `WS_EX_TOOLWINDOW`, but DWM-cloaked — it must not get a task button.
+        assert!(!is_taskbar_eligible(false, false, false, true));
+        assert!(!is_taskbar_eligible(true, false, true, true));
+    }
 }

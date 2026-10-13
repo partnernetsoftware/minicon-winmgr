@@ -14,21 +14,26 @@ pub struct TaskGroup {
     pub windows: Vec<WindowInfo>,
 }
 
-/// Groups windows by their owning process id.
+/// Groups windows by an arbitrary key computed from each window.
 ///
 /// Groups appear in the order their first window is seen; windows keep their
-/// input (enumeration) order within each group.
-pub fn group_by_pid(windows: Vec<WindowInfo>) -> Vec<TaskGroup> {
+/// input (enumeration) order within each group. This is the general form —
+/// [`group_by_pid`] and the taskbar's exe-path grouping both build on it.
+pub fn group_by<F>(windows: Vec<WindowInfo>, mut key_of: F) -> Vec<TaskGroup>
+where
+    F: FnMut(&WindowInfo) -> String,
+{
     let mut groups: Vec<TaskGroup> = Vec::new();
-    let mut index: HashMap<u32, usize> = HashMap::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
 
     for window in windows {
-        match index.get(&window.pid) {
+        let key = key_of(&window);
+        match index.get(&key) {
             Some(&i) => groups[i].windows.push(window),
             None => {
-                index.insert(window.pid, groups.len());
+                index.insert(key.clone(), groups.len());
                 groups.push(TaskGroup {
-                    key: window.pid.to_string(),
+                    key,
                     windows: vec![window],
                 });
             }
@@ -36,6 +41,14 @@ pub fn group_by_pid(windows: Vec<WindowInfo>) -> Vec<TaskGroup> {
     }
 
     groups
+}
+
+/// Groups windows by their owning process id.
+///
+/// Retained as the canonical "pid strategy" so callers and tests share one
+/// definition; the taskbar groups by exe path when configured.
+pub fn group_by_pid(windows: Vec<WindowInfo>) -> Vec<TaskGroup> {
+    group_by(windows, |window| window.pid.to_string())
 }
 
 #[cfg(test)]
@@ -87,6 +100,20 @@ mod tests {
         assert_eq!(groups[1].key, "1");
         assert_eq!(titles(&groups[0]), vec!["a", "c"]);
         assert_eq!(titles(&groups[1]), vec!["b", "d"]);
+    }
+
+    #[test]
+    fn group_by_uses_the_supplied_key() {
+        // Group by the first letter of the title: same-letter windows merge even
+        // across pids, proving the key function — not the pid — drives grouping.
+        let groups = group_by(
+            vec![win(1, "alpha"), win(2, "apple"), win(3, "beta")],
+            |w| w.title.chars().next().unwrap().to_string(),
+        );
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].key, "a");
+        assert_eq!(titles(&groups[0]), vec!["alpha", "apple"]);
+        assert_eq!(groups[1].key, "b");
     }
 
     #[test]

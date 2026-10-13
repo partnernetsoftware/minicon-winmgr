@@ -20,14 +20,14 @@ A minimal, reliability-focused Windows shell / session manager written in Rust.
 - **M0 — observability**: tracing to rolling file + stderr, panic hook, single-instance guard.
 - **M1 — message loop**: Win32 message-only window, message pump, graceful Ctrl+C shutdown.
 - **M2 — window awareness**: `EnumWindows` snapshot with class/title/pid/visibility.
-- **M3 — taskbar host**: self-painted, text-first 36px bar (**shown by default**, `MINICON_NO_TASKBAR=1` to hide) — settings/menu/quick-launch/list buttons, one button per window, clock. Keyboard nav via **Alt+`** then ←/→ + Enter. See [`docs/prd_design_language.md`](docs/prd_design_language.md).
+- **M3 — taskbar host**: self-painted, text-first 36px bar (**shown by default**, `MINICON_NO_TASKBAR=1` to hide) — settings/menu/quick-launch/list buttons, one button per window, clock. Keyboard nav via **Alt+`** then ←/→ + Enter. See [`docs/prd_4_1.md`](docs/prd_4_1.md).
 - **M4 — session lifecycle**: WTS session-change notifications + `WM_QUERYENDSESSION/ENDSESSION` handling.
-- **M5 — controlled shell switch**: `--shell-status` / `--shell-list` are read-only; writes (`--shell-set` / `--shell-replace` / `--shell-rollback`) require an explicit confirmation token (`MINICON_CONFIRM_SHELL=yes`). Runs in companion mode by default and leaves the registry untouched.
-- **M6/M7 — shell surface**: per-app grouped tasks, one bar per monitor, notification-area mirror + (replacement-mode) tray host, start menu (apps + Places + power) and Alt+Space launcher, AppBar docking.
+- **M5 — controlled shell switch**: `--shell-status` / `--shell-list` are read-only; writes (`--shell-set` / `--shell-replace` / `--shell-takeover` / `--shell-give-back` / `--shell-rollback`) require an explicit confirmation token (`MINICON_CONFIRM_SHELL=yes`). Runs in companion mode by default and leaves the registry untouched. **Takeover / give-back are immediate**: they write the registry *and* hand the desktop over in the current session (stop the running shell / detached-launch `explorer.exe`), no sign-out needed — see [`docs/prd_3_1.md`](docs/prd_3_1.md) §1b.
+- **M6/M7 — shell surface**: task buttons (one per window by default; optional per-app grouping), one bar per monitor, notification-area mirror + (replacement-mode) tray host, start menu (apps + Places + power) and Alt+Space launcher, AppBar docking.
 - **M8 — stability + input**: periodic memory/handle/GDI metrics, launch-frequency recents feeding ranking, window-snap hotkeys, Win+R run dialog, and a mirrored tray-icon strip on the bar's right zone.
-- **M9 — taskbar enhancements**: quick-launch pins (the most-used shortcuts, left of the bar), a window-list button (popup of every task group), and `Win+* → Ctrl+Alt+*` fallback for the snap hotkeys.
+- **M9 — taskbar enhancements**: **quick-launch pins** (user-curated, left of the bar — right-click a window button and pick *添加到快速启动*; the list persists in `quick-launch.txt` beside the exe), a window-list button (popup of every task group), and `Win+* → Ctrl+Alt+*` fallback for the snap hotkeys.
 - **M10 — hover preview (opt-in)**: hovering a task button for ~350ms shows a live thumbnail popup (`PrintWindow`), anchored above the bar and flipped/clamped to the monitor. **Off by default**; enable with `MINICON_HOVER_PREVIEW=1`.
-- **M11 — taskbar polish**: a **settings button** (left of the menu dot) opens a settings window with placeholder rows plus **Replace shell** / **Rollback shell** actions (Rollback backs up the previous `Shell` value first); task buttons are **one per window by default** (matching Alt+Tab; per-pid grouping is opt-in with `MINICON_GROUP_TASKS=1`); the bar anchors to the **full monitor bounds** so it sits flush to the physical bottom, and when AppBar docking is unavailable (no explorer broker) we **shrink the work area ourselves** (`SPI_SETWORKAREA`) so maximized windows stop above the bar. The reserved area is restored on exit **and** (because a `WM_DESTROY` never fires on the normal path) recovered on the next start from a persisted `minicon-workarea.state`, so a crash or hard kill no longer leaves a dead strip at the screen bottom.
+- **M11 — taskbar polish**: a **settings button** (left of the menu dot) opens a settings window with **real GDI-drawn controls** — window **merge policy** (never / when the bar is full / always), **grouping basis** (by application exe path, default, or by pid), show-taskbar / notification-strip / hover-preview toggles — persisted to `minicon-settings.txt` beside the exe (key-level upsert + `.bak`; the hand-written `minicon.conf` is never rewritten), plus **接管桌面（立即生效）** / **还原系统桌面（立即生效）** actions (takeover writes the registry *and* stops the running shell now; give-back restores the backed-up value and re-launches `explorer.exe`). Task buttons are **one per window by default** (matching Alt+Tab); `MINICON_GROUP_TASKS=1` remains as an env override (≡ `taskbar.group=always`). When the bar gets crowded it steps down a **density ladder** (full → compact, with an 8px hysteresis dead zone) before folding the tail behind a `»` overflow button — the clock zone is never covered. The bar anchors to the **full monitor bounds** so it sits flush to the physical bottom, and when AppBar docking is unavailable (no explorer broker) we **shrink the work area ourselves** (`SPI_SETWORKAREA`) so maximized windows stop above the bar. The reserved area is restored on exit **and** (because a `WM_DESTROY` never fires on the normal path) recovered on the next start from a persisted `minicon-workarea.state`, so a crash or hard kill no longer leaves a dead strip at the screen bottom. A second pass adds an **icon-only** densest tier (title dropped; a hover bubble names the button), keyboard **1..9** jump inside navigation, a **group right-click menu** (open / restore / minimize / close all, pin all), and a toggleable **notification-icon strip** (`taskbar.tray`).
 
 ### Hotkeys
 
@@ -40,7 +40,7 @@ A minimal, reliability-focused Windows shell / session manager written in Rust.
 
 All hotkeys degrade gracefully with a log line when another shell already owns the combo.
 
-Replacement readiness gate and rollback: [`docs/prd_shell_replace_rollback.md`](docs/prd_shell_replace_rollback.md). The full PRD is [`docs/prd.md`](docs/prd.md) (with `prd_*.md` sub-documents).
+Replacement readiness gate and rollback: [`docs/prd_3_1.md`](docs/prd_3_1.md). The full PRD is [`docs/prd.md`](docs/prd.md) (with `prd_*.md` sub-documents).
 
 ## Entry points
 
@@ -67,15 +67,17 @@ Direct binary flags:
 | `--shell-list` | list profiles + current |
 | `--shell-set <explorer\|alt\|minicon\|path>` | set `Shell` (needs `MINICON_CONFIRM_SHELL=yes`) |
 | `--shell-replace` / `--shell-rollback <value\|default>` | guarded writes (same token) |
+| `--shell-takeover` | replace the shell **and** take the desktop over now (same token) |
+| `--shell-give-back` | restore the recorded shell **and** bring the desktop back now (same token) |
 | `--launch <query>` | list ranked Start Menu matches |
 | `--launch-run <query>` | launch the best Start Menu match |
 | `--help` | usage |
 
-Env: `MINICON_NO_TASKBAR=1`, `MINICON_ACRYLIC=1`, `MINICON_HOVER_PREVIEW=1`, `MINICON_GROUP_TASKS=1`, `MINICON_HEARTBEAT_SECS=N`, `MINICON_LOG_DIR=path`,
-`MINICON_ALT_SHELL=path`, `MINICON_TRAY_HOST=1|0`, `MINICON_CONFIG=path`, `RUST_LOG=...`.
+Env vars: full, authoritative list in [`docs/prd_1_1.md`](docs/prd_1_1.md) §环境变量 / 开关 (single source of truth; not duplicated here).
 
 Config file (`minicon.conf`, or `MINICON_CONFIG`): `key=value`, `#`/`;` comments.
-Keys: `theme.bg|surface|hover|accent|text|muted` (`#RRGGBB`), `hotkey`, `show_taskbar`.
+Keys and defaults: authoritative table in [`docs/prd_6_1.md`](docs/prd_6_1.md) §6 (single source of truth; not duplicated here).
+The settings window writes `minicon-settings.txt` (or `MINICON_SETTINGS`); precedence is **env > minicon-settings.txt > minicon.conf > defaults**.
 
 ## Modules
 
@@ -85,15 +87,15 @@ Keys: `theme.bg|surface|hover|accent|text|muted` (`#RRGGBB`), `hotkey`, `show_ta
 | `window` / `window_snapshot` | M1 message loop, M2 window enumeration |
 | `taskbar` / `dwm` | M3 self-painted bar, AppBar docking, rounded corners + acrylic |
 | `session` | M4 WTS session lifecycle |
-| `shell_registry` | M5 controlled Shell switch |
+| `shell_registry` / `shell_swap` | M5 controlled Shell switch; immediate in-session handover (stop / re-launch the shell) |
 | `grouping` / `launcher` / `monitor` / `config` | task grouping, Start Menu search, monitors, theme/config |
 | `tray` / `launcher_ui` | M6: notification-area mirror, Alt+Space launcher popup |
 | `tray_host` / `start_menu` | M7: replacement-mode tray host, ORB start menu |
 | `metrics` / `hotkeys` / `recents` | M8: stability sampling, snap hotkeys, launch-frequency store |
 | `run_dialog` / `tray_bar` | M8: Win+R run dialog, tray-icon strip in the bar's right zone |
-| `quick_launch` / `task_list` | M9: pinned quick-launch buttons, window-list popup |
+| `quick_launch` / `task_list` | M9: user-curated quick-launch pins (persisted), window-list popup |
 | `hover_preview` | M10: hover thumbnail popup (`PrintWindow`, throttled by `WM_TIMER`) |
-| `settings_ui` | M11: settings window (placeholder rows) opened from the bar's settings button |
+| `settings_ui` | M11: settings window (real GDI-drawn controls) opened from the bar's settings button |
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, and `cargo test` on Windows.
 
