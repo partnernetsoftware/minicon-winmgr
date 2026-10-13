@@ -28,6 +28,8 @@ mod tray_bar;
 mod tray_host;
 mod win_util;
 mod window;
+mod window_events;
+mod window_icon;
 mod window_snapshot;
 
 /// Second-confirmation token required before any Shell-registry write. The

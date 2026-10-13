@@ -22,7 +22,7 @@ use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HWND_MESSAGE,
-    MSG, PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage,
+    KillTimer, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage,
     WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_QUERYENDSESSION, WM_TIMER,
     WM_WTSSESSION_CHANGE, WNDCLASS_STYLES, WNDCLASSW,
 };
@@ -134,6 +134,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::error!(%err, "window hotkeys init failed; continuing without them");
         }
 
+        // React to window create/destroy/foreground → debounced taskbar refresh.
+        if let Err(err) = crate::window_events::install(hwnd) {
+            tracing::error!(%err, "window-event hook init failed; continuing without it");
+        }
+
         let mut msg = MSG::default();
         tracing::info!("entering message pump");
         crate::metrics::log_sample();
@@ -213,10 +218,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_TIMER => {
-            tracing::debug!(timer_id = wparam.0, "heartbeat: message pump alive");
-            window_snapshot::log_snapshot();
-            crate::taskbar::refresh();
-            crate::metrics::log_sample();
+            if wparam.0 == crate::window_events::REFRESH_TIMER_ID {
+                // Debounced taskbar refresh triggered by a window event.
+                let _ = unsafe { KillTimer(Some(hwnd), crate::window_events::REFRESH_TIMER_ID) };
+                crate::taskbar::refresh();
+            } else {
+                tracing::debug!(timer_id = wparam.0, "heartbeat: message pump alive");
+                window_snapshot::log_snapshot();
+                crate::taskbar::refresh();
+                crate::metrics::log_sample();
+            }
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

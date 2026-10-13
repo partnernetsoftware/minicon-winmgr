@@ -8,6 +8,10 @@
 - `src/single_instance.rs`：命名互斥量 `CreateMutexW`，二次启动被拒。
 - `src/metrics.rs`：周期采样**内存 / 句柄 / GDI / user 对象**，写入 `metrics line=...` 日志行。
 - `src/session.rs`：WTS 会话变更 + `WM_QUERYENDSESSION/ENDSESSION`，记录回收路径。
+- `src/window_events.rs`：`SetWinEventHook`（object create/destroy/show/hide + system foreground/minimize，
+  两个钩子因事件范围 0x8xxx/0x00xx 相距远）驱动任务栏刷新；**去抖 120ms**（复用同一 `WM_TIMER`，不新增线程）。
+  目的：窗口一被销毁，任务按钮立刻消失，而不是等 30s 心跳。
+  - **坑**：`SetWinEventHook` 的 `eventmin ≤ eventmax`，否则直接失败（曾把 0x8000 当 min、0x0017 当 max → 失败）。
 
 ## 2. 稳定性证据（实测）
 - `cargo test` = **97 passed / 0 failed**；`cargo fmt --check` 通过；`cargo clippy --all-targets -- -D warnings` 干净。

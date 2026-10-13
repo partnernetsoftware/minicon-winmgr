@@ -1,12 +1,16 @@
 //! Small shared helpers for Win32 interop.
 
-use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::Foundation::{CloseHandle, HWND};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowThreadProcessId, HWND_TOP, IsIconic, SW_MINIMIZE, SW_RESTORE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos,
     ShowWindow,
 };
+use windows::core::PWSTR;
 
 /// Encodes `s` as a null-terminated UTF-16 buffer for Win32 `PCWSTR` arguments.
 ///
@@ -69,5 +73,42 @@ pub unsafe fn force_foreground(hwnd: HWND) -> bool {
         let _ = ShowWindow(hwnd, SW_MINIMIZE);
         let _ = ShowWindow(hwnd, SW_RESTORE);
         GetForegroundWindow() == hwnd
+    }
+}
+
+/// Longest image path `QueryFullProcessImageNameW` can return here, in UTF-16
+/// units. Windows caps paths well below this.
+const MAX_IMAGE_PATH: usize = 1024;
+
+/// Returns the full image path of the process owning `hwnd`, or `None`.
+///
+/// The window is first mapped to its process id, then the image path is read
+/// with `PROCESS_QUERY_LIMITED_INFORMATION`, which is granted across integrity
+/// levels for ordinary processes; protected or elevated targets may still
+/// refuse, in which case the caller should treat the window as not pinnable.
+///
+/// # Safety
+/// `hwnd` must be a valid window handle.
+pub unsafe fn window_exe_path(hwnd: HWND) -> Option<String> {
+    // SAFETY: all handles are released before returning; the buffer outlives
+    // the calls that write into it.
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; MAX_IMAGE_PATH];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(process);
+        (ok && len > 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
     }
 }

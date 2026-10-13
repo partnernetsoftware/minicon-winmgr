@@ -37,14 +37,14 @@ use windows::Win32::UI::Shell::{
     SHAppBarMessage,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    HWND_TOPMOST, IsWindow, KillTimer, MF_STRING, PostMessageW, RegisterClassW, SM_CXSCREEN,
-    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SetForegroundWindow,
-    SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_CLOSE,
-    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE,
-    WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_TIMER, WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyMenu,
+    DestroyWindow, DrawIconEx, GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
+    GetWindowRect, HICON, HWND_TOPMOST, IsWindow, KillTimer, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    PostMessageW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    SWP_NOACTIVATE, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_TIMER,
+    WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -72,6 +72,15 @@ const BTN_TOP: i32 = 6;
 const CLOCK_W: i32 = 132;
 /// Width of the window-list button that sits between the pins and the tasks.
 const LIST_W: i32 = 26;
+/// Width of the overflow button shown when task buttons cannot all fit.
+const OVERFLOW_W: i32 = 44;
+/// The identity slot at the left of every task button: the application icon's
+/// size, the inset before it, and the gap between it and the title. The icon is
+/// a fixed-width anchor, so the title starts at a predictable x even when two
+/// applications have wildly different name lengths.
+const ICON_W: i32 = 16;
+const ICON_PAD: i32 = 8;
+const ICON_GAP: i32 = 7;
 
 // --- palette defaults live in `config::Theme`; loaded once at startup --------
 fn theme() -> crate::config::Theme {
@@ -310,6 +319,16 @@ struct TaskItem {
     members: Vec<isize>,
     /// Button label (title, with `(+N)` when the group has more windows).
     label: String,
+    /// Application icon to draw in the button's identity slot; `0` = none.
+    icon: crate::window_icon::Icon,
+}
+
+/// One rendered quick-launch pin: the stored shortcut plus its resolved icon.
+struct PinItem {
+    label: String,
+    path: String,
+    /// Icon drawn in the pin square; `0` falls back to the label's initial.
+    icon: crate::window_icon::Icon,
 }
 
 /// Per-bar state: layout, mouse hover, and keyboard cursor.
@@ -319,11 +338,17 @@ struct BarEntry {
     /// Monitor work area this bar is docked to.
     area: (i32, i32, i32, i32),
     rects: Vec<RECT>,
+    /// Overflow button rect, shown when some task buttons do not fit.
+    overflow: Option<RECT>,
+    /// First task index hidden behind the overflow button (== rects.len()).
+    hidden_from: usize,
     /// Quick-launch pin rects (left of the list button).
     pin_rects: Vec<RECT>,
     /// Window-list button rect.
     list_rect: Option<RECT>,
     hover: Option<usize>,
+    /// Quick-launch pin under the cursor, if any.
+    pin_hover: Option<usize>,
     selected: Option<usize>,
 }
 
@@ -344,10 +369,16 @@ fn tray_icons() -> &'static Mutex<Vec<crate::tray::TrayIcon>> {
     T.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Quick-launch pins (most-used shortcuts), refreshed alongside the task list.
-fn pins() -> &'static Mutex<Vec<crate::quick_launch::Pin>> {
-    static P: OnceLock<Mutex<Vec<crate::quick_launch::Pin>>> = OnceLock::new();
+/// Quick-launch pins (user-curated), refreshed alongside the task list. Each
+/// entry carries the resolved icon so `paint` never touches the filesystem.
+fn pins() -> &'static Mutex<Vec<PinItem>> {
+    static P: OnceLock<Mutex<Vec<PinItem>>> = OnceLock::new();
     P.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Left edge of the quick-launch strip, just right of the brand grip.
+fn pins_left() -> i32 {
+    PAD + SETTINGS_W + GRIP
 }
 
 struct Brushes {
@@ -615,6 +646,11 @@ fn acrylic_requested() -> bool {
 
 /// Re-enumerates task windows, recomputes every bar's layout, and repaints.
 pub fn refresh() {
+    // Window handles are recycled, so a cached icon may belong to a window that
+    // has since been closed. Drop the cache before re-enumerating. Path icons
+    // are ours, so they are freed rather than merely forgotten.
+    crate::window_icon::begin_refresh();
+    crate::window_icon::clear_path_icons();
     let windows = crate::window_snapshot::taskbar_windows();
     // Default: one button per window (matches Alt+Tab). Per-pid grouping is
     // opt-in via `MINICON_GROUP_TASKS=1`.
@@ -635,6 +671,9 @@ pub fn refresh() {
                     hwnd: first.map(|w| w.hwnd.0 as isize).unwrap_or(0),
                     members: group.windows.iter().map(|w| w.hwnd.0 as isize).collect(),
                     label,
+                    icon: first
+                        .map(|w| crate::window_icon::for_window(w.hwnd))
+                        .unwrap_or(0),
                 }
             })
             .collect()
@@ -645,6 +684,7 @@ pub fn refresh() {
                 key: (w.hwnd.0 as isize).to_string(),
                 hwnd: w.hwnd.0 as isize,
                 members: vec![w.hwnd.0 as isize],
+                icon: crate::window_icon::for_window(w.hwnd),
                 label: w.title,
             })
             .collect()
@@ -660,7 +700,15 @@ pub fn refresh() {
     *tray_icons().lock().unwrap() = icons;
 
     // Refresh quick-launch pins; task buttons start after them + the list button.
-    let pins_now = crate::quick_launch::pins();
+    // Icons are resolved here (filesystem IO) rather than in `paint`.
+    let pins_now: Vec<PinItem> = crate::quick_launch::pins()
+        .into_iter()
+        .map(|pin| PinItem {
+            icon: crate::window_icon::for_path(&pin.path),
+            label: pin.label,
+            path: pin.path,
+        })
+        .collect();
     let pins_w = if pins_now.is_empty() {
         0
     } else {
@@ -670,7 +718,7 @@ pub fn refresh() {
     *pins().lock().unwrap() = pins_now;
 
     let after_pins = if pins_w > 0 {
-        PAD + SETTINGS_W + GRIP + pins_w + GAP
+        pins_left() + pins_w + GAP
     } else {
         PAD + SETTINGS_W + GRIP
     };
@@ -689,7 +737,7 @@ pub fn refresh() {
         }
         let pin_count = pins().lock().unwrap().len();
         bar.pin_rects = crate::quick_launch::layout(
-            PAD + SETTINGS_W + GRIP,
+            pins_left(),
             pin_count,
             crate::quick_launch::CELL,
             crate::quick_launch::GAP,
@@ -701,7 +749,10 @@ pub fn refresh() {
             right: after_pins + LIST_W,
             bottom: BAR_H - BTN_TOP,
         });
-        bar.rects = layout(tasks_left, client.right, n, tray_w);
+        let bl = layout(tasks_left, client.right, n, tray_w);
+        bar.rects = bl.rects;
+        bar.overflow = bl.overflow;
+        bar.hidden_from = bl.hidden_from;
         if bar.hover.is_some_and(|h| h >= n) {
             bar.hover = None;
         }
@@ -722,29 +773,71 @@ pub fn refresh() {
     );
 }
 
-/// Lays out task buttons starting at `start_left` across the available width,
-/// reserving `tray_w` pixels on the right for the notification-icon strip
-/// (plus its trailing margin).
-fn layout(start_left: i32, client_w: i32, n: usize, tray_w: i32) -> Vec<RECT> {
-    if n == 0 {
-        return Vec::new();
+/// Result of laying out the task buttons for one bar.
+struct ButtonLayout {
+    /// Visible task-button rects (index `i` ↔ task `i`).
+    rects: Vec<RECT>,
+    /// Overflow button, present when `rects.len() < n`.
+    overflow: Option<RECT>,
+    /// Number of tasks represented by visible buttons (== `rects.len()`).
+    hidden_from: usize,
+}
+
+/// One task-button rect at position `i` given a fixed button width.
+fn rect_at(left: i32, i: usize, bw: i32) -> RECT {
+    let x = left + i as i32 * (bw + GAP);
+    RECT {
+        left: x,
+        top: BTN_TOP,
+        right: x + bw,
+        bottom: BAR_H - BTN_TOP,
     }
-    let left = start_left;
+}
+
+/// Lays out task buttons starting at `start_left`, reserving `tray_w` pixels on
+/// the right for the notification strip and `RIGHT_W` for the clock.
+///
+/// Product rule: the right zone (clock) must **never** be overlapped. If all
+/// `n` buttons cannot fit at `BTN_MIN`, we show as many as fit plus an
+/// overflow button (`»`) that opens the full list for the hidden ones.
+fn layout(start_left: i32, client_w: i32, n: usize, tray_w: i32) -> ButtonLayout {
+    if n == 0 {
+        return ButtonLayout {
+            rects: Vec::new(),
+            overflow: None,
+            hidden_from: 0,
+        };
+    }
     let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
-    let avail = (client_w - left - PAD - RIGHT_W - tray).max(0);
-    let total_gap = GAP * (n as i32 - 1);
-    let bw = ((avail - total_gap) / n as i32).clamp(BTN_MIN, BTN_MAX);
-    (0..n)
-        .map(|i| {
-            let x = left + i as i32 * (bw + GAP);
-            RECT {
-                left: x,
-                top: BTN_TOP,
-                right: x + bw,
-                bottom: BAR_H - BTN_TOP,
-            }
-        })
-        .collect()
+    let avail = (client_w - start_left - PAD - RIGHT_W - tray).max(0);
+    let gap_total = GAP * (n as i32 - 1);
+
+    // All fit at the minimum width → use the proportional width (clamped).
+    if n as i32 * BTN_MIN + gap_total <= avail {
+        let bw = ((avail - gap_total) / n as i32).clamp(BTN_MIN, BTN_MAX);
+        let rects = (0..n).map(|i| rect_at(start_left, i, bw)).collect();
+        return ButtonLayout {
+            rects,
+            overflow: None,
+            hidden_from: n,
+        };
+    }
+
+    // Overflow: keep full-width buttons at BTN_MIN and add one overflow button.
+    let k = (((avail - OVERFLOW_W - GAP) / (BTN_MIN + GAP)).max(0) as usize).min(n);
+    let rects: Vec<RECT> = (0..k).map(|i| rect_at(start_left, i, BTN_MIN)).collect();
+    let ox = start_left + k as i32 * (BTN_MIN + GAP);
+    let overflow = (k < n).then(|| RECT {
+        left: ox,
+        top: BTN_TOP,
+        right: ox + OVERFLOW_W,
+        bottom: BAR_H - BTN_TOP,
+    });
+    ButtonLayout {
+        rects,
+        overflow,
+        hidden_from: k,
+    }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -766,8 +859,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             .rects
                             .iter()
                             .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
-                        let changed = hover != bar.hover;
+                        let pin_hover = crate::quick_launch::hit(&bar.pin_rects, x, y);
+                        let changed = hover != bar.hover || pin_hover != bar.pin_hover;
                         bar.hover = hover;
+                        bar.pin_hover = pin_hover;
                         (changed, hover)
                     }
                     None => (false, None),
@@ -827,9 +922,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             crate::hover_preview::hide();
             let changed = {
                 let mut bars = bars().lock().unwrap();
-                bars.iter_mut()
-                    .find(|b| b.hwnd == key)
-                    .is_some_and(|b| b.hover.take().is_some())
+                match bars.iter_mut().find(|b| b.hwnd == key) {
+                    Some(b) => {
+                        // Take both so a reset clears every hover indicator.
+                        let task = b.hover.take().is_some();
+                        let pin = b.pin_hover.take().is_some();
+                        task || pin
+                    }
+                    None => false,
+                }
             };
             if changed {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -852,11 +953,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return LRESULT(0);
             }
             // Snapshot this bar's interactive geometry.
-            let (pin_rects, list_rect, hover) = {
+            let (pin_rects, list_rect, overflow, hidden_from, hover) = {
                 let bars = bars().lock().unwrap();
                 match bars.iter().find(|b| b.hwnd == key) {
-                    Some(b) => (b.pin_rects.clone(), b.list_rect, b.hover),
-                    None => (Vec::new(), None, None),
+                    Some(b) => (
+                        b.pin_rects.clone(),
+                        b.list_rect,
+                        b.overflow,
+                        b.hidden_from,
+                        b.hover,
+                    ),
+                    None => (Vec::new(), None, None, 0, None),
                 }
             };
             // Window-list button: popup over every task group.
@@ -870,6 +977,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     .lock()
                     .unwrap()
                     .iter()
+                    .map(|t| crate::task_list::Entry {
+                        label: t.label.clone(),
+                        hwnd: t.hwnd,
+                    })
+                    .collect();
+                if let Some(target) = crate::task_list::popup(hwnd, &entries) {
+                    activate(hwnd_from(target));
+                }
+                return LRESULT(0);
+            }
+            // Overflow button: popup over the tasks that did not fit.
+            if let Some(r) = overflow
+                && x >= r.left
+                && x < r.right
+                && y >= r.top
+                && y < r.bottom
+            {
+                let entries: Vec<crate::task_list::Entry> = tasks()
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .skip(hidden_from)
                     .map(|t| crate::task_list::Entry {
                         label: t.label.clone(),
                         hwnd: t.hwnd,
@@ -897,14 +1026,35 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_RBUTTONDOWN => {
             let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
             crate::hover_preview::hide();
-            let target = {
+            let x = get_x(lparam);
+            let y = get_y(lparam);
+            // Hit-test against the live geometry rather than the (possibly
+            // stale) hover index, so a right-click lands on what is under it.
+            let (pin_rects, rects) = {
                 let bars = bars().lock().unwrap();
-                let hover = bars.iter().find(|b| b.hwnd == key).and_then(|b| b.hover);
-                drop(bars);
-                hover.and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd))
+                match bars.iter().find(|b| b.hwnd == key) {
+                    Some(b) => (b.pin_rects.clone(), b.rects.clone()),
+                    None => (Vec::new(), Vec::new()),
+                }
             };
-            if let Some(target) = target {
-                window_menu(hwnd, hwnd_from(target));
+            if let Some(i) = crate::quick_launch::hit(&pin_rects, x, y) {
+                pin_menu(hwnd, i);
+                refresh();
+                return LRESULT(0);
+            }
+            let task_hit = rects
+                .iter()
+                .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
+            let target = task_hit.and_then(|i| {
+                tasks()
+                    .lock()
+                    .unwrap()
+                    .get(i)
+                    .map(|t| (t.hwnd, t.label.clone()))
+            });
+            if let Some((target, label)) = target {
+                window_menu(hwnd, hwnd_from(target), &label);
+                refresh();
             }
             LRESULT(0)
         }
@@ -1097,17 +1247,19 @@ unsafe fn paint(hwnd: HWND) {
 
         let fg = GetForegroundWindow().0 as isize;
         let tasks = tasks().lock().unwrap();
-        let (rects, pin_rects, list_rect, hover, selected) = {
+        let (rects, overflow, pin_rects, list_rect, hover, pin_hover, selected) = {
             let bars = bars().lock().unwrap();
             match bars.iter().find(|b| b.hwnd == hwnd.0 as isize) {
                 Some(b) => (
                     b.rects.clone(),
+                    b.overflow,
                     b.pin_rects.clone(),
                     b.list_rect,
                     b.hover,
+                    b.pin_hover,
                     b.selected,
                 ),
-                None => (Vec::new(), Vec::new(), None, None, None),
+                None => (Vec::new(), None, Vec::new(), None, None, None, None),
             }
         };
 
@@ -1139,6 +1291,27 @@ unsafe fn paint(hwnd: HWND) {
                 FrameRect(hdc, &r, hbrush(br.accent));
             }
 
+            // Identity slot: the application icon, vertically centred. Drawn at
+            // its natural colors -- it is the one element allowed to be loud,
+            // because it answers "which app" before the title is read.
+            let has_icon = item.icon != 0;
+            if has_icon {
+                // SAFETY: the handle belongs to the target window or its class
+                // and stays valid for the duration of the call; the icon cache
+                // never destroys what it hands out.
+                let _ = DrawIconEx(
+                    hdc,
+                    r.left + ICON_PAD,
+                    (r.top + r.bottom - ICON_W) / 2,
+                    HICON(item.icon as *mut core::ffi::c_void),
+                    ICON_W,
+                    ICON_W,
+                    0,
+                    None,
+                    DI_NORMAL,
+                );
+            }
+
             SetTextColor(
                 hdc,
                 if active || is_selected {
@@ -1149,7 +1322,11 @@ unsafe fn paint(hwnd: HWND) {
             );
             let mut text: Vec<u16> = item.label.encode_utf16().collect();
             let mut tr = r;
-            tr.left += 9;
+            tr.left += if has_icon {
+                ICON_PAD + ICON_W + ICON_GAP
+            } else {
+                9
+            };
             tr.right -= 8;
             DrawTextW(
                 hdc,
@@ -1159,16 +1336,42 @@ unsafe fn paint(hwnd: HWND) {
             );
         }
 
-        // Quick-launch pins: surface squares with the label's first letter.
-        let pin_labels: Vec<String> = pins()
+        // Quick-launch pins: surface squares carrying the pinned app's icon, or
+        // the label's initial when no icon could be extracted. The strip only
+        // claims space when it is non-empty (see `refresh`).
+        let pin_items: Vec<(String, crate::window_icon::Icon)> = pins()
             .lock()
             .unwrap()
             .iter()
-            .map(|p| p.label.clone())
+            .map(|p| (p.label.clone(), p.icon))
             .collect();
         for (i, r) in pin_rects.iter().enumerate() {
-            FillRect(hdc, r, hbrush(br.surface));
-            if let Some(label) = pin_labels.get(i) {
+            let fill = if pin_hover == Some(i) {
+                br.hover
+            } else {
+                br.surface
+            };
+            FillRect(hdc, r, hbrush(fill));
+            let Some((label, icon)) = pin_items.get(i) else {
+                continue;
+            };
+            let cx = (r.left + r.right - ICON_W) / 2;
+            let cy = (r.top + r.bottom - ICON_W) / 2;
+            if *icon != 0 {
+                // SAFETY: the handle was extracted by `window_icon::for_path`
+                // and is valid until the next refresh; GDI only reads it.
+                let _ = DrawIconEx(
+                    hdc,
+                    cx,
+                    cy,
+                    HICON(*icon as *mut core::ffi::c_void),
+                    ICON_W,
+                    ICON_W,
+                    0,
+                    None,
+                    DI_NORMAL,
+                );
+            } else {
                 SetTextColor(hdc, COLORREF(theme().text));
                 let head: String = label.chars().take(1).collect();
                 let mut text: Vec<u16> = head.encode_utf16().collect();
@@ -1180,6 +1383,20 @@ unsafe fn paint(hwnd: HWND) {
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
                 );
             }
+        }
+
+        // Overflow button: shown when some task buttons do not fit.
+        if let Some(r) = overflow {
+            FillRect(hdc, &r, hbrush(br.surface));
+            SetTextColor(hdc, COLORREF(theme().muted));
+            let mut text: Vec<u16> = "»".encode_utf16().collect();
+            let mut tr = r;
+            DrawTextW(
+                hdc,
+                &mut text,
+                &mut tr,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
         }
 
         // Window-list button: a three-bar "menu" glyph.
@@ -1263,9 +1480,41 @@ const MENU_RESTORE: usize = 1;
 const MENU_MINIMIZE: usize = 2;
 const MENU_MAXIMIZE: usize = 3;
 const MENU_CLOSE: usize = 4;
+const MENU_PIN: usize = 5;
 
-/// Shows the right-click window menu for `target` and applies the choice.
-fn window_menu(owner: HWND, target: HWND) {
+/// Quick-launch pin right-click menu item ids.
+const MENU_OPEN_PIN: usize = 6;
+const MENU_UNPIN: usize = 7;
+
+/// Longest label stored for a pin, so a stray title cannot bloat the file.
+const PIN_LABEL_MAX: usize = 60;
+
+/// Label stored with a pin: the window title if it has one, else the
+/// executable's file stem.
+fn pin_label(title: &str, path: &str) -> String {
+    let title = title.trim();
+    if !title.is_empty() {
+        return title.chars().take(PIN_LABEL_MAX).collect();
+    }
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app")
+        .to_owned()
+}
+
+/// Shows the right-click window menu for `target` (labelled `title`) and
+/// applies the choice. The last entry pins the owning application to the
+/// quick-launch strip, or unpins it when already present.
+fn window_menu(owner: HWND, target: HWND, title: &str) {
+    // Resolve the owning image path before building the menu: this is a
+    // cross-process query and wants no locks held.
+    // SAFETY: `target` is a live task window from our list.
+    let exe = unsafe { crate::win_util::window_exe_path(target) };
+    let pinned = exe.as_deref().is_some_and(crate::quick_launch::is_pinned);
+    // Nothing to pin without a path, and a full strip cannot take more.
+    let pin_disabled = exe.is_none() || (!pinned && crate::quick_launch::is_full());
+
     // SAFETY: the menu is created and destroyed within this call; `owner` and
     // `target` are live windows owned by this process.
     unsafe {
@@ -1278,6 +1527,18 @@ fn window_menu(owner: HWND, target: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, MENU_MINIMIZE, PCWSTR(minimize.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, MENU_MAXIMIZE, PCWSTR(maximize.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE, PCWSTR(close.as_ptr()));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let pin_text = wide(if pinned {
+            "从快速启动移除"
+        } else {
+            "添加到快速启动"
+        });
+        let pin_flags = if pin_disabled {
+            MF_STRING | MF_GRAYED
+        } else {
+            MF_STRING
+        };
+        let _ = AppendMenuW(menu, pin_flags, MENU_PIN, PCWSTR(pin_text.as_ptr()));
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -1307,6 +1568,62 @@ fn window_menu(owner: HWND, target: HWND) {
             MENU_CLOSE => {
                 let _ = PostMessageW(Some(target), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
+            MENU_PIN => {
+                if let Some(path) = exe {
+                    let changed = if pinned {
+                        crate::quick_launch::remove(&path)
+                    } else {
+                        crate::quick_launch::add(&pin_label(title, &path), &path)
+                    };
+                    if changed {
+                        // Rebuild the strip (its width feeds the task layout).
+                        refresh();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Shows the right-click menu for the quick-launch pin at `index`: open it, or
+/// drop it from the strip.
+fn pin_menu(owner: HWND, index: usize) {
+    let pin = pins()
+        .lock()
+        .unwrap()
+        .get(index)
+        .map(|p| (p.label.clone(), p.path.clone()));
+    let Some((label, path)) = pin else { return };
+
+    // SAFETY: the menu is created and destroyed within this call; `owner` is a
+    // live bar window owned by this process.
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let open = wide(&format!("打开 {label}"));
+        let unpin = wide("从快速启动移除");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN_PIN, PCWSTR(open.as_ptr()));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, MENU_UNPIN, PCWSTR(unpin.as_ptr()));
+
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        // Required so the popup dismisses correctly when clicking away.
+        let _ = SetForegroundWindow(owner);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            Some(0),
+            owner,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+
+        match (cmd.0 & 0xFFFF) as usize {
+            MENU_OPEN_PIN => crate::quick_launch::launch_path(&path),
+            MENU_UNPIN if crate::quick_launch::remove(&path) => refresh(),
             _ => {}
         }
     }
@@ -1379,11 +1696,41 @@ mod tests {
     }
 
     #[test]
-    fn tray_strip_shrinks_button_area() {
-        let without = super::layout(22, 420, 2, 0);
-        let with = super::layout(22, 420, 2, 60);
-        assert_eq!(without.len(), 2);
-        assert_eq!(with.len(), 2);
-        assert!(with[1].right < without[1].right);
+    fn tray_strip_reduces_visible_buttons() {
+        // Narrow bar + 4 tasks: reserving tray space must reduce how many
+        // buttons stay visible (the rest go behind the overflow button).
+        let without = super::layout(200, 700, 4, 0);
+        let with = super::layout(200, 700, 4, 80);
+        assert!(without.overflow.is_some());
+        assert!(with.overflow.is_some());
+        assert!(
+            with.rects.len() < without.rects.len(),
+            "reserving tray space must reduce visible buttons"
+        );
+    }
+
+    #[test]
+    fn many_windows_fall_back_to_overflow_and_keep_the_right_zone() {
+        // A narrow bar with many tasks: not all buttons fit at BTN_MIN, so an
+        // overflow button appears and nothing reaches the right (clock) zone.
+        let n = 20;
+        let bl = super::layout(200, 900, n, 0);
+        assert!(bl.overflow.is_some(), "expected an overflow button");
+        assert!(bl.rects.len() < n, "some tasks must be hidden");
+        assert_eq!(bl.hidden_from, bl.rects.len());
+        // The overflow button's right edge must stay left of the clock zone.
+        let right_limit = 900 - super::PAD - super::RIGHT_W;
+        let last_visible = bl.rects.last().map(|r| r.right).unwrap_or(0);
+        let ov = bl.overflow.unwrap();
+        assert!(last_visible <= right_limit, "buttons must not cross PAD");
+        assert!(ov.right <= right_limit, "overflow must not cover the clock");
+    }
+
+    #[test]
+    fn few_windows_fit_without_overflow() {
+        let bl = super::layout(200, 1600, 3, 0);
+        assert!(bl.overflow.is_none());
+        assert_eq!(bl.rects.len(), 3);
+        assert_eq!(bl.hidden_from, 3);
     }
 }

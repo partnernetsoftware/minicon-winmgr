@@ -6,11 +6,14 @@
 状态图例：✅ 已实现 · 🟡 部分 · ⬜ 未做
 
 ## 任务栏（`src/taskbar.rs`）
-- ✅ 自绘效率条，**默认常显**（`MINICON_NO_TASKBAR=1` 隐藏），36px、深色、文本优先。
+- ✅ 自绘效率条，**默认常显**（`MINICON_NO_TASKBAR=1` 隐藏），36px、深色、16px 应用图标 + 标题。
 - ✅ **任务按钮：默认每窗口一个**（对齐 Alt+Tab）；按 pid 分组为 **opt-in** `MINICON_GROUP_TASKS=1`。
-- ✅ 左键切换窗口（最小化先还原）；右键窗口菜单（还原/最小化/最大化/关闭）。
+- ✅ **溢出自适应**：窗口多到放不下时显示 `N 可见 + » 折叠`，时钟区永不被覆盖；点 `»` 弹出未显示窗口。
+- ✅ **即时刷新**：`src/window_events.rs` 用 `SetWinEventHook`（create/destroy/show/hide/foreground/minimize，去抖 120ms）
+  驱动刷新——关闭窗口后按钮立刻消失，不必等 30s 心跳；菜单动作后也立即 `refresh()`。
+- ✅ 左键切换窗口（最小化先还原）；右键窗口菜单（还原/最小化/最大化/关闭 + **添加到快速启动 / 从快速启动移除**，取不到 exe 或已满则置灰）。
 - ✅ 键盘导航：**Alt+`** 唤出并聚焦，←/→ 选择、Enter 切换、Esc 取消（环绕逻辑有单测）。
-- ✅ 快速启动：`src/quick_launch.rs`，把 **recents 前 N（≤5）** 钉到最左（无历史则空）。
+- ✅ 快速启动：`src/quick_launch.rs`，**用户手动钉住**的应用（右键窗口菜单加入），持久化在 exe 旁 `quick-launch.txt`（`label<TAB>path`，可 `MINICON_QUICKLAUNCH_FILE` 覆盖），上限 8。图标取自 exe；取不到则显示首字。左键启动、右键"打开/移除"。
 - ✅ 列表按钮：`src/task_list.rs`，弹出全部分组窗口菜单，选中即切换。
 - ✅ 设置入口：最左"滑杆"按钮 → `src/settings_ui.rs`。
 - ✅ 右侧只读区：**仅时钟**（`yy-mm-dd HH:MM`，5s 定时器保证准点）+ 其左侧通知图标条。
@@ -60,7 +63,7 @@
 
 ## 环境变量 / 开关
 `MINICON_NO_TASKBAR=1`、`MINICON_ACRYLIC=1`、`MINICON_HOVER_PREVIEW=1`、`MINICON_GROUP_TASKS=1`、
-`MINICON_HEARTBEAT_SECS=N`、`MINICON_LOG_DIR=path`、`MINICON_ALT_SHELL=path`、`MINICON_TRAY_HOST=1|0`、
+`MINICON_QUICKLAUNCH_FILE=path`、`MINICON_HEARTBEAT_SECS=N`、`MINICON_LOG_DIR=path`、`MINICON_ALT_SHELL=path`、`MINICON_TRAY_HOST=1|0`、
 `MINICON_CONFIG=path`、`MINICON_CONFIRM_SHELL=yes`、`RUST_LOG=...`。
 
 ## CLI

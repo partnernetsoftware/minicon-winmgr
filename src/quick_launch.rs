@@ -1,10 +1,17 @@
 //! Quick-launch buttons for the left of the taskbar.
 //!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
+//! INTERFACE FROZEN — the signatures below are relied on by the taskbar; do not
+//! change them, and do not edit other files to accommodate this module.
 //!
-//! Pins are the most-used Start Menu entries (from `crate::recents`), capped at
-//! [`MAX_PINS`]; an empty history yields no pins. Geometry is pure and
-//! unit-tested; the taskbar owns the HDC and hit-testing.
+//! Pins are a **user-curated** list: the taskbar's per-window right-click menu
+//! adds an entry via [`add`] (or drops it via [`remove`]). The list persists
+//! next to the executable as `label<TAB>path` lines (env override
+//! `MINICON_QUICKLAUNCH_FILE`), so it survives restarts. An empty list means no
+//! pins — the strip is simply absent.
+//!
+//! Geometry is pure and unit-tested; the taskbar owns the HDC and hit-testing.
+
+use std::path::PathBuf;
 
 use windows::Win32::Foundation::RECT;
 
@@ -12,33 +19,155 @@ use windows::Win32::Foundation::RECT;
 pub const CELL: i32 = 26;
 /// Gap between adjacent buttons, in logical pixels.
 pub const GAP: i32 = 4;
-/// Maximum number of pinned buttons.
-pub const MAX_PINS: usize = 5;
+/// Maximum number of pinned buttons. Past this the taskbar greys the "add"
+/// entry out (see [`is_full`]).
+pub const MAX_PINS: usize = 8;
+
+/// Environment variable overriding the pin file location.
+const PINS_ENV: &str = "MINICON_QUICKLAUNCH_FILE";
+
+/// Default pin file name, placed next to the executable.
+const PINS_FILE_NAME: &str = "quick-launch.txt";
 
 /// One pinned quick-launch entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pin {
-    /// Display label (shortcut file stem).
+    /// Display label captured when the pin was created (window title, trimmed).
     pub label: String,
-    /// Target path passed to `crate::launcher::launch`.
+    /// Executable path handed to [`launch_path`].
     pub path: String,
 }
 
-/// Resolves the current pins: the most-used Start Menu shortcuts, capped at
-/// [`MAX_PINS`]. Empty when there is no usage history.
-pub fn pins() -> Vec<Pin> {
-    let stats = crate::recents::load();
-    if stats.is_empty() {
-        return Vec::new();
+/// Resolves the pin file path: `MINICON_QUICKLAUNCH_FILE` if set, else
+/// `<exe_dir>/quick-launch.txt`, else `./quick-launch.txt`.
+fn pins_file() -> PathBuf {
+    if let Some(path) = std::env::var_os(PINS_ENV)
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
     }
-    let items = crate::launcher::discover_shortcuts();
-    crate::recents::rank(&items, &stats, MAX_PINS)
-        .into_iter()
-        .map(|s| Pin {
-            label: s.name.clone(),
-            path: s.path.clone(),
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|parent| parent.join(PINS_FILE_NAME)))
+        .unwrap_or_else(|| PathBuf::from(PINS_FILE_NAME))
+}
+
+/// Parses `label<TAB>path` records, skipping blank and malformed lines. The
+/// path may contain spaces, so the fields split on the first tab only.
+fn parse(contents: &str) -> Vec<Pin> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let (label, path) = line.split_once('\t')?;
+            let path = path.trim();
+            if path.is_empty() {
+                return None;
+            }
+            Some(Pin {
+                label: label.trim().to_owned(),
+                path: path.to_owned(),
+            })
         })
         .collect()
+}
+
+/// Serializes pins to `label<TAB>path` lines.
+fn serialize(pins: &[Pin]) -> String {
+    let mut out = String::new();
+    for pin in pins {
+        out.push_str(&pin.label);
+        out.push('\t');
+        out.push_str(&pin.path);
+        out.push('\n');
+    }
+    out
+}
+
+/// Whether `pins` already holds `path` (case-insensitive, as Windows paths are).
+fn contains(pins: &[Pin], path: &str) -> bool {
+    pins.iter().any(|p| p.path.eq_ignore_ascii_case(path))
+}
+
+/// Appends `label`/`path` unless it is a duplicate or the cap is reached.
+/// Returns whether the list changed. Pure core of [`add`].
+fn push(pins: &mut Vec<Pin>, label: &str, path: &str) -> bool {
+    if path.is_empty() || pins.len() >= MAX_PINS {
+        return false;
+    }
+    if contains(pins, path) {
+        return false;
+    }
+    pins.push(Pin {
+        label: label.to_owned(),
+        path: path.to_owned(),
+    });
+    true
+}
+
+/// Loads the persisted pins, capped at [`MAX_PINS`]. Best effort: a missing or
+/// unreadable file yields an empty list.
+fn load() -> Vec<Pin> {
+    let contents = match std::fs::read_to_string(pins_file()) {
+        Ok(contents) => contents,
+        Err(err) => {
+            tracing::debug!(error = %err, "no quick-launch pin file");
+            return Vec::new();
+        }
+    };
+    let mut pins = parse(&contents);
+    pins.truncate(MAX_PINS);
+    pins
+}
+
+/// Writes `pins` back to disk, best effort.
+fn save(pins: &[Pin]) {
+    if let Err(err) = std::fs::write(pins_file(), serialize(pins)) {
+        tracing::warn!(error = %err, "failed to persist quick-launch pins");
+    }
+}
+
+/// The current pins, in display order.
+pub fn pins() -> Vec<Pin> {
+    load()
+}
+
+/// Whether `path` is already pinned.
+pub fn is_pinned(path: &str) -> bool {
+    contains(&load(), path)
+}
+
+/// Whether the pin cap is reached, so the taskbar can grey the "add" entry.
+pub fn is_full() -> bool {
+    load().len() >= MAX_PINS
+}
+
+/// Pins `path` under `label`, persisting on success. Returns whether the list
+/// changed (false for a duplicate, an empty path, or when [`MAX_PINS`] is
+/// reached).
+pub fn add(label: &str, path: &str) -> bool {
+    let mut pins = load();
+    if push(&mut pins, label, path) {
+        save(&pins);
+        tracing::info!(path, "quick-launch: pin added");
+        true
+    } else {
+        false
+    }
+}
+
+/// Drops the pin whose path matches, persisting on success. Returns whether the
+/// list changed.
+pub fn remove(path: &str) -> bool {
+    let mut pins = load();
+    let before = pins.len();
+    pins.retain(|p| !p.path.eq_ignore_ascii_case(path));
+    if pins.len() == before {
+        false
+    } else {
+        save(&pins);
+        tracing::info!(path, "quick-launch: pin removed");
+        true
+    }
 }
 
 /// Left-to-right button rects for `n` buttons starting at `left`, vertically
@@ -78,7 +207,7 @@ pub fn launch_path(path: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{GAP, MAX_PINS, hit, layout};
+    use super::{GAP, MAX_PINS, Pin, contains, hit, layout, parse, push, serialize};
 
     #[test]
     fn empty_has_no_rects() {
@@ -136,5 +265,87 @@ mod tests {
     #[test]
     fn max_pins_is_positive() {
         const { assert!(MAX_PINS > 0) };
+    }
+
+    #[test]
+    fn parse_skips_blank_and_malformed_lines() {
+        let text = "Editor\tC:\\app\\editor.exe\n\nno-tab-here\nTerm\tC:\\a b\\term.exe\n";
+        assert_eq!(
+            parse(text),
+            vec![
+                Pin {
+                    label: "Editor".into(),
+                    path: "C:\\app\\editor.exe".into()
+                },
+                Pin {
+                    label: "Term".into(),
+                    path: "C:\\a b\\term.exe".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_rejects_empty_path() {
+        assert!(parse("Label\t   \n").is_empty());
+    }
+
+    #[test]
+    fn serialize_round_trips_through_parse() {
+        let pins = vec![
+            Pin {
+                label: "编辑器".into(),
+                path: "C:\\Program Files\\Ed\\ed.exe".into(),
+            },
+            Pin {
+                label: "Term".into(),
+                path: "C:\\t.exe".into(),
+            },
+        ];
+        assert_eq!(parse(&serialize(&pins)), pins);
+    }
+
+    #[test]
+    fn push_adds_new_entry() {
+        let mut pins = Vec::new();
+        assert!(push(&mut pins, "Ed", "C:\\e.exe"));
+        assert_eq!(pins.len(), 1);
+    }
+
+    #[test]
+    fn push_ignores_duplicate_path_case_insensitively() {
+        let mut pins = vec![Pin {
+            label: "Ed".into(),
+            path: "C:\\Ed.exe".into(),
+        }];
+        assert!(!push(&mut pins, "Other", "c:\\ed.exe"));
+        assert_eq!(pins.len(), 1);
+    }
+
+    #[test]
+    fn push_ignores_empty_path() {
+        let mut pins = Vec::new();
+        assert!(!push(&mut pins, "X", ""));
+        assert!(pins.is_empty());
+    }
+
+    #[test]
+    fn push_respects_the_cap() {
+        let mut pins = Vec::new();
+        for i in 0..MAX_PINS {
+            assert!(push(&mut pins, "n", &format!("C:\\app{i}.exe")));
+        }
+        assert!(!push(&mut pins, "one more", "C:\\extra.exe"));
+        assert_eq!(pins.len(), MAX_PINS);
+    }
+
+    #[test]
+    fn contains_matches_case_insensitively() {
+        let pins = vec![Pin {
+            label: "Ed".into(),
+            path: "C:\\Ed.exe".into(),
+        }];
+        assert!(contains(&pins, "c:\\ed.exe"));
+        assert!(!contains(&pins, "c:\\other.exe"));
     }
 }
