@@ -10,15 +10,15 @@
 ## 0. 文档索引（按树的子路径切分）
 
 主文档保留**结构**（问题 / 目标 / 功能树 / 思维树 / 记忆宫殿 / 里程碑 / 风险）。
-内容多的树枝切到 `prd_{树路径}.md`，主文档只留一行摘要 + 指针。
+内容多的树枝切到 `prd_{path}.md`（文件名用英文），主文档只留一行摘要 + 指针。
 
 | 树路径 | 子文档 | 内容 | 何时读 |
 |--------|--------|------|--------|
-| 外壳功能对齐 | [`prd_外壳功能对齐.md`](prd_外壳功能对齐.md) | 每一项外壳能力的现状、入口、实现文件、已知限制 | 做/改 UI 功能前 |
-| 可靠性底座 | [`prd_可靠性底座.md`](prd_可靠性底座.md) | 可观测、稳定性指标、会话生命周期、工作区自管、**不变量与坑** | **改代码前必读** |
-| 外壳替换与回滚 | [`prd_外壳替换与回滚.md`](prd_外壳替换与回滚.md) | 替换门槛、切换/回滚流程、GUI 内入口 | 涉及 `Shell` 注册表时 |
-| 设计语言 | [`prd_设计语言.md`](prd_设计语言.md) | 视觉/交互规范（tokens、色板、布局、交互表） | 画界面时 |
-| 后续与调研 | [`prd_后续与调研.md`](prd_后续与调研.md) | 未做项优先级、文件夹堆栈/可浏览桌面调研 | 规划下一步时 |
+| 外壳功能对齐 | [`prd_shell_features.md`](prd_shell_features.md) | 每一项外壳能力的现状、入口、实现文件、已知限制 | 做/改 UI 功能前 |
+| 可靠性底座 | [`prd_reliability.md`](prd_reliability.md) | 可观测、稳定性指标、会话生命周期、工作区自管、**不变量与坑** | **改代码前必读** |
+| 外壳替换与回滚 | [`prd_shell_replace_rollback.md`](prd_shell_replace_rollback.md) | 替换门槛、切换/回滚流程、GUI 内入口 | 涉及 `Shell` 注册表时 |
+| 设计语言 | [`prd_design_language.md`](prd_design_language.md) | 视觉/交互规范（tokens、色板、布局、交互表） | 画界面时 |
+| 后续与调研 | [`prd_backlog_research.md`](prd_backlog_research.md) | 未做项优先级、文件夹堆栈/可浏览桌面调研 | 规划下一步时 |
 
 ---
 
@@ -75,7 +75,7 @@
 ## 4. 对标功能树（概览）
 
 > 来源：对主流第三方 Windows 桌面外壳的公开功能梳理（不点名具体产品）。
-> 状态图例：✅ 已实现 · 🟡 部分 · ⬜ 未做。逐项明细见 [`prd_外壳功能对齐.md`](prd_外壳功能对齐.md)。
+> 状态图例：✅ 已实现 · 🟡 部分 · ⬜ 未做。逐项明细见 [`prd_shell_features.md`](prd_shell_features.md)。
 
 ```text
 参考桌面外壳（Windows 外壳替代）
@@ -92,7 +92,7 @@
 │   ├── 最近使用                                              🟡（recents 已有，菜单内展示待做）
 │   └── 拖拽整理分类                                          ⬜
 ├── 动态桌面 Dynamic Desktop
-│   ├── 可浏览桌面                                            ⬜（调研见 prd_后续与调研.md）
+│   ├── 可浏览桌面                                            ⬜（调研见 prd_backlog_research.md）
 │   └── 桌面图标                                              ⬜（不做 → 依赖系统桌面）
 ├── 文件夹堆栈 Folder Stacks                                  ⬜（调研：先做最小切片）
 ├── 窗口管理
@@ -140,7 +140,7 @@
   B → E ; C → J,K,L,M,N,O ; D → I,G,O,R ; C → P,Q
 
 裁剪原则：可靠性底座是护城河、已就位并持续加固；当前 ROI 最高的剩余枝是
-"外壳功能对齐的次级缺口"与"长跑稳定性观察"，见 prd_后续与调研.md。
+"外壳功能对齐的次级缺口"与"长跑稳定性观察"，见 prd_backlog_research.md。
 ```
 
 ---
@@ -230,13 +230,13 @@ flowchart TD
 | M11 | 任务栏打磨：设置入口、每窗口一按钮、贴底锚定、工作区自管 | ✅ |
 | P/Q | 崩溃自恢复（工作区 autosave/recover）、分层置前 | ✅ |
 
-逐项明细、入口与已知限制见 [`prd_外壳功能对齐.md`](prd_外壳功能对齐.md)。
+逐项明细、入口与已知限制见 [`prd_shell_features.md`](prd_shell_features.md)。
 
 ---
 
 ## 8. 风险与安全
 - **漂移风险**：任何新点子先回写本文件（或子文档）再动手。
-- **替换破坏性**：写 `HKCU\...\Winlogon\Shell` 属共享状态；**始终先备份、始终可回滚**，流程与门槛见 [`prd_外壳替换与回滚.md`](prd_外壳替换与回滚.md)。
+- **替换破坏性**：写 `HKCU\...\Winlogon\Shell` 属共享状态；**始终先备份、始终可回滚**，流程与门槛见 [`prd_shell_replace_rollback.md`](prd_shell_replace_rollback.md)。
 - **多实例污染**：GUI 实验最多 1 个实例，用完即关并核对残留进程。
 - **无 explorer 运行**：AppBar 停靠依赖 explorer 中转；无 explorer 时由我们自管工作区（见不变量）。
 
@@ -244,7 +244,7 @@ flowchart TD
 
 ## 9. 不变量速查（改代码前必读）
 
-> 完整清单与"已验证事实/坑"见 [`prd_可靠性底座.md`](prd_可靠性底座.md)。此处只列高频三条：
+> 完整清单与"已验证事实/坑"见 [`prd_reliability.md`](prd_reliability.md)。此处只列高频三条：
 
 1. **taskbar 状态只允许消息线程访问**（`tasks/bars/tray_icons/pins`），**禁止新增 worker 线程抢这些锁**。
 2. **文件/跨进程 IO 不得在持 `bars()`/`tasks()` 锁时做**（否则卡 UI）。

@@ -1,3 +1,4 @@
 /target
 .workbuddy/
 scripts/capture.py
+scripts/hotswap.py

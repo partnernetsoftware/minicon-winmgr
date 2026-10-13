@@ -54,7 +54,7 @@
 - ✅ 窗口类统一 `hCursor = IDC_ARROW`（否则悬停显示"忙"光标）。
 
 ## 外壳集成
-- ✅ 受控替换 / 回滚：`src/shell_registry.rs` + CLI + 设置窗动作，见 [`prd_外壳替换与回滚.md`](prd_外壳替换与回滚.md)。
+- ✅ 受控替换 / 回滚：`src/shell_registry.rs` + CLI + 设置窗动作，见 [`prd_shell_replace_rollback.md`](prd_shell_replace_rollback.md)。
 
 ---
 
