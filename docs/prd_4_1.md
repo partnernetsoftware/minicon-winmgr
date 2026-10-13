@@ -1,6 +1,6 @@
-# prd_设计语言 — 效率条
+# prd_4_1 — 设计语言 · 效率条
 
-> 树路径：`设计语言` · 上位文档：[`prd.md`](prd.md)
+> 索引：4.1 · 树路径：`设计语言` · 上位文档：[`prd.md`](prd.md)
 > 原始独立文档 `ui-ux.md` 已并入本文。实现：[`src/taskbar.rs`](../src/taskbar.rs)、主题 [`src/config.rs`](../src/config.rs)。
 
 定位：不是壁纸/装饰系统，而是一条"**看一眼就知道系统在干什么、点一下就能切过去**"的极简任务栏。
@@ -69,6 +69,7 @@
 | 左键点列表 | `task_list::popup` 全部分组窗口 |
 | 左键点溢出 `»` | `task_list::popup` **未显示**的窗口（`hidden_from..`） |
 | 左键点快速启动 | `quick_launch::launch_path` |
+| **双击时钟** | 打开系统日期/时间设置（`ShellExecuteW` → `control.exe timedate.cpl`，与系统托盘时钟双击一致） |
 | 心跳 / **窗口事件** / 鼠标进入 | 重新枚举任务并重绘（保留 hover/键盘光标）。窗口创建/销毁/显示/隐藏/前台切换经 `window_events` 去抖 120ms 立即刷新，不等心跳 |
 | 悬停任务 ~350ms | 弹缩略图预览（**opt-in** `MINICON_HOVER_PREVIEW=1`） |
 | `Alt+`` | 唤出任务栏并进入键盘导航（光标落首个任务） |

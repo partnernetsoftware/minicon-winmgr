@@ -1,6 +1,6 @@
-# prd_后续与调研 — 未做项与可行性
+# prd_5_1 — 后续与调研 · 未做项与可行性
 
-> 树路径：`后续与调研` · 上位文档：[`prd.md`](prd.md)
+> 索引：5.1 · 树路径：`后续与调研` · 上位文档：[`prd.md`](prd.md)
 > 原始 `plan/plan-shell-gaps.md` 与 `plan/plan-folder-stacks.md` 已并入本文。
 > 约束（贯穿）：**companion 优先**、不改系统级 Shell、不发版、不签名。
 

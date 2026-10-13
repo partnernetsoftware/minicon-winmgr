@@ -1,6 +1,6 @@
-# prd_外壳功能对齐 — 逐项现状
+# prd_1_1 — 外壳功能对齐 · 逐项现状
 
-> 树路径：`外壳功能对齐` · 上位文档：[`prd.md`](prd.md)
+> 索引：1.1 · 树路径：`外壳功能对齐` · 上位文档：[`prd.md`](prd.md)
 > 目的：把"成熟外壳该有的每一个面"落到**现状 / 入口 / 实现文件 / 已知限制**，供做或改功能前快速定位。
 
 状态图例：✅ 已实现 · 🟡 部分 · ⬜ 未做
@@ -8,6 +8,7 @@
 ## 任务栏（`src/taskbar.rs`）
 - ✅ 自绘效率条，**默认常显**（`MINICON_NO_TASKBAR=1` 隐藏），36px、深色、16px 应用图标 + 标题。
 - ✅ **任务按钮：默认每窗口一个**（对齐 Alt+Tab）；按 pid 分组为 **opt-in** `MINICON_GROUP_TASKS=1`。
+- ✅ **任务窗口判定**（`src/window_snapshot.rs::is_app_window`）：可见 + 有标题 + 非本进程 + 无 owner（或有 `WS_EX_APPWINDOW`）+ 非 `WS_EX_TOOLWINDOW` + **非 DWM cloaked**（`DWMWA_CLOAKED`）。最后一条挡掉 Windows 保留的隐形窗口——例如开始菜单宿主的 `Windows.UI.Core.CoreWindow`（标题"开始"，无 owner、无 `WS_EX_TOOLWINDOW`、带 `WS_EX_NOACTIVATE`），否则它会变成任务栏上一个点不动也关不掉的幽灵按钮。
 - ✅ **溢出自适应**：窗口多到放不下时显示 `N 可见 + » 折叠`，时钟区永不被覆盖；点 `»` 弹出未显示窗口。
 - ✅ **即时刷新**：`src/window_events.rs` 用 `SetWinEventHook`（create/destroy/show/hide/foreground/minimize，去抖 120ms）
   驱动刷新——关闭窗口后按钮立刻消失，不必等 30s 心跳；菜单动作后也立即 `refresh()`。
@@ -16,7 +17,7 @@
 - ✅ 快速启动：`src/quick_launch.rs`，**用户手动钉住**的应用（右键窗口菜单加入），持久化在 exe 旁 `quick-launch.txt`（`label<TAB>path`，可 `MINICON_QUICKLAUNCH_FILE` 覆盖），上限 8。图标取自 exe；取不到则显示首字。左键启动、右键"打开/移除"。
 - ✅ 列表按钮：`src/task_list.rs`，弹出全部分组窗口菜单，选中即切换。
 - ✅ 设置入口：最左"滑杆"按钮 → `src/settings_ui.rs`。
-- ✅ 右侧只读区：**仅时钟**（`yy-mm-dd HH:MM`，5s 定时器保证准点）+ 其左侧通知图标条。
+- ✅ 右侧只读区：**仅时钟**（`yy-mm-dd HH:MM`，5s 定时器保证准点）+ 其左侧通知图标条；**双击时钟**打开系统自带的日期/时间设置（`ShellExecuteW` → `control.exe timedate.cpl`，即经典的"日期和时间"对话框，与系统托盘时钟双击一致；栏窗口类带 `CS_DBLCLKS`，其余区域只吃 `WM_LBUTTONDOWN`，故双击对其无副作用）。注：直接跑 `timedate.cpl` 依赖 `.cpl` 关联（精简体上返回 `SE_ERR_NOASSOC`=31），`ms-settings:dateandtime` 同样不可用，故显式走 `control.exe`。
 - ✅ 多显示器：每屏一栏，任务列表共享，布局/hover/键盘光标按栏独立。
 - ✅ AppBar 停靠（`SHAppBarMessage`）；无 explorer 中转时**自管工作区**（见可靠性文档）。
 - ✅ 贴底：按**显示器物理边界** `rcMonitor` 锚定。
@@ -57,7 +58,7 @@
 - ✅ 窗口类统一 `hCursor = IDC_ARROW`（否则悬停显示"忙"光标）。
 
 ## 外壳集成
-- ✅ 受控替换 / 回滚：`src/shell_registry.rs` + CLI + 设置窗动作，见 [`prd_shell_replace_rollback.md`](prd_shell_replace_rollback.md)。
+- ✅ 受控替换 / 回滚：`src/shell_registry.rs` + CLI + 设置窗动作，见 [`prd_3_1.md`](prd_3_1.md)。
 
 ---
 

@@ -1,6 +1,6 @@
-# prd_外壳替换与回滚
+# prd_3_1 — 外壳替换与回滚
 
-> 树路径：`外壳集成 / 替换` · 上位文档：[`prd.md`](prd.md)
+> 索引：3.1 · 树路径：`外壳集成 / 替换` · 上位文档：[`prd.md`](prd.md)
 > 原始独立文档 `replacement-readiness.md` 已并入本文。
 
 替换 = 把 `HKCU\...\Winlogon\Shell` 指向本程序（`<repo>\target\debug\minicon-winmgr.exe`）。
@@ -12,7 +12,7 @@
 - **无 explorer 也能运行**：杀掉 explorer 后本程序以 shell 模式运行
   （`running as the shell; console detached` + `tray_host` sink 创建成功）。
 - **AppBar 未能注册**（`ABM_NEW` 失败）——AppBar 需 explorer 当 broker；无 explorer 时**由我们自管工作区**替代，
-  最大化窗口仍停在栏上方（见 [`prd_reliability.md`](prd_reliability.md) §3）。
+  最大化窗口仍停在栏上方（见 [`prd_2_1.md`](prd_2_1.md) §3）。
 - 之后按需回滚/保留，`Shell` 现值以 `--shell-status` 为准。
 
 ## 2. 硬门槛（全绿方可长期保留替换）
@@ -51,7 +51,7 @@ MINICON_CONFIRM_SHELL=yes "<repo>\target\debug\minicon-winmgr.exe" --shell-rollb
 再 `cargo build`，随后请旧实例退出（必要时强杀），可选启动新 exe。把"掉壳"窗口压到亚秒级。
 
 ## 7. 已知缺口 / 非目标
-- 桌面图标 / 动态桌面、文件夹堆栈、菜单"最近使用"、通知区点击转发（见 [`prd_backlog_research.md`](prd_backlog_research.md)）。
+- 桌面图标 / 动态桌面、文件夹堆栈、菜单"最近使用"、通知区点击转发（见 [`prd_5_1.md`](prd_5_1.md)）。
 - 系统级（HKLM）替换、打包发版、代码签名：不做。
 
 ## 8. 风险

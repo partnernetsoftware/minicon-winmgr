@@ -1,7 +1,7 @@
 //! M5 — optional, reversible Explorer-shell replacement.
 //!
 //! SAFETY CONTRACT (see `docs/prd.md` §8 risk "替换破坏性" and
-//! `docs/prd_shell_replace_rollback.md`):
+//! `docs/prd_3_1.md`):
 //! - This module *reads* the current per-user shell value freely.
 //! - It only ever *writes* when [`replace`] / [`restore`] are called explicitly,
 //!   and the CLI layer additionally requires a second human confirmation token.

@@ -26,7 +26,7 @@ impl Default for Theme {
     }
 }
 
-/// Full configuration, with defaults matching `docs/prd_design_language.md`.
+/// Full configuration, with defaults matching `docs/prd_4_1.md`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub theme: Theme,
