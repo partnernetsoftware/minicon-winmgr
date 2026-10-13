@@ -17,6 +17,7 @@ mod quick_launch;
 mod recents;
 mod run_dialog;
 mod session;
+mod settings_ui;
 mod shell_registry;
 mod single_instance;
 mod start_menu;

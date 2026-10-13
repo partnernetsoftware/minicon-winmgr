@@ -11,13 +11,16 @@ use windows::core::BOOL;
 /// `MONITORINFOF_PRIMARY` from `winuser.h` (not re-exported by the crate).
 const MONITORINFOF_PRIMARY: u32 = 0x1;
 
-/// A monitor's work area (excludes taskbars) and primary flag.
+/// A monitor's work area (excludes taskbars), full bounds, and primary flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MonitorInfo {
     pub x: i32,
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    /// Full monitor rectangle `(x, y, w, h)` including any taskbars — used to
+    /// anchor our bar flush to the physical screen edge.
+    pub bounds: (i32, i32, i32, i32),
     pub primary: bool,
 }
 
@@ -48,11 +51,18 @@ unsafe extern "system" fn enum_proc(
     };
     if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
         let work = info.rcWork;
+        let bounds = info.rcMonitor;
         out.push(MonitorInfo {
             x: work.left,
             y: work.top,
             width: work.right - work.left,
             height: work.bottom - work.top,
+            bounds: (
+                bounds.left,
+                bounds.top,
+                bounds.right - bounds.left,
+                bounds.bottom - bounds.top,
+            ),
             primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
         });
     }

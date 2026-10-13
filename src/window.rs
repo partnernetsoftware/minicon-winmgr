@@ -114,6 +114,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::error!(%err, "run dialog init failed; continuing without it");
         }
 
+        // Settings window (opened from the taskbar's settings button).
+        if let Err(err) = crate::settings_ui::install(hinstance) {
+            tracing::error!(%err, "settings init failed; continuing without it");
+        }
+
         // Hover window-preview popup (shown by the taskbar on hover).
         if let Err(err) = crate::hover_preview::install(hinstance) {
             tracing::error!(%err, "hover preview init failed; continuing without it");

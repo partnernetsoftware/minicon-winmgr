@@ -27,6 +27,7 @@ A minimal, reliability-focused Windows shell / session manager written in Rust.
 - **M8 — stability + input**: periodic memory/handle/GDI metrics, launch-frequency recents feeding ranking, window-snap hotkeys, Win+R run dialog, and a mirrored tray-icon strip on the bar's right zone.
 - **M9 — taskbar enhancements**: quick-launch pins (the most-used shortcuts, left of the bar), a window-list button (popup of every task group), and `Win+* → Ctrl+Alt+*` fallback for the snap hotkeys.
 - **M10 — hover preview (opt-in)**: hovering a task button for ~350ms shows a live thumbnail popup (`PrintWindow`), anchored above the bar and flipped/clamped to the monitor. **Off by default**; enable with `MINICON_HOVER_PREVIEW=1`.
+- **M11 — taskbar polish**: a **settings button** (left of the menu dot) opens a settings window (placeholder rows for now); task buttons are **one per window by default** (matching Alt+Tab; per-pid grouping is opt-in with `MINICON_GROUP_TASKS=1`); the bar anchors to the **full monitor bounds** so it sits flush to the physical bottom even when AppBar docking is unavailable.
 
 ### Hotkeys
 
@@ -70,7 +71,7 @@ Direct binary flags:
 | `--launch-run <query>` | launch the best Start Menu match |
 | `--help` | usage |
 
-Env: `MINICON_NO_TASKBAR=1`, `MINICON_ACRYLIC=1`, `MINICON_HOVER_PREVIEW=1`, `MINICON_HEARTBEAT_SECS=N`, `MINICON_LOG_DIR=path`,
+Env: `MINICON_NO_TASKBAR=1`, `MINICON_ACRYLIC=1`, `MINICON_HOVER_PREVIEW=1`, `MINICON_GROUP_TASKS=1`, `MINICON_HEARTBEAT_SECS=N`, `MINICON_LOG_DIR=path`,
 `MINICON_ALT_SHELL=path`, `MINICON_TRAY_HOST=1|0`, `MINICON_CONFIG=path`, `RUST_LOG=...`.
 
 Config file (`minicon.conf`, or `MINICON_CONFIG`): `key=value`, `#`/`;` comments.
@@ -92,6 +93,7 @@ Keys: `theme.bg|surface|hover|accent|text|muted` (`#RRGGBB`), `hotkey`, `show_ta
 | `run_dialog` / `tray_bar` | M8: Win+R run dialog, tray-icon strip in the bar's right zone |
 | `quick_launch` / `task_list` | M9: pinned quick-launch buttons, window-list popup |
 | `hover_preview` | M10: hover thumbnail popup (`PrintWindow`, throttled by `WM_TIMER`) |
+| `settings_ui` | M11: settings window (placeholder rows) opened from the bar's settings button |
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, and `cargo test` on Windows.
 

@@ -54,6 +54,8 @@ const BAR_H: i32 = 36;
 const PAD: i32 = 10;
 const GAP: i32 = 4;
 const GRIP: i32 = 12;
+/// Width of the settings button (left of the menu button).
+const SETTINGS_W: i32 = 26;
 const RIGHT_W: i32 = 92;
 const BTN_MIN: i32 = 120;
 const BTN_MAX: i32 = 200;
@@ -213,15 +215,22 @@ pub fn enabled() -> bool {
     }
 }
 
+/// Whether task buttons are grouped per process. **Off by default** (one button
+/// per window, matching Alt+Tab); opt in with `MINICON_GROUP_TASKS=1`.
+fn grouping_enabled() -> bool {
+    std::env::var("MINICON_GROUP_TASKS")
+        .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
 /// Work areas to dock a bar to: one per monitor (primary first), or the full
 /// screen when monitor enumeration is unavailable.
 fn bar_areas() -> Vec<(i32, i32, i32, i32)> {
     let monitors = crate::monitor::enumerate();
     if !monitors.is_empty() {
-        return monitors
-            .into_iter()
-            .map(|m| (m.x, m.y, m.width, m.height))
-            .collect();
+        // Use the full monitor bounds (not the work area) so the bar docks flush
+        // to the physical bottom edge; AppBar `ABM_QUERYPOS` trims it away from
+        // any other AppBar.
+        return monitors.into_iter().map(|m| m.bounds).collect();
     }
     // SAFETY: pure metric queries.
     unsafe {
@@ -383,8 +392,11 @@ fn acrylic_requested() -> bool {
 
 /// Re-enumerates task windows, recomputes every bar's layout, and repaints.
 pub fn refresh() {
-    let tasks_now: Vec<TaskItem> =
-        crate::grouping::group_by_pid(crate::window_snapshot::taskbar_windows())
+    let windows = crate::window_snapshot::taskbar_windows();
+    // Default: one button per window (matches Alt+Tab). Per-pid grouping is
+    // opt-in via `MINICON_GROUP_TASKS=1`.
+    let tasks_now: Vec<TaskItem> = if grouping_enabled() {
+        crate::grouping::group_by_pid(windows)
             .into_iter()
             .map(|group| {
                 let first = group.windows.first();
@@ -402,7 +414,18 @@ pub fn refresh() {
                     label,
                 }
             })
-            .collect();
+            .collect()
+    } else {
+        windows
+            .into_iter()
+            .map(|w| TaskItem {
+                key: (w.hwnd.0 as isize).to_string(),
+                hwnd: w.hwnd.0 as isize,
+                members: vec![w.hwnd.0 as isize],
+                label: w.title,
+            })
+            .collect()
+    };
 
     let n = tasks_now.len();
     *tasks().lock().unwrap() = tasks_now;
@@ -424,9 +447,9 @@ pub fn refresh() {
     *pins().lock().unwrap() = pins_now;
 
     let after_pins = if pins_w > 0 {
-        PAD + GRIP + pins_w + GAP
+        PAD + SETTINGS_W + GRIP + pins_w + GAP
     } else {
-        PAD + GRIP
+        PAD + SETTINGS_W + GRIP
     };
     let tasks_left = after_pins + LIST_W + GAP;
 
@@ -443,7 +466,7 @@ pub fn refresh() {
         }
         let pin_count = pins().lock().unwrap().len();
         bar.pin_rects = crate::quick_launch::layout(
-            PAD + GRIP,
+            PAD + SETTINGS_W + GRIP,
             pin_count,
             crate::quick_launch::CELL,
             crate::quick_launch::GAP,
@@ -590,8 +613,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             crate::hover_preview::hide();
             let x = get_x(lparam);
             let y = get_y(lparam);
-            // Brand dot opens the start menu.
-            if x < PAD + GRIP {
+            // Settings button (leftmost) opens the settings window.
+            if x < PAD + SETTINGS_W {
+                crate::settings_ui::toggle();
+                return LRESULT(0);
+            }
+            // Menu dot opens the start menu.
+            if x < PAD + SETTINGS_W + GRIP {
                 crate::start_menu::toggle();
                 return LRESULT(0);
             }
@@ -795,11 +823,38 @@ unsafe fn paint(hwnd: HWND) {
         };
         FillRect(hdc, &client, hbrush(bg));
 
-        // Brand grip: a small accent dot.
-        let dot = RECT {
+        // Settings button (left of the menu dot): a three-slider glyph.
+        let set_rect = RECT {
             left: PAD,
+            top: BTN_TOP,
+            right: PAD + SETTINGS_W,
+            bottom: BAR_H - BTN_TOP,
+        };
+        FillRect(hdc, &set_rect, hbrush(br.surface));
+        let scx = (set_rect.left + set_rect.right) / 2;
+        for (k, off) in [4, -3, 1].into_iter().enumerate() {
+            let y = BAR_H / 2 - 5 + k as i32 * 5;
+            let line = RECT {
+                left: scx - 6,
+                top: y,
+                right: scx + 6,
+                bottom: y + 1,
+            };
+            FillRect(hdc, &line, hbrush(br.accent));
+            let knob = RECT {
+                left: scx + off - 1,
+                top: y - 2,
+                right: scx + off + 2,
+                bottom: y + 3,
+            };
+            FillRect(hdc, &knob, hbrush(br.accent));
+        }
+
+        // Brand grip: a small accent dot (the menu button), right of settings.
+        let dot = RECT {
+            left: PAD + SETTINGS_W + 3,
             top: BAR_H / 2 - 3,
-            right: PAD + 6,
+            right: PAD + SETTINGS_W + 9,
             bottom: BAR_H / 2 + 3,
         };
         FillRect(hdc, &dot, hbrush(br.accent));

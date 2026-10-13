@@ -190,6 +190,9 @@ flowchart TD
 - **激活窗口前必须 `IsWindow` 守卫**：句柄可能已关闭并被复用，否则会把前台切到错误窗口（`taskbar::activate` 已加）。
 - **悬停预览禁止在 `WM_MOUSEMOVE` 同步 `PrintWindow`**：用 `WM_TIMER` 节流（350ms），单窗口 show/hide 复用，`HBITMAP` 在 target 变化与 `WM_DESTROY` 时释放（`hover_preview`）。
 - **不改 `Cargo.toml` 的 feature 冻结约定**：禁止用 `windows::core::link!` 绕过未启用 feature，改用语义化 feature（如 `PrintWindow` 需 `Win32_Storage_Xps`）。
+- **AppBar 由 explorer 中转**：`SHAppBarMessage(ABM_NEW)` 需要 explorer 在场做 AppBar broker；explorer 不在（或被杀）时注册失败。因此任务栏定位使用**显示器物理边界 `rcMonitor`**（`monitor::MonitorInfo::bounds`），非工作区——悬浮时也贴底；explorer 在场时会为它自己的任务栏预留底边工作区，我们的置顶栏正好覆盖那一条。
+- **任务栏默认每窗口一个按钮**（对齐 Alt+Tab），按 pid 分组是 opt-in：`MINICON_GROUP_TASKS=1`。分组会把同进程多窗口折成 `(+N)`，曾被用户报"任务栏漏窗"。
+- **悬停预览默认关闭**：`MINICON_HOVER_PREVIEW=1` 才启用（用户判定该功能价值低）。
 
 ---
 
@@ -233,4 +236,5 @@ flowchart TD
 - [x] M9 任务栏增强：快速启动 `quick_launch`（把 recents 前 N 名钉到任务栏左侧，无历史则空）、窗口列表按钮 `task_list`（点击弹出全部分组窗口的菜单）；Snap 热键加 `Win+* → Ctrl+Alt+*` 回退。
 - [x] M10 悬停预览：`hover_preview`（任务栏按钮悬停 350ms 弹 `PrintWindow(PW_RENDERFULLCONTENT)` 缩略图；纯几何 `target_rect` + 单测；单窗口复用、位图按需释放）。
 - [x] 调研：文件夹堆栈 / 可浏览桌面 → `plan/plan-folder-stacks.md`（结论：先做"文件夹堆栈最小切片"，可浏览桌面缓做）。
+- [x] M11 任务栏打磨：**设置按钮**（最左，点开 `settings_ui` 占位对话框，5 行）；任务按钮**默认每窗口一个**（`MINICON_GROUP_TASKS=1` 才按 pid 分组）；栏改用**显示器物理边界**贴底（AppBar 失败时也不悬空）。
 - [ ] 外壳功能补全（次级，见 `plan/plan-shell-gaps.md`）：文件夹堆栈最小切片、主菜单最近使用/搜索、可浏览桌面。
