@@ -1,6 +1,6 @@
 //! Taskbar host windows — the shell's UI surface.
 //!
-//! Design language: `docs/ui-ux.md`. A minimal, text-first, 36px "efficiency
+//! Design language: `docs/prd_设计语言.md`. A minimal, text-first, 36px "efficiency
 //! bar": a brand dot, task buttons (hover + active states, click to focus),
 //! and a read-only right zone holding just the clock.
 //!

@@ -1,245 +1,251 @@
 # minicon-winmgr — 产品需求文档（PRD）
 
-> 状态：草案 v0.1（热身期）
-> 目标读者：本仓后续会话 / 分身、评审者
-> 关联：`README.md`（方向声明）、`docs/prd.md`（本文件）
+> 版本：v1.0（合并版） · 更新：2026-10-13
+> 角色：**单一事实源（SSOT）**。此前分散的 `ui-ux.md` / `replacement-readiness.md` / `plan-*.md` 已并入本文与下方子文档。
+> 读者：本仓后续会话 / 分身、评审者、产品与工程决策者。
+> 约定：任何新想法先回写本文件（或其子文档）再动手，否则视为漂移。
 
 ---
 
-## 1. 目的与范围
+## 0. 文档索引（按树的子路径切分）
 
-为公司工作站提供一个 **可靠、可长期常驻、可管理** 的 Windows 外壳 / 会话管理器，
-对标成熟的第三方桌面外壳体验，但在 **稳定性与会话生命周期** 上做差异化加固。
+主文档保留**结构**（问题 / 目标 / 功能树 / 思维树 / 记忆宫殿 / 里程碑 / 风险）。
+内容多的树枝切到 `prd_{树路径}.md`，主文档只留一行摘要 + 指针。
 
-- **范围内**：外壳常驻进程、窗口感知、任务栏宿主、会话生命周期、可选的外壳替换开关。
-- **非目标（早期阶段明确不做）**：打包发布、代码签名、修改 Winlogon `Shell` 注册表（默认 companion 模式）、完整桌面/启动器 UI 的一次性铺开。
-
-## 2. 设计原则（防漂移）
-
-1. **companion 优先**：默认不接管、不修改系统注册表；替换 Explorer 仅作为可选、手动、可逆的后续步骤。
-2. **可观测先行**：没有日志/告警的外壳不上线（对齐"日志做全"偏好）。
-3. **小步验收**：每完成一小步即 `cargo check`，可运行即真跑一次并核对残留进程。
-4. **按需求树裁剪**：任何新功能必须先落入第 6 节需求树，否则视为漂移。
+| 树路径 | 子文档 | 内容 | 何时读 |
+|--------|--------|------|--------|
+| 外壳功能对齐 | [`prd_外壳功能对齐.md`](prd_外壳功能对齐.md) | 每一项外壳能力的现状、入口、实现文件、已知限制 | 做/改 UI 功能前 |
+| 可靠性底座 | [`prd_可靠性底座.md`](prd_可靠性底座.md) | 可观测、稳定性指标、会话生命周期、工作区自管、**不变量与坑** | **改代码前必读** |
+| 外壳替换与回滚 | [`prd_外壳替换与回滚.md`](prd_外壳替换与回滚.md) | 替换门槛、切换/回滚流程、GUI 内入口 | 涉及 `Shell` 注册表时 |
+| 设计语言 | [`prd_设计语言.md`](prd_设计语言.md) | 视觉/交互规范（tokens、色板、布局、交互表） | 画界面时 |
+| 后续与调研 | [`prd_后续与调研.md`](prd_后续与调研.md) | 未做项优先级、文件夹堆栈/可浏览桌面调研 | 规划下一步时 |
 
 ---
 
-## 3. 对标产品功能树 — 参考桌面外壳
+## 1. 产品概述
 
-来源：对主流第三方 Windows 桌面外壳的公开功能梳理（不针对具体产品命名）。
+### 1.1 问题
+长时间运行的公司工作站会话里，**系统自带外壳（explorer）与第三方桌面外壳都可能卡死**，
+表现为任务栏失去响应、桌面花屏、会话无法正常回收。现有外壳普遍缺少
+**结构化可观测**与**可管理的会话生命周期**，出问题时只能靠重启会话解决。
+
+### 1.2 愿景
+提供一个 **可靠、可长期常驻、可管理** 的 Windows 外壳 / 会话管理器：
+形态对齐成熟桌面外壳（任务栏、程序菜单、启动器…），但在
+**稳定性、可观测、会话生命周期** 上做差异化加固，并能在需要时**受控地替代**系统外壳。
+
+### 1.3 目标用户
+- 长时间使用 Windows 工作站的公司用户（研发/运维/交易等常驻多窗口场景）。
+- 需要统一管理桌面会话、又不能承受外壳崩溃的 IT 运维/管理员。
+
+### 1.4 价值主张（差异化）
+| 维度 | 系统/第三方外壳常见 | minicon-winmgr |
+|------|--------------------|----------------|
+| 稳定性 | 崩溃即不可用，缺自愈 | 常驻 + 指标采样 + 崩溃残留自恢复 |
+| 可观测 | 基本无结构化日志 | 结构化日志/panic 落盘/周期指标 |
+| 会话 | 会话生命周期不透明 | WTS 会话变更 + 结束事件显式处理 |
+| 接管 | 只能整机替换 | **companion 优先**，替换可选、受控、可回滚 |
+| 形态 | 图标 + 装饰 | **效率条**：文本优先、低噪声 |
+
+---
+
+## 2. 目标与非目标
+
+**目标**
+1. 稳定常驻：数小时无 panic / 句柄与 GDI 无泄漏 / 消息泵不卡死。
+2. 可观测：结构化日志 + 指标，出问题可定位。
+3. 外壳形态可用：任务栏为核心，逐步补齐菜单/启动器/通知区等。
+4. 受控接管：默认 companion，不碰注册表；替换可一键回滚。
+
+**非目标（当前阶段明确不做）**
+- 打包发版、代码签名。
+- 修改系统级 `Shell`（仅当前用户级、且需显式确认）。
+- 动态桌面 / 壁纸 / 完整桌面图标体系的一次性铺开（属"后续与调研"）。
+
+---
+
+## 3. 成功度量
+- **可靠性**：连续运行 ≥ 数小时，`handles`/`gdi_objects` 持平（`metrics` 日志佐证），无 panic。
+- **可定位性**：任一异常都有结构化日志行；崩溃后残留（工作区等）能自恢复。
+- **功能对齐**：任务栏/程序菜单/启动器等核心面达到"可日常使用"。
+- **可回滚**：替换后任一路径都能一键恢复到原外壳。
+
+---
+
+## 4. 对标功能树（概览）
+
+> 来源：对主流第三方 Windows 桌面外壳的公开功能梳理（不点名具体产品）。
+> 状态图例：✅ 已实现 · 🟡 部分 · ⬜ 未做。逐项明细见 [`prd_外壳功能对齐.md`](prd_外壳功能对齐.md)。
 
 ```text
 参考桌面外壳（Windows 外壳替代）
 ├── 任务栏 Taskbar
-│   ├── 任务列表（按应用/分类组织窗口）
-│   ├── 列表按钮（窗口总览，便于切换）
-│   ├── 系统托盘 / 通知区
-│   ├── 时钟
-│   └── 快速启动 / 任务栏快捷方式
+│   ├── 任务列表（每窗口一按钮，默认；可 opt-in 按 pid 分组）   ✅
+│   ├── 列表按钮（窗口总览）                                   ✅
+│   ├── 快速启动（recents 前 N 钉住）                           ✅
+│   ├── 系统托盘 / 通知区                                      ✅ 镜像 + 图标条 / 宿主(替换模式)
+│   ├── 时钟                                                  ✅
+│   └── 设置入口                                              ✅（占位）
 ├── 程序菜单 Programs Menu
-│   ├── 应用分类（拖拽整理，用户自定义）
-│   ├── 应用搜索
-│   ├── Places（导航位置：计算机/文档等）
-│   └── 最近使用
+│   ├── 应用列表 / 搜索                                        ✅
+│   ├── Places（计算机/文档/下载…）                             ✅
+│   ├── 最近使用                                              🟡（recents 已有，菜单内展示待做）
+│   └── 拖拽整理分类                                          ⬜
 ├── 动态桌面 Dynamic Desktop
-│   ├── 可浏览桌面（无需打开资源管理器）
-│   ├── 桌面图标
-│   └── 弹出式前进 / 后退导航
-├── 文件夹堆栈 Folder Stacks
-│   └── 把常用文件夹拖到菜单栏做即时访问
+│   ├── 可浏览桌面                                            ⬜（调研见 prd_后续与调研.md）
+│   └── 桌面图标                                              ⬜（不做 → 依赖系统桌面）
+├── 文件夹堆栈 Folder Stacks                                  ⬜（调研：先做最小切片）
 ├── 窗口管理
-│   ├── 悬停窗口预览
-│   ├── 堆叠窗口组（stacked window groups）
-│   └── 窗口贴靠 / 靠边
-├── 多显示器支持
-├── 个性化 / 主题
+│   ├── 悬停窗口预览                                          ✅（opt-in，默认关）
+│   ├── 窗口贴靠 / Snap 热键                                  ✅（Win+* → Ctrl+Alt+* 回退）
+│   └── 堆叠窗口组                                            ⬜
+├── 多显示器支持（每屏一栏）                                   ✅
+├── 个性化 / 主题（配置文件）                                  ✅
 └── 外壳集成
-    ├── 替换默认 shell
-    └── 桌面模式 / 外壳模式切换
+    ├── 替换默认 shell                                        ✅（受控、可回滚）
+    └── 桌面/外壳模式切换                                     ✅（替换/回滚）
 ```
 
-**对标结论**：这类外壳的形态价值集中在"任务栏 + 程序菜单 + 可浏览桌面"。
-我们的切入点是其下的 **可靠性底座与会话管理**——长时间公司桌面会话里，默认 shell 与第三方外壳都可能卡死。
+**对标结论**：形态价值集中在"任务栏 + 程序菜单 + 可浏览桌面"；我们的切入点是其下的
+**可靠性底座与会话管理**——母题是"**默认 shell 与第三方外壳都可能卡死**"。
 
 ---
 
-## 4. 思维树（markdown-tree-dag）
+## 5. 思维树（markdown-tree-dag）
 
-把"如何造一个可靠、可管理的桌面级外壳"拆成 DAG：节点可被多个父节点共享（用 `←` 标注额外父边）。
+把"如何造一个可靠、可管理的桌面级外壳"拆成 DAG（节点可被多个父节点共享，用 `←` 标注额外父边）。
 
 ```text
 [根] 让公司工作站获得可靠、可管理的 Windows 外壳
-├── 可靠性可观测硬化 ✅ 已砍完（M8）
-│   ├── 运行指标      → [J] metrics ✅
-│   ├── 崩溃可恢复    → [E] 会话生命周期 ✅
-│   └── 日志 / panic  → [A] ✅
-├── 外壳功能对齐 ★ 当前最高杠杆枝（正在砍）
-│   ├── 窗口可见性    → [C] ✅ → [D] 任务栏 ✅ → [I] 每屏一栏 ✅
-│   ├── 通知区        → [G] tray 镜像 ✅ → tray_bar 图标条 ✅ / 宿主 ✅
-│   ├── 启动器        → [H] 检索 + UI ✅ → 频次排序 [L] ✅
+├── 可靠性底座 ★ 差异化护城河（已建成，持续加固）
+│   ├── 可观测        → [A] 日志/panic ✅   [J] 运行指标 ✅
+│   ├── 会话生命周期  → [E] WTS + 结束事件 ✅
+│   ├── 崩溃自恢复    → [P] 工作区 autosave/recover ✅
+│   └── 前台/焦点正确性 → [Q] force_foreground 分层置前 ✅
+├── 外壳功能对齐（大部分已落地）
+│   ├── 窗口可见性    → [C]✅ → [D] 任务栏 ✅ → [I] 每屏一栏 ✅
+│   ├── 通知区        → [G] 镜像 ✅ → tray_bar ✅ / tray_host ✅
+│   ├── 启动器        → [H] 检索+UI ✅ → 频次排序 [L] ✅
 │   ├── 运行对话框    → [M] Win+R（回退 Ctrl+Alt+R）✅
 │   ├── 主菜单        → [N] ORB：应用 + Places + 电源 ✅
-│   ├── 任务栏增强    → [O] 快速启动（recents 前 N 钉住）✅ + 列表按钮 ✅
-│   └── 窗口管理      → [K] Snap 热键 ✅（含 Win+* → Ctrl+Alt+* 回退）
+│   ├── 任务栏增强    → [O] 快速启动 ✅ + 列表按钮 ✅ + 设置入口 ✅
+│   ├── 窗口管理      → [K] Snap 热键 ✅（含回退）
+│   └── 设置          → [R] 设置窗（占位）+ 替代/回滚 ✅
 └── 部署安全 ✅
     ├── 默认不接管    → companion 模式（贯穿始终）
-    └── 可选替换      → [F] 受控 Shell 开关（已试替换并还原）
+    └── 可选替换      → [F] 受控 Shell 开关（可回滚）
 
 依赖边（DAG）：
   A → B → C → D → F
-  B → E
-  C → J, K, L, M, N, O   （都建立在"窗口感知 + 任务栏"之上）
-  D → I, G, O            （每屏一栏 / 通知区 / 快速启动都是任务栏的分区扩展）
+  B → E ; C → J,K,L,M,N,O ; D → I,G,O,R ; C → P,Q
 
-裁剪原则：★ = 外壳功能对齐（[K–O]），因可靠性底座已就位、用户可感知的价值缺口在此；
-剩余次级分支见 plan/plan-shell-gaps.md（悬停预览、文件夹堆栈、可浏览桌面）。
+裁剪原则：可靠性底座是护城河、已就位并持续加固；当前 ROI 最高的剩余枝是
+"外壳功能对齐的次级缺口"与"长跑稳定性观察"，见 prd_后续与调研.md。
 ```
 
 ---
 
-## 5. 记忆宫殿（mermaid-flowchart-memory-palace）
+## 6. 记忆宫殿（mermaid-flowchart-memory-palace）
 
-把整个系统想象成一座"宫殿"：四个房间沿主廊排列。每个房间是一个关注点，
-进门顺序即落地顺序（M0 → M5）。
+把系统想象成一座宫殿，房间沿主廊排列；进门顺序即落地顺序（M0 → M11）。
 
 ```mermaid
 flowchart TD
     subgraph PALACE["记忆宫殿：minicon-winmgr"]
         direction TB
-
-        subgraph ROOM_A["① 观测地基 (M0) — 门口玄关"]
+        subgraph ROOM_A["① 观测地基 (M0) — 玄关"]
             A1["结构化日志<br/>滚动文件 + stderr"]
             A2["panic hook 落盘"]
             A3["CreateMutexW 单实例"]
             A1 --> A2 --> A3
         end
-
         subgraph ROOM_B["② 消息地基 (M1) — 大堂"]
-            B1["message-only 窗口<br/>HWND_MESSAGE"]
-            B2["消息泵<br/>GetMessage/Dispatch"]
-            B3["优雅退出<br/>Ctrl+C → WM_CLOSE"]
+            B1["message-only 窗口"]
+            B2["消息泵 GetMessage/Dispatch"]
+            B3["优雅退出 Ctrl+C → WM_CLOSE"]
             B1 --> B2 --> B3
         end
-
         subgraph ROOM_C["③ 窗口感知 (M2) — 陈列室"]
             C1["EnumWindows 枚举"]
             C2["class/title/pid/可见性 快照"]
             C1 --> C2
         end
-
-        subgraph ROOM_D["④ 任务栏宿主 (M3) — 工作间"]
-            D1["owned 置顶窗口"]
-            D2["静态任务列表"]
+        subgraph ROOM_D["④ 任务栏宿主 (M3/M9/M11) — 工作间"]
+            D1["自绘效率条 + 每屏一栏"]
+            D2["任务/快速启动/列表/设置/时钟"]
             D1 --> D2
         end
-
         subgraph ROOM_E["⑤ 会话生命周期 (M4) — 后厨"]
             E1["WTS 会话变更通知"]
             E2["WM_QUERYENDSESSION / ENDSESSION"]
             E1 --> E2
         end
-
-        subgraph ROOM_F["⑥ 外壳替换开关 (M5) — 暗门(手动/可逆)"]
+        subgraph ROOM_F["⑥ 外壳替换 (M5) — 暗门(受控/可回滚)"]
             F1["Winlogon Shell 注册表<br/>仅当前用户"]
         end
-
         subgraph ROOM_G["⑦ 外壳体验扩展 (M6/M7) — 新翼"]
-            G1["系统托盘镜像 + 图标条"]
+            G1["托盘镜像 + 图标条 + 宿主"]
             G2["启动器 UI + 运行对话框"]
-            G3["多显示器每屏一栏 / ORB 主菜单"]
+            G3["ORB 主菜单 + 设置窗"]
         end
-
-        subgraph ROOM_H["⑧ 任务栏增强 + 稳定性 (M8/M9/M10) — ★当前"]
-            H1["快速启动钉住<br/>(recents 前 N)"]
-            H2["窗口列表按钮"]
-            H3["Snap 热键<br/>(Win+* → Ctrl+Alt+* 回退)"]
-            H4["稳定性指标<br/>metrics"]
-            H5["悬停窗口预览<br/>缩略图悬浮窗"]
+        subgraph ROOM_H["⑧ 可靠性加固 + 窗口管理 (M8/M10/P/Q) — ★当前"]
+            H1["运行指标 metrics"]
+            H2["Snap 热键 + 回退"]
+            H3["悬停预览 (opt-in)"]
+            H4["工作区 autosave/recover"]
+            H5["分层 force_foreground"]
         end
     end
-
     ROOM_A ==> ROOM_B ==> ROOM_C ==> ROOM_D
     ROOM_B -.恢复依赖.-> ROOM_E
     ROOM_D -.需要窗口层.-> ROOM_E
     ROOM_D ==> ROOM_F
     ROOM_C ==> ROOM_G
     ROOM_D ==> ROOM_H
-
     classDef done fill:#d4edda,stroke:#2e7d32;
     classDef current fill:#fff3cd,stroke:#f9a825;
-    classDef todo fill:#f8f9fa,stroke:#adb5bd;
     class A1,A2,A3,B1,B2,B3,C1,C2,D1,D2,E1,E2,F1,G1,G2,G3 done;
     class H1,H2,H3,H4,H5 current;
 ```
 
-> 图例：绿=已完成（M0–M7）；黄=当前推进（M8/M9：任务栏增强 + 稳定性指标）。
-> 剩余次级项（悬停预览 / 文件夹堆栈 / 可浏览桌面）见 `plan/plan-shell-gaps.md`。
-
-### 5.1 已验证事实与坑（不变量）
-
-> 由"政委"审阅 + 实测确认，跨会话沿用。改代码前先读这一节。
-
-**已验证事实**
-- `cargo test` = 91 passed；`cargo clippy --all-targets -- -D warnings` 干净；`cargo fmt --check` 通过。
-- companion 模式下默认外壳常占用 `Win+*`：`run_dialog` 与 `hotkeys` 均**回退**到 `Ctrl+Alt+*`（实测注册成功）。若回退也被占，仅记 `error` 日志、热键不可用（用户无感）。
-- companion 模式下系统通知区被其它外壳接管，`tray` 镜像常为 `count=0`；替换模式才由 `tray_host` 提供。
-- 稳定性：句柄/GDI 在分钟级测量中**持平**（无泄漏）；AppBar `ABM_NEW` 在已有外壳占底边时失败 → 退化为悬浮（预期 WARN）。
-
-**坑 / 不变量**
-- **taskbar 状态只允许消息线程访问**：`tasks()` / `bars()` / `tray_icons()` / `pins()` 共用唯一消息线程。当前加锁顺序**不统一**（`paint` 是 tasks→bars→pins，`refresh` 是 bars→tasks），仅因单线程才安全；**任何新增 worker 线程都可能死锁**。禁止新增线程去抢这些锁。
-- **文件/跨进程 IO 不得在持 `bars()`/`tasks()` 锁时做**：`refresh()` 会同步跨进程读托盘 + 扫开始菜单，周期过长会卡 UI；新功能把 IO 放锁外。
-- **激活窗口前必须 `IsWindow` 守卫**：句柄可能已关闭并被复用，否则会把前台切到错误窗口（`taskbar::activate` 已加）。
-- **悬停预览禁止在 `WM_MOUSEMOVE` 同步 `PrintWindow`**：用 `WM_TIMER` 节流（350ms），单窗口 show/hide 复用，`HBITMAP` 在 target 变化与 `WM_DESTROY` 时释放（`hover_preview`）。
-- **不改 `Cargo.toml` 的 feature 冻结约定**：禁止用 `windows::core::link!` 绕过未启用 feature，改用语义化 feature（如 `PrintWindow` 需 `Win32_Storage_Xps`）。
-- **AppBar 由 explorer 中转**：`SHAppBarMessage(ABM_NEW)` 需要 explorer 在场做 AppBar broker；explorer 不在（或被杀）时注册失败。因此：① 任务栏定位使用**显示器物理边界 `rcMonitor`**（`monitor::MonitorInfo::bounds`），悬浮时也贴底；② AppBar 失败时**由我们自己 `SPI_SETWORKAREA` 收窄工作区**（保留底边 BAR_H），退出时还原。→ 无 explorer 也能让最大化窗口不压栏（readiness 门槛 #2）。
-  - **还原路径（2026-10-13 修复）**：收窄时把 `orig`/`mine` 两个矩形写入 exe 旁的 `minicon-workarea.state`；正常退出由 `taskbar::shutdown()`（在 `run_companion` 里 `window::run()` 之后调用）**主动销毁各栏**触发 `restore_workarea` 并删状态文件——此前只靠栏窗口的 `WM_DESTROY`，而优雅退出走的是 **message-only 窗口**的 `WM_CLOSE`，栏永远收不到 `WM_DESTROY`，退出后工作区不会还原（实测确认）。
-  - **强杀/崩溃兜底**：进程被强杀（任务管理器、`shellctl stop` 的 `Stop-Process -Force`）不执行任何清理，故下次启动由 `taskbar::recover_workarea()` 读状态文件：**仅当**当前工作区仍等于我们上次设的 `mine` 才还原为 `orig`（避免覆盖其它外壳的正常改动），随后清掉状态文件。→ 崩溃后不再残留底部空带。
-- **任务栏默认每窗口一个按钮**（对齐 Alt+Tab），按 pid 分组是 opt-in：`MINICON_GROUP_TASKS=1`。分组会把同进程多窗口折成 `(+N)`，曾被用户报"任务栏漏窗"。
-- **悬停预览默认关闭**：`MINICON_HOVER_PREVIEW=1` 才启用（用户判定该功能价值低）。
-- **前台锁坑**：任务栏/设置等是 top-most tool window，直接 `SetForegroundWindow` 常被系统前台锁拒绝（点了拉不起来）。统一用 `win_util::force_foreground`：先 `AttachThreadInput` 挂到当前前台线程再 `SetForegroundWindow`，之后脱开。
-- **显隐状态用真实查询**：`settings_ui::toggle` 不能缓存在内存标志里（切走后标志与真实可见性会不一致），改用 `IsWindowVisible` + `GetForegroundWindow`：可见但非前台 → 置前；可见且前台 → 隐藏。
-- **设置窗口含"替代/回滚"**：`do_replace` 先把当前 `Shell` 值备份到 exe 同目录 `shell-backup.txt` 再 `replace`；`do_rollback` 读该备份 `restore(Some)`，无备份则 `restore(None)`（回 explorer），且以 MessageBox 二次确认（默认"否"）。
+> 图例：绿=已完成（M0–M7）；黄=当前加固（可靠性 + 窗口管理）。
 
 ---
 
-## 6. 最小核心需求树（MVP）
+## 7. 需求与里程碑（状态）
 
-| 编号 | 需求 | 验收标准 | 里程碑 | 状态 |
-|------|------|----------|--------|------|
-| A | 常驻与可观测 | 滚动文件+stderr 双写；panic 入日志；二次启动被拒 | M0 | ✅ 已实现 |
-| B | 消息 / 窗口地基 | message-only 窗口可建；消息泵稳定运行；Ctrl+C 优雅退出 | M1 | ✅ 已实现 |
-| C | 窗口感知 | 枚举顶层窗口并可输出 class/title/pid/可见性快照 | M2 | ✅ 已实现 |
-| D | 任务栏宿主 | 自建置顶窗口，静态展示 C 的快照 | M3 | ✅ 已实现（默认常显） |
-| E | 会话生命周期 | 收 WTS 会话变更 + `WM_QUERYENDSESSION/ENDSESSION`，记录回收路径 | M4 | ✅ 已实现 |
-| F | 外壳替换开关 | 当前用户级、手动、可一键回滚 | M5 | ✅ 已实现（受控；写入需二次确认） |
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| M0 | 常驻与可观测：日志双写、panic 落盘、单实例 | ✅ |
+| M1 | 消息/窗口地基：message-only 窗口、消息泵、优雅退出 | ✅ |
+| M2 | 窗口感知：顶层窗口枚举与快照 | ✅ |
+| M3 | 任务栏宿主：自绘效率条（默认常显） | ✅ |
+| M4 | 会话生命周期：WTS + 结束事件 | ✅ |
+| M5 | 受控外壳开关：只读查询 + 二次确认写入 | ✅ |
+| M6 | 壳面扩展：托盘镜像、启动器 UI、每屏一栏 | ✅ |
+| M7 | 替代就绪：AppBar 停靠、tray_host、ORB 主菜单 | ✅ |
+| M8 | 稳定性与输入：metrics、Snap 热键、recents | ✅ |
+| M9 | 任务栏增强：快速启动、列表按钮、热键回退 | ✅ |
+| M10 | 悬停窗口预览（opt-in） | ✅ |
+| M11 | 任务栏打磨：设置入口、每窗口一按钮、贴底锚定、工作区自管 | ✅ |
+| P/Q | 崩溃自恢复（工作区 autosave/recover）、分层置前 | ✅ |
 
-**差异化定位**：A/B/E 是我们的护城河（可靠性 + 会话管理）；C/D 是"像成熟外壳"的最低门槛。
+逐项明细、入口与已知限制见 [`prd_外壳功能对齐.md`](prd_外壳功能对齐.md)。
 
 ---
 
-## 7. 里程碑与风险
+## 8. 风险与安全
+- **漂移风险**：任何新点子先回写本文件（或子文档）再动手。
+- **替换破坏性**：写 `HKCU\...\Winlogon\Shell` 属共享状态；**始终先备份、始终可回滚**，流程与门槛见 [`prd_外壳替换与回滚.md`](prd_外壳替换与回滚.md)。
+- **多实例污染**：GUI 实验最多 1 个实例，用完即关并核对残留进程。
+- **无 explorer 运行**：AppBar 停靠依赖 explorer 中转；无 explorer 时由我们自管工作区（见不变量）。
 
-- **M0 / M1 已完成**（companion 模式，未触碰任何注册表；未发版、未签名）。
-- **风险 1 — 漂移**：任何新点子先回写第 4/6 节再动手。
-- **风险 2 — 会话替换的破坏性**：M5 修改 `HKCU\...\Winlogon\Shell`，属共享系统状态，落地前需人工确认并提供回滚。
-- **风险 3 — 多实例污染**：GUI 实验最多起 1 个实例，用完即关并核对残留进程。
+---
 
-## 8. 后续待办（Followups）
+## 9. 不变量速查（改代码前必读）
 
-- [x] M2：`EnumWindows` 顶层窗口枚举与快照日志
-- [x] M3：任务栏宿主窗口（默认常显；`MINICON_NO_TASKBAR=1` 隐藏）
-- [x] M4：WTS 会话变更通知 + 会话结束处理
-- [x] M5：受控的 Winlogon Shell 开关。`--shell-status` / `--shell-list` 只读；写入（`--shell-set` / `--shell-replace` / `--shell-rollback`）需 `MINICON_CONFIRM_SHELL=yes` 二次确认。
-- [x] M3+：自绘任务栏（极简深色、文本优先、hover/active、点击切窗、时钟；过滤 helper 窗口 903→11）。设计语言见 `docs/ui-ux.md`。
-- [x] DWM 圆角（默认）+ 亚克力（`MINICON_ACRYLIC=1`，opt-in），均优雅降级（`src/dwm.rs`）。
-- [x] 键盘导航：Alt+` 唤出、←/→ 选择、Enter 切换、Esc 取消（含单元测试）。
-- [x] 任务分组（按 pid 折叠，`src/grouping.rs`）；config/主题（`src/config.rs`）；多显示器枚举（`src/monitor.rs`，**每屏一栏**由 `src/taskbar.rs` 落地）；开始菜单检索（`src/launcher.rs`，`--launch` CLI）；CI 基线（`.github/workflows/ci.yml`）。
-- [x] 系统托盘镜像（`src/tray.rs`，companion 模式读现有 shell 托盘；当第三方外壳接管时无 `Shell_TrayWnd` 可读，返回 0）、应用启动器 UI（`src/launcher_ui.rs`，Alt+Space 弹窗）。
-- [ ] 继续对齐外部外壳实现：**AppBar 停靠已实现**（已有外壳占边时 `ABM_NEW` 可能失败→退化为悬浮）；随后 Snap/多屏热键。
-- [x] M7 替代就绪：AppBar 停靠、`tray_host`（替换模式托盘宿主）、`start_menu`（ORB）。门槛见 `docs/replacement-readiness.md`。
-- [x] M8 稳定性 + 输入：`metrics`（内存/句柄/GDI 周期采样）、`hotkeys`（Win+←/→/↑ Snap）、`recents`（启动频次排序）。
-- [x] 运行对话框 `run_dialog`（Win+R，被占用时回退 Ctrl+Alt+R）；托盘图标条 `tray_bar`（任务栏右区绘制，companion 下无图标则不占位）。
-- [x] M9 任务栏增强：快速启动 `quick_launch`（把 recents 前 N 名钉到任务栏左侧，无历史则空）、窗口列表按钮 `task_list`（点击弹出全部分组窗口的菜单）；Snap 热键加 `Win+* → Ctrl+Alt+*` 回退。
-- [x] M10 悬停预览：`hover_preview`（任务栏按钮悬停 350ms 弹 `PrintWindow(PW_RENDERFULLCONTENT)` 缩略图；纯几何 `target_rect` + 单测；单窗口复用、位图按需释放）。
-- [x] 调研：文件夹堆栈 / 可浏览桌面 → `plan/plan-folder-stacks.md`（结论：先做"文件夹堆栈最小切片"，可浏览桌面缓做）。
-- [x] M11 任务栏打磨：**设置按钮**（最左，点开 `settings_ui` 占位对话框，5 行）；任务按钮**默认每窗口一个**（`MINICON_GROUP_TASKS=1` 才按 pid 分组）；栏改用**显示器物理边界**贴底（AppBar 失败时也不悬空）。
-- [ ] 外壳功能补全（次级，见 `plan/plan-shell-gaps.md`）：文件夹堆栈最小切片、主菜单最近使用/搜索、可浏览桌面。
+> 完整清单与"已验证事实/坑"见 [`prd_可靠性底座.md`](prd_可靠性底座.md)。此处只列高频三条：
+
+1. **taskbar 状态只允许消息线程访问**（`tasks/bars/tray_icons/pins`），**禁止新增 worker 线程抢这些锁**。
+2. **文件/跨进程 IO 不得在持 `bars()`/`tasks()` 锁时做**（否则卡 UI）。
+3. **激活/置前用 `win_util::force_foreground`**（分层兜底），不要裸调 `SetForegroundWindow`。

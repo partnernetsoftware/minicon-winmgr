@@ -26,7 +26,7 @@ impl Default for Theme {
     }
 }
 
-/// Full configuration, with defaults matching `docs/ui-ux.md`.
+/// Full configuration, with defaults matching `docs/prd_设计语言.md`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub theme: Theme,

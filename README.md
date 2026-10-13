@@ -20,7 +20,7 @@ A minimal, reliability-focused Windows shell / session manager written in Rust.
 - **M0 — observability**: tracing to rolling file + stderr, panic hook, single-instance guard.
 - **M1 — message loop**: Win32 message-only window, message pump, graceful Ctrl+C shutdown.
 - **M2 — window awareness**: `EnumWindows` snapshot with class/title/pid/visibility.
-- **M3 — taskbar host**: self-painted, text-first 36px bar (**shown by default**, `MINICON_NO_TASKBAR=1` to hide) — brand dot, task buttons (hover + active), click-to-focus, clock. Keyboard nav via **Alt+`** then ←/→ + Enter. See [`docs/ui-ux.md`](docs/ui-ux.md).
+- **M3 — taskbar host**: self-painted, text-first 36px bar (**shown by default**, `MINICON_NO_TASKBAR=1` to hide) — settings/menu/quick-launch/list buttons, one button per window, clock. Keyboard nav via **Alt+`** then ←/→ + Enter. See [`docs/prd_设计语言.md`](docs/prd_设计语言.md).
 - **M4 — session lifecycle**: WTS session-change notifications + `WM_QUERYENDSESSION/ENDSESSION` handling.
 - **M5 — controlled shell switch**: `--shell-status` / `--shell-list` are read-only; writes (`--shell-set` / `--shell-replace` / `--shell-rollback`) require an explicit confirmation token (`MINICON_CONFIRM_SHELL=yes`). Runs in companion mode by default and leaves the registry untouched.
 - **M6/M7 — shell surface**: per-app grouped tasks, one bar per monitor, notification-area mirror + (replacement-mode) tray host, start menu (apps + Places + power) and Alt+Space launcher, AppBar docking.
@@ -40,7 +40,7 @@ A minimal, reliability-focused Windows shell / session manager written in Rust.
 
 All hotkeys degrade gracefully with a log line when another shell already owns the combo.
 
-Replacement readiness gate and rollback: [`docs/replacement-readiness.md`](docs/replacement-readiness.md).
+Replacement readiness gate and rollback: [`docs/prd_外壳替换与回滚.md`](docs/prd_外壳替换与回滚.md). The full PRD is [`docs/prd.md`](docs/prd.md) (with `prd_*.md` sub-documents).
 
 ## Entry points
 
