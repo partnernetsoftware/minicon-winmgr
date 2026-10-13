@@ -190,7 +190,8 @@ flowchart TD
 - **激活窗口前必须 `IsWindow` 守卫**：句柄可能已关闭并被复用，否则会把前台切到错误窗口（`taskbar::activate` 已加）。
 - **悬停预览禁止在 `WM_MOUSEMOVE` 同步 `PrintWindow`**：用 `WM_TIMER` 节流（350ms），单窗口 show/hide 复用，`HBITMAP` 在 target 变化与 `WM_DESTROY` 时释放（`hover_preview`）。
 - **不改 `Cargo.toml` 的 feature 冻结约定**：禁止用 `windows::core::link!` 绕过未启用 feature，改用语义化 feature（如 `PrintWindow` 需 `Win32_Storage_Xps`）。
-- **AppBar 由 explorer 中转**：`SHAppBarMessage(ABM_NEW)` 需要 explorer 在场做 AppBar broker；explorer 不在（或被杀）时注册失败。因此任务栏定位使用**显示器物理边界 `rcMonitor`**（`monitor::MonitorInfo::bounds`），非工作区——悬浮时也贴底；explorer 在场时会为它自己的任务栏预留底边工作区，我们的置顶栏正好覆盖那一条。
+- **AppBar 由 explorer 中转**：`SHAppBarMessage(ABM_NEW)` 需要 explorer 在场做 AppBar broker；explorer 不在（或被杀）时注册失败。因此：① 任务栏定位使用**显示器物理边界 `rcMonitor`**（`monitor::MonitorInfo::bounds`），悬浮时也贴底；② AppBar 失败时**由我们自己 `SPI_SETWORKAREA` 收窄工作区**（保留底边 BAR_H），并在 `WM_DESTROY`（最后一栏销毁）时 `restore_workarea` 还原。→ 无 explorer 也能让最大化窗口不压栏（readiness 门槛 #2）。
+  - 风险：若进程**崩溃**（非正常退出）不会走 `WM_DESTROY`，工作区会保持收窄（表现为下方留一条空带）。恢复：重启 shell 或手动还原工作区。
 - **任务栏默认每窗口一个按钮**（对齐 Alt+Tab），按 pid 分组是 opt-in：`MINICON_GROUP_TASKS=1`。分组会把同进程多窗口折成 `(+N)`，曾被用户报"任务栏漏窗"。
 - **悬停预览默认关闭**：`MINICON_HOVER_PREVIEW=1` 才启用（用户判定该功能价值低）。
 

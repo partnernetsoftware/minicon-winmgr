@@ -45,6 +45,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_TIMER, WNDCLASS_STYLES,
     WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SystemParametersInfoW,
+};
 use windows::core::PCWSTR;
 
 use crate::win_util::wide;
@@ -88,6 +92,68 @@ const HOVER_DELAY_MS: u32 = 350;
 
 /// Whether the acrylic backdrop is active (paint glass-black instead of bg).
 static ACRYLIC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Original work area captured before we shrink it ourselves (used when AppBar
+/// docking is unavailable, i.e. no explorer AppBar broker). Restored on teardown.
+static ORIG_WORKAREA: Mutex<Option<RECT>> = Mutex::new(None);
+
+/// Reserves the bottom strip by shrinking the work area so maximized windows
+/// stop above our bar when AppBar docking failed. Captures the original area
+/// once so it can be restored faithfully.
+fn reserve_workarea(area: (i32, i32, i32, i32)) {
+    let (x, y, w, h) = area;
+    let mut guard = ORIG_WORKAREA.lock().unwrap();
+    // SAFETY: `SystemParametersInfoW` reads/writes the RECT we point at, which
+    // outlives the call; these are process-global work-area queries.
+    unsafe {
+        if guard.is_none() {
+            let mut current = RECT::default();
+            let ok = SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut current as *mut RECT as *mut core::ffi::c_void),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+            .is_ok();
+            if !ok {
+                tracing::warn!("SPI_GETWORKAREA failed; not reserving work area");
+                return;
+            }
+            *guard = Some(current);
+        }
+        let mut target = RECT {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + h - BAR_H,
+        };
+        let _ = SystemParametersInfoW(
+            SPI_SETWORKAREA,
+            0,
+            Some(&mut target as *mut RECT as *mut core::ffi::c_void),
+            SPIF_SENDCHANGE,
+        );
+    }
+    tracing::info!(bottom = y + h - BAR_H, "work area reserved above the bar");
+}
+
+/// Restores the work area captured by [`reserve_workarea`], if any.
+fn restore_workarea() {
+    let mut guard = ORIG_WORKAREA.lock().unwrap();
+    if let Some(orig) = guard.take() {
+        let mut r = orig;
+        // SAFETY: `r` outlives the call.
+        unsafe {
+            let _ = SystemParametersInfoW(
+                SPI_SETWORKAREA,
+                0,
+                Some(&mut r as *mut RECT as *mut core::ffi::c_void),
+                SPIF_SENDCHANGE,
+            );
+        }
+        tracing::info!("work area restored on teardown");
+    }
+}
 
 fn hbrush(v: isize) -> HBRUSH {
     HBRUSH(v as *mut core::ffi::c_void)
@@ -299,7 +365,12 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             if register_appbar(hwnd, (x, y, w, h)) {
                 tracing::info!(hwnd = ?hwnd, "taskbar docked as AppBar");
             } else {
-                tracing::warn!(hwnd = ?hwnd, "AppBar registration failed; bar stays floating");
+                tracing::warn!(hwnd = ?hwnd, "AppBar registration failed; reserving work area instead");
+                // No AppBar broker (e.g. no explorer): shrink the work area
+                // ourselves so maximized windows still stop above the bar.
+                if i == 0 {
+                    reserve_workarea((x, y, w, h));
+                }
             }
 
             // Rounded corners are safe everywhere; acrylic is opt-in.
@@ -800,7 +871,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             let mut bars = bars().lock().unwrap();
             bars.retain(|b| b.hwnd != key);
-            tracing::info!(remaining = bars.len(), "taskbar window destroyed");
+            let remaining = bars.len();
+            drop(bars);
+            if remaining == 0 {
+                restore_workarea();
+            }
+            tracing::info!(remaining, "taskbar window destroyed");
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
