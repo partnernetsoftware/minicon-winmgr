@@ -278,7 +278,10 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
 /// Shows or hides the settings window. If it is on screen but not focused,
 /// clicking the button raises it instead of hiding it.
 pub fn toggle() {
-    if visible() && is_foreground() {
+    let vis = visible();
+    let fg = is_foreground();
+    tracing::info!(visible = vis, foreground = fg, "settings toggle requested");
+    if vis && fg {
         hide();
     } else {
         show();
@@ -304,10 +307,14 @@ fn show() {
     // SAFETY: `hwnd` is our live window.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
-        crate::win_util::force_foreground(hwnd);
+        let raised = crate::win_util::force_foreground(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, true);
+        if raised {
+            tracing::info!("settings window shown and focused");
+        } else {
+            tracing::warn!("settings window shown but could not take foreground");
+        }
     }
-    tracing::info!("settings window shown");
 }
 
 /// Hides the window without destroying it.

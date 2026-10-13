@@ -228,7 +228,7 @@ flowchart TD
 - [x] M3：任务栏宿主窗口（默认常显；`MINICON_NO_TASKBAR=1` 隐藏）
 - [x] M4：WTS 会话变更通知 + 会话结束处理
 - [x] M5：受控的 Winlogon Shell 开关。`--shell-status` / `--shell-list` 只读；写入（`--shell-set` / `--shell-replace` / `--shell-rollback`）需 `MINICON_CONFIRM_SHELL=yes` 二次确认。
-- [x] M3+：自绘任务栏（极简深色、文本优先、hover/active、点击切窗、时钟+计数；过滤 helper 窗口 903→11）。设计语言见 `docs/ui-ux.md`。
+- [x] M3+：自绘任务栏（极简深色、文本优先、hover/active、点击切窗、时钟；过滤 helper 窗口 903→11）。设计语言见 `docs/ui-ux.md`。
 - [x] DWM 圆角（默认）+ 亚克力（`MINICON_ACRYLIC=1`，opt-in），均优雅降级（`src/dwm.rs`）。
 - [x] 键盘导航：Alt+` 唤出、←/→ 选择、Enter 切换、Esc 取消（含单元测试）。
 - [x] 任务分组（按 pid 折叠，`src/grouping.rs`）；config/主题（`src/config.rs`）；多显示器枚举（`src/monitor.rs`，**每屏一栏**由 `src/taskbar.rs` 落地）；开始菜单检索（`src/launcher.rs`，`--launch` CLI）；CI 基线（`.github/workflows/ci.yml`）。

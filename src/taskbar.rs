@@ -67,7 +67,8 @@ const RIGHT_W: i32 = CLOCK_W + PAD;
 const BTN_MIN: i32 = 120;
 const BTN_MAX: i32 = 200;
 const BTN_TOP: i32 = 6;
-const CLOCK_W: i32 = 44;
+/// Width of the clock text (`yy-mm-dd HH:MM`).
+const CLOCK_W: i32 = 132;
 /// Width of the window-list button that sits between the pins and the tasks.
 const LIST_W: i32 = 26;
 
@@ -92,6 +93,12 @@ const APPBAR_CALLBACK: u32 = 0x8000 + 1;
 const HOVER_TIMER_ID: usize = 2;
 /// Delay before a hover shows the preview, in milliseconds.
 const HOVER_DELAY_MS: u32 = 350;
+
+/// Periodic repaint so the minute-level clock stays current between `refresh`
+/// runs (the heartbeat is only every 30s).
+const CLOCK_TIMER_ID: usize = 3;
+/// Clock repaint cadence, in milliseconds — finer than the minute it displays.
+const CLOCK_TICK_MS: u32 = 5000;
 
 /// Whether the acrylic backdrop is active (paint glass-black instead of bg).
 static ACRYLIC_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -391,6 +398,14 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+
+            // Repaint on a fixed cadence so the clock keeps up between refreshes.
+            if SetTimer(Some(hwnd), CLOCK_TIMER_ID, CLOCK_TICK_MS, None) == 0 {
+                tracing::warn!(
+                    hwnd = ?hwnd,
+                    "clock timer failed; time may lag until the next refresh"
+                );
+            }
         }
 
         ACRYLIC_ACTIVE.store(acrylic_ok, Ordering::SeqCst);
@@ -666,6 +681,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     crate::hover_preview::show(target, anchor);
                 }
             }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == CLOCK_TIMER_ID => {
+            // Layout is cached; a full-bar repaint is cheap and only redraws.
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
@@ -1051,10 +1071,17 @@ unsafe fn paint(hwnd: HWND) {
         }
         drop(icons);
 
-        // Right zone: the clock, right-aligned and muted.
+        // Right zone: the clock (`yy-mm-dd HH:MM`), right-aligned and muted.
         SetTextColor(hdc, COLORREF(theme().muted));
         let now = GetLocalTime();
-        let clock = format!("{:02}:{:02}", now.wHour, now.wMinute);
+        let clock = format!(
+            "{:02}-{:02}-{:02} {:02}:{:02}",
+            now.wYear % 100,
+            now.wMonth,
+            now.wDay,
+            now.wHour,
+            now.wMinute
+        );
         draw_right(
             hdc,
             &clock,

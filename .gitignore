@@ -1,1 +1,3 @@
 /target
+.workbuddy/
+scripts/capture.py
