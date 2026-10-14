@@ -11,8 +11,7 @@
 //!
 //! Companion mode: this never touches the Winlogon `Shell` registry value.
 
-use std::sync::atomic::{AtomicIsize, Ordering};
-
+use crate::hub;
 use crate::session;
 use crate::win_util::{guard_abi, wide};
 use crate::window_snapshot;
@@ -32,10 +31,6 @@ const CLASS_NAME: &str = "minicon_winmgr_message_window";
 const WINDOW_TITLE: &str = "minicon-winmgr (message-only)";
 const HEARTBEAT_TIMER_ID: usize = 1;
 const DEFAULT_HEARTBEAT_SECS: u64 = 30;
-
-/// HWND of the shell message window, shared with the console control handler
-/// (which runs on a separate OS thread). 0 means "not yet created".
-static SHELL_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// Runs the shell message loop until a quit message is received.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,7 +69,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             None,
         )?;
 
-        SHELL_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        // Published before anything else can need it: the console handler, the
+        // window-event hook and the tray host all reach the message thread
+        // through this one handle.
+        hub::set_shell_hwnd(hwnd);
         tracing::info!(hwnd = ?hwnd, "message-only window created");
 
         SetConsoleCtrlHandler(Some(console_ctrl_handler), true)?;
@@ -98,6 +96,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             tracing::info!("taskbar disabled via env");
         }
+        // Assembly layer: let modules that change what the bar shows ask for a
+        // rebuild without importing `taskbar` (which imports them back).
+        hub::set_taskbar_refresh(crate::taskbar::refresh);
 
         // Launcher popup (Alt+Space) — self-contained window + hotkey.
         if let Err(err) = crate::launcher_ui::init(hinstance) {
@@ -135,7 +136,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // React to window create/destroy/foreground → debounced taskbar refresh.
-        if let Err(err) = crate::window_events::install(hwnd) {
+        if let Err(err) = crate::window_events::install() {
             tracing::error!(%err, "window-event hook init failed; continuing without it");
         }
 
@@ -271,10 +272,10 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
 
 /// Inner implementation of [`console_ctrl_handler`], wrapped by the guard.
 unsafe extern "system" fn console_ctrl_handler_inner(ctrl_type: u32) -> BOOL {
-    let raw = SHELL_HWND.load(Ordering::SeqCst);
-    if raw != 0 {
+    // This handler runs on a different OS thread, so it only reads the handle and
+    // posts to the message thread — no shell state is touched here.
+    if let Some(hwnd) = hub::shell_hwnd() {
         tracing::info!(ctrl_type, "console control event; posting WM_CLOSE");
-        let hwnd = HWND(raw as *mut core::ffi::c_void);
         if let Err(err) = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) } {
             tracing::warn!(%err, "console control: could not post WM_CLOSE; shutdown may stall");
         }

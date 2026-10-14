@@ -32,7 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::launcher::Shortcut;
+use crate::model::Shortcut;
 use crate::win_util::{guard_abi, lock_or_recover, wide};
 
 // --- geometry / ids -------------------------------------------------------

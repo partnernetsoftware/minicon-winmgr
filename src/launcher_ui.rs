@@ -83,8 +83,8 @@ fn existing(slot: &AtomicIsize) -> Option<HWND> {
 }
 
 /// Lazily discovered Start Menu shortcuts, cached on first search.
-fn items() -> &'static Vec<crate::launcher::Shortcut> {
-    static ITEMS: OnceLock<Vec<crate::launcher::Shortcut>> = OnceLock::new();
+fn items() -> &'static Vec<crate::model::Shortcut> {
+    static ITEMS: OnceLock<Vec<crate::model::Shortcut>> = OnceLock::new();
     ITEMS.get_or_init(|| {
         let found = crate::launcher::discover_shortcuts();
         tracing::info!(count = found.len(), "launcher indexed Start Menu shortcuts");

@@ -10,8 +10,10 @@
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
+use crate::hub;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
+
 use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
     SetTimer, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
@@ -22,16 +24,16 @@ pub const REFRESH_TIMER_ID: usize = 4;
 /// Debounce delay after the last event, in milliseconds.
 const REFRESH_DEBOUNCE_MS: u32 = 120;
 
-/// HWND of the window that will receive the debounce timer. Stored as `isize`
-/// (message thread is the sole user).
-static SHELL_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Hook handles, kept alive for the process lifetime so they are never dropped.
 static HOOK_OBJECT: AtomicIsize = AtomicIsize::new(0);
 static HOOK_SYSTEM: AtomicIsize = AtomicIsize::new(0);
 
 /// Installs the window-event hooks. Safe to call once; repeats are no-ops.
-pub fn install(hwnd: HWND) -> Result<(), Box<dyn std::error::Error>> {
-    SHELL_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+///
+/// The debounce timer is armed on the shell message window, which is taken from
+/// [`crate::hub`] — the single owner of that handle — so this module never has to
+/// import `window` (which imports it).
+pub fn install() -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: `callback` is a valid `extern "system"` fn; out-of-context hooks
     // deliver events to this thread's message loop, so no module handle is
     // needed. Two hooks because the object (0x8xxx) and system (0x00xx) event
@@ -117,11 +119,9 @@ unsafe extern "system" fn callback_inner(
 /// they do not each need their own timer (or a direct call into `taskbar`,
 /// which is a dependency we are trying to remove).
 pub fn request_refresh() {
-    let raw = SHELL_HWND.load(Ordering::SeqCst);
-    if raw == 0 {
+    let Some(shell) = hub::shell_hwnd() else {
         return;
-    }
-    let shell = HWND(raw as *mut core::ffi::c_void);
+    };
     // SAFETY: `shell` is our live message window; re-arming the same timer id
     // resets it, coalescing bursts.
     let _ = unsafe { SetTimer(Some(shell), REFRESH_TIMER_ID, REFRESH_DEBOUNCE_MS, None) };

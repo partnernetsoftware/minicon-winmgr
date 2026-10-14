@@ -583,8 +583,11 @@ fn run_setting(action: SettingAction, hwnd: HWND) {
     };
     if changed {
         tracing::info!(?action, "setting applied");
-        // Rebuild the bar: merge/grouping changes must not wait for a refresh tick.
-        crate::taskbar::refresh();
+        // Rebuild the bar: merge/grouping changes must not wait for a refresh
+        // tick. Requested through the hub rather than by calling `taskbar`
+        // directly, so the settings window and the taskbar are not mutually
+        // dependent (the taskbar opens this window).
+        crate::hub::request_taskbar_refresh();
         // SAFETY: `hwnd` is our live settings window.
         unsafe {
             let _ = InvalidateRect(Some(hwnd), None, true);

@@ -4,13 +4,7 @@
 
 use std::path::Path;
 
-/// A launchable shortcut discovered in the Start Menu.
-pub struct Shortcut {
-    /// Display name (file stem of the shortcut).
-    pub name: String,
-    /// Absolute path to the `.lnk` (or executable).
-    pub path: String,
-}
+use crate::model::Shortcut;
 
 /// Scans the user and common Start Menu program folders for `.lnk` files.
 ///

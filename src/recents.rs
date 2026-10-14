@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::launcher::Shortcut;
+use crate::model::Shortcut;
 
 /// Environment variable overriding the stats file location.
 const RECENTS_ENV: &str = "MINICON_RECENTS_FILE";

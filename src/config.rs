@@ -15,6 +15,27 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+/// Config-file keys the settings UI writes.
+///
+/// Defined once, and used by **both** ends of a setting: the writer (`set_*`,
+/// which persists the line) and the reader (`apply`, which parses it back).
+/// They used to spell the key out separately, so renaming one side would have
+/// silently stopped the setting from surviving a restart — see the
+/// `every_settable_key_round_trips` test, which walks each pair through both
+/// directions.
+pub mod keys {
+    pub const TASKBAR_SHOW: &str = "taskbar.show";
+    pub const TASKBAR_TRAY: &str = "taskbar.tray";
+    pub const TASKBAR_GROUP: &str = "taskbar.group";
+    pub const TASKBAR_GROUP_BY: &str = "taskbar.group_by";
+    pub const HOVER_PREVIEW: &str = "behavior.hover_preview";
+}
+
+/// The `true`/`false` spelling used on disk for a boolean setting.
+const fn bool_value(b: bool) -> &'static str {
+    if b { "true" } else { "false" }
+}
+
 /// Color tokens as `COLORREF`-style `0x00BBGGRR` values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
@@ -123,9 +144,15 @@ pub struct Config {
     /// Hotkey spec, e.g. `"alt+`"`.
     pub hotkey: String,
     pub show_taskbar: bool,
-    /// Whether the mirrored notification-icon strip is drawn in the right zone
-    /// (`taskbar.tray`). Experimental/read-only — the strip currently shows only
-    /// per-process placeholder squares, so it is toggleable but off-meaning.
+    /// Whether the notification strip is drawn in the right zone
+    /// (`taskbar.tray`), default on.
+    ///
+    /// What the strip *is* depends on who owns the notification area (0.1.3 plan
+    /// §2.1): when we are the shell it shows the icons apps registered with us —
+    /// real icons, and clicks are forwarded back to the owning app; when another
+    /// shell owns the tray we can only mirror it, so the cells are inert, faded
+    /// placeholders that never forward anything. Turning it off removes the strip
+    /// (and its reserved width) in either case.
     pub show_tray: bool,
     /// Taskbar window-merge policy (`taskbar.group`).
     pub merge: MergeStrategy,
@@ -224,27 +251,27 @@ fn apply(cfg: &mut Config, key: &str, value: &str) {
         "hotkey" => {
             cfg.hotkey = value.trim().to_string();
         }
-        "show_taskbar" | "taskbar.show" => {
+        "show_taskbar" | keys::TASKBAR_SHOW => {
             if let Some(b) = parse_bool(value) {
                 cfg.show_taskbar = b;
             }
         }
-        "taskbar.tray" => {
+        keys::TASKBAR_TRAY => {
             if let Some(b) = parse_bool(value) {
                 cfg.show_tray = b;
             }
         }
-        "taskbar.group" => {
+        keys::TASKBAR_GROUP => {
             if let Some(m) = MergeStrategy::parse(value) {
                 cfg.merge = m;
             }
         }
-        "taskbar.group_by" => {
+        keys::TASKBAR_GROUP_BY => {
             if let Some(g) = GroupBy::parse(value) {
                 cfg.group_by = g;
             }
         }
-        "behavior.hover_preview" => {
+        keys::HOVER_PREVIEW => {
             if let Some(b) = parse_bool(value) {
                 cfg.hover_preview = b;
             }
@@ -409,41 +436,29 @@ fn update(f: impl FnOnce(&mut Config), key: &str, value: &str) -> bool {
 
 /// Sets the merge policy. Returns whether anything changed.
 pub fn set_merge(m: MergeStrategy) -> bool {
-    update(|c| c.merge = m, "taskbar.group", m.as_key())
+    update(|c| c.merge = m, keys::TASKBAR_GROUP, m.as_key())
 }
 
 /// Sets the grouping key. Returns whether anything changed.
 pub fn set_group_by(g: GroupBy) -> bool {
-    update(|c| c.group_by = g, "taskbar.group_by", g.as_key())
+    update(|c| c.group_by = g, keys::TASKBAR_GROUP_BY, g.as_key())
 }
 
 /// Sets taskbar visibility (restart-effective). Returns whether it changed.
 pub fn set_show_taskbar(b: bool) -> bool {
-    update(
-        |c| c.show_taskbar = b,
-        "taskbar.show",
-        if b { "true" } else { "false" },
-    )
+    update(|c| c.show_taskbar = b, keys::TASKBAR_SHOW, bool_value(b))
 }
 
-/// Sets whether the notification-icon strip is shown (effective immediately).
+/// Sets whether the notification strip is shown (effective immediately).
 /// Returns whether anything changed.
 pub fn set_show_tray(b: bool) -> bool {
-    update(
-        |c| c.show_tray = b,
-        "taskbar.tray",
-        if b { "true" } else { "false" },
-    )
+    update(|c| c.show_tray = b, keys::TASKBAR_TRAY, bool_value(b))
 }
 
 /// Sets the hover-preview preference (effective immediately). Returns whether
 /// anything changed.
 pub fn set_hover_preview(b: bool) -> bool {
-    update(
-        |c| c.hover_preview = b,
-        "behavior.hover_preview",
-        if b { "true" } else { "false" },
-    )
+    update(|c| c.hover_preview = b, keys::HOVER_PREVIEW, bool_value(b))
 }
 
 /// Key-level upsert of `key = value` into `text`, preserving every other line
@@ -710,5 +725,67 @@ theme.surface = #2C2626
         let text = upsert("# keep me\n", "taskbar.group_by", "pid");
         let cfg = parse(&text);
         assert_eq!(cfg.group_by, GroupBy::Pid);
+    }
+
+    #[test]
+    fn every_settable_key_round_trips_in_both_directions() {
+        // A setting has two ends: `set_*` writes `<key> = <value>` and `apply`
+        // has to read that same key back. While the key was spelled out at both
+        // ends, renaming one silently broke persistence — the setting would look
+        // applied and be gone after a restart. Walk every pair both ways.
+        fn round_trip(key: &str, value: &str, holds: impl Fn(&Config) -> bool) {
+            let mut direct = Config::default();
+            apply(&mut direct, key, value);
+            assert!(holds(&direct), "apply({key} = {value}) had no effect");
+
+            let text = upsert("", key, value);
+            let mut reparsed = Config::default();
+            apply_text(&mut reparsed, &text);
+            assert!(
+                holds(&reparsed),
+                "the persisted form {text:?} does not parse back into {key}"
+            );
+        }
+
+        round_trip(keys::TASKBAR_SHOW, "false", |c| !c.show_taskbar);
+        round_trip(keys::TASKBAR_TRAY, "false", |c| !c.show_tray);
+        round_trip(keys::HOVER_PREVIEW, "true", |c| c.hover_preview);
+        round_trip(keys::TASKBAR_GROUP, MergeStrategy::Always.as_key(), |c| {
+            c.merge == MergeStrategy::Always
+        });
+        round_trip(keys::TASKBAR_GROUP_BY, GroupBy::Pid.as_key(), |c| {
+            c.group_by == GroupBy::Pid
+        });
+    }
+
+    #[test]
+    fn the_setters_write_the_keys_the_parser_reads() {
+        // Belt and braces on top of the round trip: no key may be spelled out as a
+        // literal in the production half of this file, so a new setter cannot
+        // quietly introduce a second copy of it.
+        //
+        // The test half is deliberately excluded — those literals are the
+        // independent spelling a parser test should assert against, not a copy of
+        // the constant.
+        let source = include_str!("config.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a production half");
+        for key in [
+            keys::TASKBAR_SHOW,
+            keys::TASKBAR_TRAY,
+            keys::TASKBAR_GROUP,
+            keys::TASKBAR_GROUP_BY,
+            keys::HOVER_PREVIEW,
+        ] {
+            let literal = format!("\"{key}\"");
+            assert_eq!(
+                production.matches(&literal).count(),
+                1,
+                "{key} must be spelled out exactly once in production code (in `keys`); \
+                 a second copy is a setting that can silently stop round-tripping"
+            );
+        }
     }
 }
