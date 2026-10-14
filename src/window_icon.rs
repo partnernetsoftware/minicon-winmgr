@@ -39,7 +39,7 @@ fn cache() -> &'static Mutex<HashMap<isize, Icon>> {
 /// the system, so a stale entry would put one application's icon on another
 /// application's button.
 pub fn begin_refresh() {
-    cache().lock().unwrap().clear();
+    crate::win_util::lock_or_recover(cache()).clear();
 }
 
 /// Sends `WM_GETICON` with a bounded wait, returning `0` on failure.
@@ -64,7 +64,7 @@ fn send_icon(hwnd: HWND, which: usize) -> Icon {
 /// Returns the icon handle for `hwnd`, cached. `0` means "draw no icon".
 pub fn for_window(hwnd: HWND) -> Icon {
     let key = hwnd.0 as isize;
-    if let Some(hit) = cache().lock().unwrap().get(&key) {
+    if let Some(hit) = crate::win_util::lock_or_recover(cache()).get(&key) {
         return *hit;
     }
     // Prefer the small icon (16px, what the bar actually draws), then the
@@ -86,7 +86,7 @@ pub fn for_window(hwnd: HWND) -> Icon {
             }
         }
     }
-    cache().lock().unwrap().insert(key, icon);
+    crate::win_util::lock_or_recover(cache()).insert(key, icon);
     icon
 }
 
@@ -104,7 +104,7 @@ pub fn for_path(path: &str) -> Icon {
     if path.is_empty() {
         return 0;
     }
-    if let Some(hit) = path_cache().lock().unwrap().get(path) {
+    if let Some(hit) = crate::win_util::lock_or_recover(path_cache()).get(path) {
         return *hit;
     }
     let file = crate::win_util::wide(path);
@@ -113,7 +113,7 @@ pub fn for_path(path: &str) -> Icon {
     // missing or icon-less file simply extracts nothing.
     let extracted = unsafe { ExtractIconExW(PCWSTR(file.as_ptr()), 0, None, Some(&mut small), 1) };
     let icon = if extracted > 0 { small.0 as Icon } else { 0 };
-    path_cache().lock().unwrap().insert(path.to_owned(), icon);
+    crate::win_util::lock_or_recover(path_cache()).insert(path.to_owned(), icon);
     icon
 }
 
@@ -123,7 +123,7 @@ pub fn for_path(path: &str) -> Icon {
 /// dropping the map without destroying them would leak one icon per pin per
 /// refresh. Handles from the window cache are not touched — we never own those.
 pub fn clear_path_icons() {
-    let mut cache = path_cache().lock().unwrap();
+    let mut cache = crate::win_util::lock_or_recover(path_cache());
     for icon in cache.drain().map(|(_, icon)| icon) {
         if icon != 0 {
             // SAFETY: the handle came from `ExtractIconExW` and is only ever

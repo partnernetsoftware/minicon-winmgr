@@ -378,7 +378,7 @@ fn runtime() -> &'static Mutex<Config> {
 
 /// Snapshot of the live configuration (settings UI changes applied).
 pub fn current() -> Config {
-    runtime().lock().unwrap().clone()
+    crate::win_util::lock_or_recover(runtime()).clone()
 }
 
 /// Replaces the live config and persists the single changed key.
@@ -386,7 +386,7 @@ pub fn current() -> Config {
 /// `key`/`value` describe the one field that changed, so persistence is a
 /// key-level upsert that never touches the user's other lines.
 fn update(f: impl FnOnce(&mut Config), key: &str, value: &str) -> bool {
-    let mut guard = runtime().lock().unwrap();
+    let mut guard = crate::win_util::lock_or_recover(runtime());
     let before = guard.clone();
     f(&mut guard);
     if *guard == before {

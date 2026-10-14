@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 use crate::launcher::Shortcut;
-use crate::win_util::wide;
+use crate::win_util::{lock_or_recover, wide};
 
 // --- geometry / ids -------------------------------------------------------
 const ORB_W: i32 = 320;
@@ -437,16 +437,12 @@ fn orig_proc_for(hwnd: HWND) -> isize {
 /// Locks the items cache, recovering from a poisoned mutex (the data is a plain
 /// `Vec` with no invariants a panic could break).
 fn items_guard() -> std::sync::MutexGuard<'static, Vec<Shortcut>> {
-    ITEMS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    lock_or_recover(&ITEMS)
 }
 
 /// Locks the recents-row cache; see [`items_guard`].
 fn recent_guard() -> std::sync::MutexGuard<'static, Vec<Shortcut>> {
-    RECENT_ITEMS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    lock_or_recover(&RECENT_ITEMS)
 }
 
 /// Path for the shortcut at list-box row `index`, if any. Pure so it can be

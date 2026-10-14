@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::win_util::wide;
+use crate::win_util::{lock_or_recover, wide};
 
 /// Default preview size, in logical pixels.
 pub const PREVIEW_W: i32 = 240;
@@ -294,10 +294,9 @@ pub fn show(target: isize, anchor: RECT) {
     let work = work_area(anchor);
     let rect = target_rect(anchor, work);
 
-    if let Ok(mut slot) = ANCHOR.lock() {
-        tracing::debug!(previous = ?*slot, current = ?anchor, "hover preview: anchor moved");
-        *slot = Some(anchor);
-    }
+    let mut slot = lock_or_recover(&ANCHOR);
+    tracing::debug!(previous = ?*slot, current = ?anchor, "hover preview: anchor moved");
+    *slot = Some(anchor);
 
     // SAFETY: `hwnd` is our live popup; `rect` is within the monitor work area.
     unsafe {
@@ -385,9 +384,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             release_bitmap();
             TARGET.store(0, Ordering::SeqCst);
             PREVIEW.store(0, Ordering::SeqCst);
-            if let Ok(mut slot) = ANCHOR.lock() {
-                *slot = None;
-            }
+            let mut slot = lock_or_recover(&ANCHOR);
+            *slot = None;
             tracing::info!("hover preview window destroyed");
             LRESULT(0)
         }

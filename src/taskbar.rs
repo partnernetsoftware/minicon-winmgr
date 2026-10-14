@@ -56,7 +56,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::win_util::wide;
+use crate::win_util::{lock_or_recover, wide};
 
 // --- layout tokens --------------------------------------------------------
 const BAR_H: i32 = 36;
@@ -241,7 +241,7 @@ static ORIG_WORKAREA: Mutex<Option<RECT>> = Mutex::new(None);
 /// that is *killed* (task manager, `shellctl stop`) can still be recovered.
 fn reserve_workarea(area: (i32, i32, i32, i32)) {
     let (x, y, w, h) = area;
-    let mut guard = ORIG_WORKAREA.lock().unwrap();
+    let mut guard = lock_or_recover(&ORIG_WORKAREA);
     // SAFETY: `SystemParametersInfoW` reads/writes the RECT we point at, which
     // outlives the call; these are process-global work-area queries.
     unsafe {
@@ -281,7 +281,7 @@ fn reserve_workarea(area: (i32, i32, i32, i32)) {
 
 /// Restores the work area captured by [`reserve_workarea`], if any.
 fn restore_workarea() {
-    let mut guard = ORIG_WORKAREA.lock().unwrap();
+    let mut guard = lock_or_recover(&ORIG_WORKAREA);
     if let Some(orig) = guard.take() {
         let mut r = orig;
         // SAFETY: `r` outlives the call.
@@ -306,7 +306,7 @@ fn restore_workarea() {
 /// shrink it again (the screen would creep up, one bar-height per restart).
 /// Call this once the message loop has ended, on the message thread.
 pub fn shutdown() {
-    let handles: Vec<isize> = bars().lock().unwrap().iter().map(|b| b.hwnd).collect();
+    let handles: Vec<isize> = lock_or_recover(bars()).iter().map(|b| b.hwnd).collect();
     for raw in handles {
         // SAFETY: `DestroyWindow` runs `WM_DESTROY` synchronously here (same
         // thread that created the window), which drops the bar and, for the
@@ -720,7 +720,7 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                 None,
             )?;
 
-            bars().lock().unwrap().push(BarEntry {
+            lock_or_recover(bars()).push(BarEntry {
                 hwnd: hwnd.0 as isize,
                 area: (x, y, w, h),
                 ..Default::default()
@@ -946,7 +946,7 @@ fn build_grouped(
         }
     };
 
-    let mut anchors = group_anchors().lock().unwrap();
+    let mut anchors = lock_or_recover(group_anchors());
     let mut next: HashMap<String, isize> = HashMap::with_capacity(groups.len());
     let items = groups
         .into_iter()
@@ -984,7 +984,7 @@ fn build_grouped(
 /// conservative start), so the decision does not wobble as pins change.
 fn reference_client_width() -> i32 {
     {
-        let bars = bars().lock().unwrap();
+        let bars = lock_or_recover(bars());
         for b in bars.iter() {
             let mut r = RECT::default();
             // SAFETY: `b.hwnd` is a live bar window owned by this process.
@@ -1059,7 +1059,7 @@ pub fn refresh() {
     };
     let tray_w =
         crate::tray_bar::strip_width(icons.len(), crate::tray_bar::CELL, crate::tray_bar::GAP);
-    *tray_icons().lock().unwrap() = icons;
+    *lock_or_recover(tray_icons()) = icons;
 
     let ref_avail = reference_task_avail(tray_w);
     // Conservative fold basis: subtract the pins' width too, so the "would this
@@ -1096,11 +1096,11 @@ pub fn refresh() {
     // EnumWindows is Z-ordered; preserve button positions across refreshes so
     // activating a window never reshuffles the bar (see `stable_order`).
     let tasks_now = {
-        let prev = tasks().lock().unwrap();
+        let prev = lock_or_recover(tasks());
         stable_order(prev.as_slice(), tasks_now)
     };
     let n = tasks_now.len();
-    *tasks().lock().unwrap() = tasks_now;
+    *lock_or_recover(tasks()) = tasks_now;
 
     // Refresh quick-launch pins; task buttons start after them + the list button.
     // Icons are resolved here (filesystem IO) rather than in `paint`.
@@ -1118,7 +1118,7 @@ pub fn refresh() {
         pins_now.len() as i32 * crate::quick_launch::CELL
             + (pins_now.len() as i32 - 1) * crate::quick_launch::GAP
     };
-    *pins().lock().unwrap() = pins_now;
+    *lock_or_recover(pins()) = pins_now;
 
     // Fold the quick-launch strip this round when it is the sole cause of task
     // overflow (fold the tray first — it is gone before this; the pins next;
@@ -1133,7 +1133,7 @@ pub fn refresh() {
     };
     let tasks_left = after_pins;
 
-    let mut bars = bars().lock().unwrap();
+    let mut bars = lock_or_recover(bars());
     if bars.is_empty() {
         return;
     }
@@ -1148,7 +1148,7 @@ pub fn refresh() {
         bar.pin_rects = if hide_pins_now {
             Vec::new()
         } else {
-            let pin_count = pins().lock().unwrap().len();
+            let pin_count = lock_or_recover(pins()).len();
             crate::quick_launch::layout(
                 pins_left(),
                 pin_count,
@@ -1178,10 +1178,10 @@ pub fn refresh() {
     }
     tracing::debug!(
         count = n,
-        pins = pins().lock().unwrap().len(),
+        pins = lock_or_recover(pins()).len(),
         bars = bars.len(),
         density = ?first_density,
-        groups = ?tasks().lock().unwrap().iter().map(|t| format!("{}#{}", t.key, t.label)).collect::<Vec<_>>(),
+        groups = ?lock_or_recover(tasks()).iter().map(|t| format!("{}#{}", t.key, t.label)).collect::<Vec<_>>(),
         "taskbar refreshed"
     );
 }
@@ -1285,7 +1285,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let x = get_x(lparam);
             let y = get_y(lparam);
             let (changed, hover, density) = {
-                let mut bars = bars().lock().unwrap();
+                let mut bars = lock_or_recover(bars());
                 match bars.iter_mut().find(|b| b.hwnd == key) {
                     Some(bar) => {
                         let hover = bar
@@ -1319,16 +1319,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_TIMER if wparam.0 == HOVER_TIMER_ID => {
             let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
-            let state = bars()
-                .lock()
-                .unwrap()
+            let state = lock_or_recover(bars())
                 .iter()
                 .find(|b| b.hwnd == key)
                 .and_then(|b| b.hover.map(|i| (i, b.density)));
             if let Some((i, density)) = state {
-                let btn = bars()
-                    .lock()
-                    .unwrap()
+                let btn = lock_or_recover(bars())
                     .iter()
                     .find(|b| b.hwnd == key)
                     .and_then(|b| b.rects.get(i).copied());
@@ -1346,12 +1342,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     };
                     if density.is_icon_only() {
                         // A title-less square gets a label bubble (always).
-                        if let Some(label) = tasks().lock().unwrap().get(i).map(|t| t.label.clone())
+                        if let Some(label) =
+                            lock_or_recover(tasks()).get(i).map(|t| t.label.clone())
                         {
                             crate::bar_tip::show(&label, anchor);
                         }
                     } else if crate::hover_preview::enabled()
-                        && let Some(target) = tasks().lock().unwrap().get(i).map(|t| t.hwnd)
+                        && let Some(target) = lock_or_recover(tasks()).get(i).map(|t| t.hwnd)
                     {
                         crate::hover_preview::show(target, anchor);
                     }
@@ -1369,7 +1366,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             crate::hover_preview::hide();
             crate::bar_tip::hide();
             let changed = {
-                let mut bars = bars().lock().unwrap();
+                let mut bars = lock_or_recover(bars());
                 match bars.iter_mut().find(|b| b.hwnd == key) {
                     Some(b) => {
                         // Take both so a reset clears every hover indicator.
@@ -1408,7 +1405,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             // Snapshot this bar's interactive geometry.
             let (pin_rects, overflow, hidden_from, hover) = {
-                let bars = bars().lock().unwrap();
+                let bars = lock_or_recover(bars());
                 match bars.iter().find(|b| b.hwnd == key) {
                     Some(b) => (b.pin_rects.clone(), b.overflow, b.hidden_from, b.hover),
                     None => (Vec::new(), None, 0, None),
@@ -1421,9 +1418,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 && y >= r.top
                 && y < r.bottom
             {
-                let entries: Vec<crate::task_list::Entry> = tasks()
-                    .lock()
-                    .unwrap()
+                let entries: Vec<crate::task_list::Entry> = lock_or_recover(tasks())
                     .iter()
                     .skip(hidden_from)
                     .map(|t| crate::task_list::Entry {
@@ -1438,16 +1433,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             // Quick-launch pins.
             if let Some(i) = crate::quick_launch::hit(&pin_rects, x, y) {
-                let path = pins().lock().unwrap().get(i).map(|p| p.path.clone());
+                let path = lock_or_recover(pins()).get(i).map(|p| p.path.clone());
                 if let Some(path) = path {
                     crate::quick_launch::launch_path(&path);
                 }
                 return LRESULT(0);
             }
             let target = hover.and_then(|i| {
-                tasks()
-                    .lock()
-                    .unwrap()
+                lock_or_recover(tasks())
                     .get(i)
                     .map(|t| (t.hwnd, t.members.clone()))
             });
@@ -1496,7 +1489,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // Hit-test against the live geometry rather than the (possibly
             // stale) hover index, so a right-click lands on what is under it.
             let (pin_rects, rects) = {
-                let bars = bars().lock().unwrap();
+                let bars = lock_or_recover(bars());
                 match bars.iter().find(|b| b.hwnd == key) {
                     Some(b) => (b.pin_rects.clone(), b.rects.clone()),
                     None => (Vec::new(), Vec::new()),
@@ -1513,9 +1506,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // Clone the hit item's fields out of the lock before any cross-process
             // work: `window_menu`/`group_menu` must never run holding a lock.
             let target = task_hit.and_then(|i| {
-                tasks()
-                    .lock()
-                    .unwrap()
+                lock_or_recover(tasks())
                     .get(i)
                     .map(|t| (t.hwnd, t.label.clone(), t.members.clone()))
             });
@@ -1534,8 +1525,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let _ = unsafe { SetForegroundWindow(hwnd) };
             let _ = unsafe { SetFocus(Some(hwnd)) };
             let changed = {
-                let has_tasks = !tasks().lock().unwrap().is_empty();
-                let mut bars = bars().lock().unwrap();
+                let has_tasks = !lock_or_recover(tasks()).is_empty();
+                let mut bars = lock_or_recover(bars());
                 match bars.iter_mut().find(|b| b.hwnd == key) {
                     Some(bar) => {
                         bar.selected = has_tasks.then_some(0);
@@ -1551,10 +1542,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_KEYDOWN => {
             let vk = wparam.0 as u16;
-            let n = tasks().lock().unwrap().len();
+            let n = lock_or_recover(tasks()).len();
             let mut changed = false;
             if n > 0 {
-                let mut bars = bars().lock().unwrap();
+                let mut bars = lock_or_recover(bars());
                 if let Some(bar) = bars.iter_mut().find(|b| b.hwnd == key) {
                     // Once navigating, `1..9` jump straight to the n-th visible
                     // button (no activation — `Enter` still does that, matching
@@ -1574,7 +1565,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             k if k == VK_RETURN.0 => {
                                 let target = bar
                                     .selected
-                                    .and_then(|i| tasks().lock().unwrap().get(i).map(|t| t.hwnd));
+                                    .and_then(|i| lock_or_recover(tasks()).get(i).map(|t| t.hwnd));
                                 bar.selected = None;
                                 if let Some(target) = target {
                                     drop(bars);
@@ -1598,8 +1589,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_SETFOCUS => {
             let changed = {
-                let has_tasks = !tasks().lock().unwrap().is_empty();
-                let mut bars = bars().lock().unwrap();
+                let has_tasks = !lock_or_recover(tasks()).is_empty();
+                let mut bars = lock_or_recover(bars());
                 match bars.iter_mut().find(|b| b.hwnd == key) {
                     Some(bar) if bar.selected.is_none() && has_tasks => {
                         bar.selected = Some(0);
@@ -1618,7 +1609,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             crate::hover_preview::hide();
             crate::bar_tip::hide();
             let changed = {
-                let mut bars = bars().lock().unwrap();
+                let mut bars = lock_or_recover(bars());
                 bars.iter_mut()
                     .find(|b| b.hwnd == key)
                     .is_some_and(|b| b.selected.take().is_some())
@@ -1636,9 +1627,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         m if m == APPBAR_CALLBACK => {
             // Another AppBar moved/resized: re-dock to the stored work area.
             if wparam.0 as u32 == ABN_POSCHANGED {
-                let area = bars()
-                    .lock()
-                    .unwrap()
+                let area = lock_or_recover(bars())
                     .iter()
                     .find(|b| b.hwnd == key)
                     .map(|b| b.area);
@@ -1659,7 +1648,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 };
                 let _ = SHAppBarMessage(ABM_REMOVE, &mut abd);
             }
-            let mut bars = bars().lock().unwrap();
+            let mut bars = lock_or_recover(bars());
             bars.retain(|b| b.hwnd != key);
             let remaining = bars.len();
             drop(bars);
@@ -1735,9 +1724,9 @@ unsafe fn paint(hwnd: HWND) {
         SetBkMode(hdc, TRANSPARENT);
 
         let fg = GetForegroundWindow().0 as isize;
-        let tasks = tasks().lock().unwrap();
+        let tasks = lock_or_recover(tasks());
         let (rects, overflow, pin_rects, hover, pin_hover, selected, density) = {
-            let bars = bars().lock().unwrap();
+            let bars = lock_or_recover(bars());
             match bars.iter().find(|b| b.hwnd == hwnd.0 as isize) {
                 Some(b) => (
                     b.rects.clone(),
@@ -1894,9 +1883,7 @@ unsafe fn paint(hwnd: HWND) {
         // Quick-launch pins: surface squares carrying the pinned app's icon, or
         // the label's initial when no icon could be extracted. The strip only
         // claims space when it is non-empty (see `refresh`).
-        let pin_items: Vec<(String, crate::window_icon::Icon)> = pins()
-            .lock()
-            .unwrap()
+        let pin_items: Vec<(String, crate::window_icon::Icon)> = lock_or_recover(pins())
             .iter()
             .map(|p| (p.label.clone(), p.icon))
             .collect();
@@ -1955,7 +1942,7 @@ unsafe fn paint(hwnd: HWND) {
         }
 
         // Notification-icon strip, sitting just left of the clock.
-        let icons = tray_icons().lock().unwrap();
+        let icons = lock_or_recover(tray_icons());
         if !icons.is_empty() {
             let tray_right = client.right - PAD - CLOCK_W - PAD;
             crate::tray_bar::paint(hdc, BTN_TOP, tray_right, BAR_H - 2 * BTN_TOP, &icons);
@@ -2346,9 +2333,7 @@ fn group_menu(owner: HWND, anchor: HWND, label: &str, members: &[isize]) {
 /// Shows the right-click menu for the quick-launch pin at `index`: open it, or
 /// drop it from the strip.
 fn pin_menu(owner: HWND, index: usize) {
-    let pin = pins()
-        .lock()
-        .unwrap()
+    let pin = lock_or_recover(pins())
         .get(index)
         .map(|p| (p.label.clone(), p.path.clone()));
     let Some((label, path)) = pin else { return };

@@ -31,7 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::win_util::wide;
+use crate::win_util::{lock_or_recover, wide};
 
 const CLASS_NAME: &str = "minicon_winmgr_bar_tip";
 const WINDOW_TITLE: &str = "minicon tip";
@@ -234,10 +234,9 @@ pub fn show(label: &str, anchor: RECT) {
     let work = work_area(anchor);
     let rect = tip_rect(w, TIP_H, anchor, work);
 
-    if let Ok(mut slot) = TEXT.lock() {
-        slot.clear();
-        slot.push_str(label);
-    }
+    let mut slot = lock_or_recover(&TEXT);
+    slot.clear();
+    slot.push_str(label);
 
     // SAFETY: `hwnd` is our live popup; `rect` is within the monitor work area.
     unsafe {
@@ -285,7 +284,7 @@ fn paint(hwnd: HWND) {
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF(t.text));
         let old = SelectObject(hdc, HGDIOBJ(font() as *mut core::ffi::c_void));
-        let label = TEXT.lock().map(|s| s.clone()).unwrap_or_default();
+        let label = lock_or_recover(&TEXT).clone();
         let mut buf: Vec<u16> = label.encode_utf16().collect();
         let mut r = client;
         DrawTextW(
@@ -309,9 +308,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_DESTROY => {
             // The tip never owns the message loop, so no PostQuitMessage.
             TIP.store(0, Ordering::SeqCst);
-            if let Ok(mut slot) = TEXT.lock() {
-                slot.clear();
-            }
+            let mut slot = lock_or_recover(&TEXT);
+            slot.clear();
             tracing::info!("bar tip window destroyed");
             LRESULT(0)
         }

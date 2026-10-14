@@ -1,5 +1,7 @@
 //! Small shared helpers for Win32 interop.
 
+use std::sync::{Mutex, MutexGuard};
+
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
@@ -11,6 +13,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow,
 };
 use windows::core::PWSTR;
+
+/// Locks `m`, recovering instead of panicking if the mutex has been poisoned.
+///
+/// Every mutex in this crate guards state touched from the single message
+/// thread. A panic while a guard is held poisons the mutex, and the next
+/// `.lock().unwrap()` would then panic as well — on the message thread that
+/// means unwinding out of a `wndproc`, which the `extern "system"` ABI does not
+/// allow, so the process aborts and the user's desktop goes with it. A poisoned
+/// lock here holds no torn invariant worth hiding: the guarded values are plain
+/// data (window lists, rects, config), so reading through the poison is strictly
+/// better than losing the shell.
+///
+/// Use this everywhere instead of `.lock().unwrap()`.
+pub fn lock_or_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Encodes `s` as a null-terminated UTF-16 buffer for Win32 `PCWSTR` arguments.
 ///
@@ -126,5 +144,49 @@ pub unsafe fn window_exe_path(hwnd: HWND) -> Option<String> {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_or_recover_reads_through_a_poisoned_mutex() {
+        let m = Mutex::new(41);
+
+        // Poison it for real: panic while holding the guard.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = m.lock().unwrap();
+            panic!("poison the mutex on purpose");
+        }));
+        std::panic::set_hook(previous);
+
+        assert!(poisoned.is_err(), "the closure must have panicked");
+        assert!(
+            m.is_poisoned(),
+            "the mutex must actually be poisoned, else this test proves nothing"
+        );
+        assert_eq!(
+            *lock_or_recover(&m),
+            41,
+            "a poisoned lock still yields the value"
+        );
+    }
+
+    #[test]
+    fn lock_or_recover_behaves_like_a_plain_lock_when_healthy() {
+        let m = Mutex::new(String::from("ok"));
+        assert_eq!(lock_or_recover(&m).as_str(), "ok");
+        *lock_or_recover(&m) = String::from("updated");
+        assert_eq!(lock_or_recover(&m).as_str(), "updated");
+    }
+
+    #[test]
+    fn wide_appends_a_terminator() {
+        assert_eq!(wide("hi"), vec![u16::from(b'h'), u16::from(b'i'), 0]);
+        assert_eq!(wide(""), vec![0]);
     }
 }
