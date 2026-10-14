@@ -20,6 +20,7 @@ mod monitor;
 mod quick_launch;
 mod recents;
 mod run_dialog;
+mod run_history;
 mod session;
 mod settings_ui;
 mod shell_launch;
@@ -210,6 +211,7 @@ fn run_companion() {
     crate::taskbar::recover_workarea();
 
     let result = window::run();
+    crate::run_dialog::shutdown();
     // The message loop only closes the message-only window, so the taskbar
     // windows never see WM_DESTROY and would not restore the reserved work
     // area. Tear them down explicitly.

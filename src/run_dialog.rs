@@ -1,494 +1,1305 @@
-//! Run dialog (Win+R style): a small popup with a single command field.
-//!
-//! Trigger: `Win+R`. A borderless top-most popup holding one `EDIT` and OK /
-//! Cancel buttons. `Enter` or OK runs the typed command via `ShellExecuteW`;
-//! `Esc` or Cancel dismisses. Mirrors the structure of `crate::launcher_ui`
-//! (own window class, own hotkey, no dialog manager).
-
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-
-use windows::Win32::Foundation::{
-    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+//! Native, reusable run dialog. All disk and shell work belongs to bounded workers.
+use crate::{
+    run_history::{Candidate, CandidateSource, History, merge_candidates},
+    win_util::wide,
 };
-use windows::Win32::Graphics::Gdi::CreateSolidBrush;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MOD_ALT, MOD_CONTROL, MOD_WIN, RegisterHotKey, SetFocus, UnregisterHotKey, VK_ESCAPE, VK_R,
-    VK_RETURN,
+use std::{
+    cell::RefCell,
+    sync::mpsc::{self, Receiver, SyncSender},
+    time::{Duration, Instant},
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CallWindowProcW, CreateWindowExW, DefWindowProcW,
-    ES_AUTOHSCROLL, GWLP_WNDPROC, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    IsChild, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SetWindowLongPtrW,
-    SetWindowTextW, ShowWindow, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
-    WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WNDCLASS_STYLES, WNDCLASSW,
-    WNDPROC, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+use windows::Win32::{
+    System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+    },
+    UI::Controls::{EM_SETLIMITTEXT, EM_SETSEL},
 };
-use windows::core::PCWSTR;
+use windows::{
+    Win32::{
+        Foundation::*,
+        Graphics::Gdi::*,
+        UI::{HiDpi::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+    },
+    core::PCWSTR,
+};
 
-use crate::win_util::wide;
-
-// --- geometry / ids -------------------------------------------------------
-const POPUP_W: i32 = 420;
-const POPUP_H: i32 = 150;
-const MARGIN: i32 = 12;
-const EDIT_H: i32 = 26;
-const BTN_W: i32 = 84;
-const BTN_H: i32 = 26;
-const BTN_GAP: i32 = 8;
-const ID_EDIT: u16 = 2001;
-const ID_OK: u16 = 2002;
-const ID_CANCEL: u16 = 2003;
-/// Distinct from the taskbar (1) and launcher (2) hotkey ids; only needs to be
-/// unique within this window.
-const HOTKEY_ID: i32 = 3;
-
-const CLASS_NAME: &str = "minicon_winmgr_run_dialog";
-const WINDOW_TITLE: &str = "minicon run";
-/// Light background so the popup is not a black rectangle before controls fill.
-const BG_COLOR: COLORREF = COLORREF(0x00FF_FFFF);
-
-// --- process-lifetime UI state --------------------------------------------
-// Handles are stored as `isize`; the message thread is the sole user, so this
-// is safe by construction.
-static POPUP: AtomicIsize = AtomicIsize::new(0);
-static EDIT: AtomicIsize = AtomicIsize::new(0);
-static ORIG_EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
-static VISIBLE: AtomicBool = AtomicBool::new(false);
-
-fn hwnd_from(raw: isize) -> HWND {
-    HWND(raw as *mut core::ffi::c_void)
+const EDIT: u16 = 2001;
+const RUN: u16 = 2002;
+const CANCEL: u16 = 2003;
+const CLEAR: u16 = 2004;
+const DROP: u16 = 2005;
+const LIST: u16 = 2006;
+const HELP: u16 = 2007;
+const STATUS: u16 = 2008;
+const LABEL: u16 = 2009;
+enum Job {
+    Query(u64, String),
+    Record(String),
+    Clear,
 }
-
-fn existing(slot: &AtomicIsize) -> Option<HWND> {
-    let raw = slot.load(Ordering::SeqCst);
-    (raw != 0).then(|| hwnd_from(raw))
+enum Reply {
+    Query(u64, Vec<Candidate>),
+    History(Vec<String>, Option<String>, bool, bool),
+    Launch(u64, Result<(), crate::shell_launch::LaunchError>, String),
 }
-
-fn popup() -> Option<HWND> {
-    existing(&POPUP)
+struct State {
+    window: HWND,
+    controls: Vec<(u16, HWND, isize)>,
+    font: HFONT,
+    font_dpi: u32,
+    jobs: SyncSender<Job>,
+    queries: SyncSender<(u64, String, Vec<String>)>,
+    entries: Vec<String>,
+    launches: SyncSender<(u64, String)>,
+    replies: Receiver<Reply>,
+    pending: Option<Job>,
+    actions: std::collections::VecDeque<Job>,
+    changed: Instant,
+    query: u64,
+    waiting: Option<Instant>,
+    candidates: Vec<Candidate>,
+    expanded: bool,
+    history: bool,
+    clear_retry: bool,
+    visible: bool,
+    composing: bool,
+    busy: bool,
+    generation: u64,
+    launch_id: u64,
+    dpi: u32,
+    work: RECT,
+    query_busy: bool,
+    notice: Option<String>,
+    layout_active: bool,
+    layout_dirty: bool,
 }
-
-fn edit() -> Option<HWND> {
-    existing(&EDIT)
+thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
+fn with<T>(f: impl FnOnce(&mut State) -> T) -> Option<T> {
+    STATE.with(|cell| cell.borrow_mut().as_mut().map(f))
 }
-
-/// Registers the run-dialog hotkey and prepares its (hidden) popup window.
-pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
-    if popup().is_some() {
-        return Ok(()); // already initialised
-    }
-    // SAFETY: standard Win32 window setup; every buffer outlives its call and
-    // both wndprocs are valid `extern "system"` functions.
+fn window() -> HWND {
+    with(|s| s.window).unwrap_or_default()
+}
+fn control(id: u16) -> HWND {
+    with(|s| {
+        s.controls
+            .iter()
+            .find(|c| c.0 == id)
+            .map(|c| c.1)
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+fn text(hwnd: HWND) -> String {
     unsafe {
-        let class_name = wide(CLASS_NAME);
-        let title = wide(WINDOW_TITLE);
-        // A class brush keeps the popup from flashing uninitialised pixels.
-        let background = CreateSolidBrush(BG_COLOR);
+        let mut b = vec![0; GetWindowTextLengthW(hwnd).max(0) as usize + 1];
+        let n = GetWindowTextW(hwnd, &mut b);
+        String::from_utf16_lossy(&b[..n.max(0) as usize])
+    }
+}
+fn set_text(hwnd: HWND, value: &str) {
+    unsafe {
+        let _ = SetWindowTextW(hwnd, PCWSTR(wide(value).as_ptr()));
+    }
+}
+fn status(value: &str) {
+    if text(control(STATUS)) == value {
+        return;
+    }
+    set_text(control(STATUS), value);
+    layout();
+}
+fn send(hwnd: HWND, msg: u32, w: usize, l: isize) -> LRESULT {
+    unsafe { SendMessageW(hwnd, msg, Some(WPARAM(w)), Some(LPARAM(l))) }
+}
+fn enabled() {
+    let (busy, history) =
+        with(|s| (s.busy || s.actions.len() >= 32, s.history || s.clear_retry)).unwrap_or_default();
+    unsafe {
+        let _ = EnableWindow(
+            control(RUN),
+            !busy && !text(control(EDIT)).trim().is_empty(),
+        );
+        let _ = EnableWindow(control(CLEAR), history);
+        let _ = ShowWindow(control(CLEAR), if history { SW_SHOW } else { SW_HIDE });
+    }
+}
 
-        let wnd_class = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            hInstance: hinstance,
-            lpszClassName: PCWSTR(class_name.as_ptr()),
-            hCursor: windows::Win32::UI::WindowsAndMessaging::LoadCursorW(
+pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
+    if !window().is_invalid() {
+        return Ok(());
+    }
+    let (jobs_tx, jobs_rx) = mpsc::sync_channel(1);
+    let (launch_tx, launch_rx) = mpsc::sync_channel::<(u64, String)>(1);
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let (query_tx, query_rx) = mpsc::sync_channel::<(u64, String, Vec<String>)>(1);
+    let query_reply = reply_tx.clone();
+    std::thread::Builder::new()
+        .name("run-path".into())
+        .spawn(move || {
+            while let Ok((id, input, entries)) = query_rx.recv() {
+                let items = merge_candidates(&entries, &input);
+                let _ = query_reply.send(Reply::Query(id, items));
+            }
+        })?;
+    let history_reply = reply_tx.clone();
+    std::thread::Builder::new()
+        .name("run-history".into())
+        .spawn(move || {
+            let mut history = History::load_default();
+            let _ = history_reply.send(Reply::History(
+                history.entries().to_vec(),
                 None,
-                windows::Win32::UI::WindowsAndMessaging::IDC_ARROW,
-            )
-            .unwrap_or_default(),
-            hbrBackground: background,
-            style: WNDCLASS_STYLES::default(),
+                true,
+                false,
+            ));
+            while let Ok(job) = jobs_rx.recv() {
+                match job {
+                    Job::Query(..) => {}
+                    Job::Record(input) => {
+                        let error = history.record_success(&input).err().map(|error| {
+                            tracing::warn!(%error,"Run history persistence failed");
+                            "历史保存失败，本次仍可使用，重启后可能丢失。".into()
+                        });
+                        let _ = history_reply.send(Reply::History(
+                            history.entries().to_vec(),
+                            error,
+                            false,
+                            false,
+                        ));
+                    }
+                    Job::Clear => {
+                        let error = history.clear().err().map(|_| {
+                            "本次历史已清空，磁盘历史清除失败，重启后可能恢复。请再次清空重试。"
+                                .into()
+                        });
+                        let retry = error.is_some();
+                        let _ = history_reply.send(Reply::History(Vec::new(), error, false, retry));
+                    }
+                }
+            }
+        })?;
+    std::thread::Builder::new()
+        .name("run-launch".into())
+        .spawn(move || {
+            let com =
+                unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+            while let Ok((id, input)) = launch_rx.recv() {
+                let result = if com.is_err() {
+                    Err(crate::shell_launch::LaunchError {
+                        code: None,
+                        message: "启动服务初始化失败，请重启后重试。".into(),
+                    })
+                } else {
+                    crate::shell_launch::parse_command(&input)
+                        .and_then(|r| crate::shell_launch::execute(&r))
+                };
+                let _ = reply_tx.send(Reply::Launch(id, result, input));
+            }
+            if com.is_ok() {
+                unsafe {
+                    CoUninitialize();
+                }
+            }
+        })?;
+    unsafe {
+        let previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        struct RestoreDpi(DPI_AWARENESS_CONTEXT);
+        impl Drop for RestoreDpi {
+            fn drop(&mut self) {
+                unsafe {
+                    if !self.0.is_invalid() {
+                        let _ = SetThreadDpiAwarenessContext(self.0);
+                    }
+                }
+            }
+        }
+        let _restore_dpi = RestoreDpi(previous_dpi);
+        let class = wide("minicon_winmgr_run_dialog");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(wndproc),
+            hInstance: instance,
+            lpszClassName: PCWSTR(class.as_ptr()),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: GetSysColorBrush(COLOR_BTNFACE),
             ..Default::default()
         };
-        if RegisterClassW(&wnd_class) == 0 {
-            let code = GetLastError().0;
-            // ERROR_CLASS_ALREADY_EXISTS (1410) is fine on a repeated init.
-            if code != 1410 {
-                return Err(
-                    format!("RegisterClassW(run_dialog) failed (Win32 error {code})").into(),
-                );
-            }
+        if RegisterClassW(&wc) == 0 && GetLastError().0 != 1410 {
+            return Err(windows::core::Error::from_thread().into());
         }
-
-        let (x, y) = crate::win_util::centered_upper_quarter(
-            GetSystemMetrics(SM_CXSCREEN),
-            GetSystemMetrics(SM_CYSCREEN),
-            POPUP_W,
-        );
-        // Hidden on creation: no `WS_VISIBLE`.
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            PCWSTR(class_name.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            WS_POPUP,
-            x,
-            y,
-            POPUP_W,
-            POPUP_H,
+            PCWSTR(class.as_ptr()),
+            PCWSTR(wide("运行").as_ptr()),
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            0,
+            0,
+            480,
+            210,
             None,
             None,
-            Some(hinstance),
-            None,
-        )?;
-        POPUP.store(hwnd.0 as isize, Ordering::SeqCst);
-
-        let edit_class = wide("EDIT");
-        let button_class = wide("BUTTON");
-        let no_text = wide("");
-
-        let edit = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            PCWSTR(edit_class.as_ptr()),
-            PCWSTR(no_text.as_ptr()),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32),
-            MARGIN,
-            MARGIN,
-            POPUP_W - 2 * MARGIN,
-            EDIT_H,
-            Some(hwnd),
-            Some(HMENU(ID_EDIT as isize as *mut core::ffi::c_void)),
-            Some(hinstance),
+            Some(instance),
             None,
         )?;
-        EDIT.store(edit.0 as isize, Ordering::SeqCst);
-
-        // Buttons sit on a right-aligned row along the bottom edge.
-        let btn_y = POPUP_H - MARGIN - BTN_H;
-        let cancel_x = POPUP_W - MARGIN - BTN_W;
-        let ok_x = cancel_x - BTN_GAP - BTN_W;
-
-        let ok_text = wide("OK");
-        let _ok = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            PCWSTR(button_class.as_ptr()),
-            PCWSTR(ok_text.as_ptr()),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | BS_DEFPUSHBUTTON as u32),
-            ok_x,
-            btn_y,
-            BTN_W,
-            BTN_H,
-            Some(hwnd),
-            Some(HMENU(ID_OK as isize as *mut core::ffi::c_void)),
-            Some(hinstance),
-            None,
-        )?;
-
-        let cancel_text = wide("Cancel");
-        let _cancel = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            PCWSTR(button_class.as_ptr()),
-            PCWSTR(cancel_text.as_ptr()),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | BS_PUSHBUTTON as u32),
-            cancel_x,
-            btn_y,
-            BTN_W,
-            BTN_H,
-            Some(hwnd),
-            Some(HMENU(ID_CANCEL as isize as *mut core::ffi::c_void)),
-            Some(hinstance),
-            None,
-        )?;
-
-        // Subclass the command field so Enter/Esc reach our logic even though
-        // the field owns the keyboard focus.
-        let edit_proc_addr =
-            edit_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
-        let previous = SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc_addr as usize as isize);
-        ORIG_EDIT_PROC.store(previous, Ordering::SeqCst);
-
-        // Try the canonical Win+R first, then fall back to combos that the
-        // default shell does not grab, so the dialog stays reachable when
-        // another shell owns Win+R (companion mode).
-        let candidates = [
-            (MOD_WIN, VK_R.0 as u32, "Win+R"),
-            (MOD_CONTROL | MOD_ALT, VK_R.0 as u32, "Ctrl+Alt+R"),
-        ];
-        let mut registered = false;
-        for (mods, vk, label) in candidates {
-            match RegisterHotKey(Some(hwnd), HOTKEY_ID, mods, vk) {
-                Ok(()) => {
-                    tracing::info!(hotkey = label, "run dialog hotkey registered");
-                    registered = true;
-                    break;
-                }
-                Err(err) => {
-                    tracing::warn!(hotkey = label, %err, "run dialog hotkey candidate taken");
-                }
+        STATE.with(|cell| {
+            *cell.borrow_mut() = Some(State {
+                window: hwnd,
+                controls: Vec::new(),
+                font: HFONT::default(),
+                font_dpi: 0,
+                jobs: jobs_tx,
+                queries: query_tx,
+                entries: Vec::new(),
+                launches: launch_tx,
+                replies: reply_rx,
+                pending: None,
+                actions: Default::default(),
+                changed: Instant::now(),
+                query: 0,
+                waiting: None,
+                candidates: Vec::new(),
+                expanded: false,
+                history: false,
+                clear_retry: false,
+                visible: false,
+                composing: false,
+                busy: false,
+                generation: 0,
+                launch_id: 0,
+                dpi: 96,
+                work: RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                query_busy: false,
+                notice: None,
+                layout_active: false,
+                layout_dirty: false,
+            })
+        });
+        for (id, class, label, style) in [
+            (HELP, "STATIC", "输入程序、文件夹、文档或网址", 0),
+            (LABEL, "STATIC", "打开(&O)：", 0),
+            (
+                EDIT,
+                "EDIT",
+                "",
+                ES_AUTOHSCROLL as u32 | WS_BORDER.0 | WS_TABSTOP.0,
+            ),
+            (DROP, "BUTTON", "▾", BS_PUSHBUTTON as u32),
+            (
+                LIST,
+                "LISTBOX",
+                "",
+                LBS_NOTIFY as u32
+                    | LBS_NOINTEGRALHEIGHT as u32
+                    | WS_BORDER.0
+                    | WS_VSCROLL.0
+                    | WS_HSCROLL.0,
+            ),
+            (
+                STATUS,
+                "EDIT",
+                "",
+                ES_MULTILINE as u32 | ES_READONLY as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL.0,
+            ),
+            (
+                CLEAR,
+                "BUTTON",
+                "清空历史",
+                BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
+            ),
+            (
+                RUN,
+                "BUTTON",
+                "运行",
+                BS_DEFPUSHBUTTON as u32 | WS_TABSTOP.0,
+            ),
+            (
+                CANCEL,
+                "BUTTON",
+                "取消",
+                BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
+            ),
+        ] {
+            let child = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                PCWSTR(wide(class).as_ptr()),
+                PCWSTR(wide(label).as_ptr()),
+                WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | style),
+                0,
+                0,
+                0,
+                0,
+                Some(hwnd),
+                Some(HMENU(id as usize as *mut _)),
+                Some(instance),
+                None,
+            )?;
+            let previous = if matches!(id, EDIT | RUN | CANCEL | CLEAR | DROP | LIST | STATUS) {
+                SetWindowLongPtrW(child, GWLP_WNDPROC, child_proc as *const () as isize)
+            } else {
+                0
+            };
+            with(|s| s.controls.push((id, child, previous)));
+        }
+        // Expose a useful accessible edit name without putting placeholder text in the value.
+        let _ = SetWindowTextW(control(EDIT), PCWSTR(wide("").as_ptr()));
+        send(control(EDIT), EM_SETLIMITTEXT, 32767, 0);
+        let _ = ShowWindow(control(LIST), SW_HIDE);
+        let _ = SetTimer(Some(hwnd), 1, 30, None);
+        for (modifiers, label) in [(MOD_WIN, "Win+R"), (MOD_CONTROL | MOD_ALT, "Ctrl+Alt+R")] {
+            if RegisterHotKey(Some(hwnd), 3, modifiers, VK_R.0 as u32).is_ok() {
+                tracing::info!(hotkey = label, "run dialog hotkey registered");
+                break;
             }
         }
-        if !registered {
-            tracing::error!("run dialog hotkey: all candidates taken; dialog unreachable by key");
-        }
-        tracing::info!(hwnd = ?hwnd, "run dialog popup created (hidden)");
     }
+    enabled();
     Ok(())
 }
 
-/// Normalizes raw user input into the string handed to the shell.
-///
-/// Trims surrounding whitespace and strips a single layer of surrounding
-/// double quotes so pasted `"C:\path with spaces"` still launches. Pure, so it
-/// can be unit-tested without any Win32 state.
-pub fn normalize_input(input: &str) -> String {
-    let trimmed = input.trim();
-    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-        trimmed[1..trimmed.len() - 1].to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Shows the popup, clears the command field, and focuses it.
-fn show() {
-    let Some(hwnd) = popup() else { return };
-    if let Some(edit) = edit() {
-        let empty = wide("");
-        // SAFETY: `empty` outlives the call; `edit` is our live control.
-        unsafe {
-            let _ = SetWindowTextW(edit, PCWSTR(empty.as_ptr()));
-        }
-    }
-    // SAFETY: `hwnd` is our live popup window.
+fn position() {
     unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = crate::win_util::force_foreground(hwnd);
-        if let Some(edit) = edit() {
-            let _ = SetFocus(Some(edit));
+        let foreground = GetForegroundWindow();
+        let mut monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL);
+        if monitor.is_invalid() {
+            let mut point = POINT::default();
+            let _ = GetCursorPos(&mut point);
+            monitor = MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY);
         }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return;
+        }
+        let (mut x, mut y) = (96, 96);
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y);
+        with(|s| {
+            s.work = info.rcWork;
+            s.dpi = x.max(96);
+        });
     }
-    VISIBLE.store(true, Ordering::SeqCst);
-    tracing::info!("run dialog shown");
+    layout();
 }
-
-/// Hides the popup without destroying it (the hotkey must stay registered).
-fn hide() {
-    let Some(hwnd) = popup() else { return };
-    // SAFETY: `hwnd` is our live popup window.
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_HIDE);
-    }
-    VISIBLE.store(false, Ordering::SeqCst);
-    tracing::debug!("run dialog hidden");
+#[derive(Debug)]
+struct Geometry {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    list_height: i32,
+    status_height: i32,
+    button_y: i32,
+    input_y: i32,
+    list_y: i32,
 }
-
-/// Whether the popup is currently on screen.
-fn visible() -> bool {
-    VISIBLE.load(Ordering::SeqCst)
-}
-
-fn toggle() {
-    if visible() {
-        hide();
+fn geometry(work: RECT, dpi: u32, count: usize, status_height: i32, caption: i32) -> Geometry {
+    let scale = |n: i32| n * dpi.max(1) as i32 / 96;
+    let width = scale(480).min((work.right - work.left).max(1));
+    let available = (work.bottom - work.top - caption).max(1);
+    let compact = available < scale(158);
+    let input_y = if compact { scale(4) } else { scale(42) };
+    let fixed = input_y + scale(if compact { 76 } else { 94 });
+    // Reserve input and buttons first; candidates consume only the remaining space.
+    let status_height = status_height.max(scale(22)).min((available - fixed).max(0));
+    let list_budget = (available - fixed - status_height).max(0);
+    let overhead = scale(20); // list border and horizontal scrollbar
+    let rows = ((list_budget - overhead).max(0) / scale(24).max(1)).min(count.min(6) as i32);
+    let list_height = if rows > 0 {
+        rows * scale(24) + overhead
     } else {
-        show();
-    }
-}
-
-/// Reads the current command-field text (empty when unavailable).
-fn read_edit_text() -> String {
-    let Some(edit) = edit() else {
-        return String::new();
+        0
     };
-    // SAFETY: `edit` is our live control; `buf` is sized from the control.
-    unsafe {
-        let len = GetWindowTextLengthW(edit);
-        if len <= 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u16; len as usize + 1];
-        let copied = GetWindowTextW(edit, &mut buf);
-        if copied <= 0 {
-            return String::new();
-        }
-        String::from_utf16_lossy(&buf[..copied as usize])
+    let list_y = input_y + scale(if compact { 34 } else { 36 });
+    let button_y = list_y + scale(if compact { 8 } else { 12 }) + list_height + status_height;
+    let height = (button_y + scale(if compact { 34 } else { 46 }) + caption)
+        .min((work.bottom - work.top).max(1));
+    Geometry {
+        x: work.left + (work.right - work.left - width) / 2,
+        y: (work.top + (work.bottom - work.top) / 4)
+            .min(work.bottom - height)
+            .max(work.top),
+        width,
+        height,
+        list_height,
+        status_height,
+        button_y,
+        input_y,
+        list_y,
     }
 }
-
-/// Normalizes the typed command, launches it via the shell, and hides.
-fn run_command() {
-    let cmd = normalize_input(&read_edit_text());
-    if cmd.is_empty() {
-        tracing::warn!("run dialog: empty command ignored");
+fn result_is_current(visible: bool, generation: u64, request: u64) -> bool {
+    visible && generation == request
+}
+/// Native DrawText may dereference its pointer even when cchText is zero.
+/// Keep empty text out of the API and retain a readable trailing NUL otherwise.
+fn measure_status(dc: HDC, value: &str, width: i32) -> i32 {
+    if value.is_empty() {
+        return 0;
+    }
+    let mut measured = RECT {
+        right: width.max(1),
+        ..Default::default()
+    };
+    let mut content = wide(value);
+    let length = content.len() - 1;
+    unsafe {
+        DrawTextW(
+            dc,
+            &mut content[..length],
+            &mut measured,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        );
+    }
+    measured.bottom.max(0)
+}
+fn layout() {
+    let entered = with(|s| {
+        s.layout_dirty = true;
+        if s.layout_active {
+            false
+        } else {
+            s.layout_active = true;
+            s.layout_dirty = false;
+            true
+        }
+    })
+    .unwrap_or(false);
+    if !entered {
         return;
     }
-    // Typed text can be anything, including a bare `explorer` — which would
-    // take the shell. `shell_launch` rewrites that case before running it.
-    if !crate::shell_launch::open(&cmd) {
-        tracing::warn!(%cmd, "run dialog: launch failed");
-    } else {
-        tracing::info!(%cmd, "run dialog launched command");
+    struct LayoutGuard;
+    impl Drop for LayoutGuard {
+        fn drop(&mut self) {
+            with(|s| s.layout_active = false);
+        }
     }
-    hide();
+    let _guard = LayoutGuard;
+    let Some((hwnd, dpi, work, expanded, controls, oldfont, font_dpi)) = with(|s| {
+        (
+            s.window,
+            s.dpi,
+            s.work,
+            s.expanded,
+            s.controls.clone(),
+            s.font,
+            s.font_dpi,
+        )
+    }) else {
+        return;
+    };
+    let scale = |n: i32| n * dpi as i32 / 96;
+    let width = scale(480).min(work.right - work.left).max(1);
+    unsafe {
+        let mut metrics = NONCLIENTMETRICSW {
+            cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+            ..Default::default()
+        };
+        let font = if font_dpi == dpi && !oldfont.is_invalid() {
+            oldfont
+        } else if SystemParametersInfoForDpi(
+            SPI_GETNONCLIENTMETRICS.0,
+            metrics.cbSize,
+            Some(&mut metrics as *mut _ as *mut _),
+            0,
+            dpi,
+        )
+        .is_ok()
+        {
+            CreateFontIndirectW(&metrics.lfMessageFont)
+        } else {
+            HFONT::default()
+        };
+        let dc = GetDC(Some(hwnd));
+        let original = SelectObject(dc, font.into());
+        let status_text = text(control(STATUS));
+        let measured = measure_status(
+            dc,
+            &status_text,
+            width - scale(40) - GetSystemMetricsForDpi(SM_CXVSCROLL, dpi),
+        );
+        let _ = SelectObject(dc, original);
+        let _ = ReleaseDC(Some(hwnd), dc);
+        let mut frame = RECT::default();
+        let _ = AdjustWindowRectExForDpi(
+            &mut frame,
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            false,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            dpi,
+        );
+        let count = if expanded {
+            with(|s| s.candidates.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        let g = geometry(
+            work,
+            dpi,
+            count,
+            measured + scale(4),
+            frame.bottom - frame.top,
+        );
+        let list_height = g.list_height;
+        // SetWindowPos can synchronously deliver WM_DPICHANGED and re-enter layout.
+        // Publish the reusable font first so that nested layout does not create another one.
+        with(|s| {
+            s.font = font;
+            s.font_dpi = dpi;
+        });
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            g.x,
+            g.y,
+            g.width,
+            g.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let cw = client.right;
+        let m = scale(16).min((cw / 24).max(1));
+        let w = (cw - 2 * m).max(1);
+        let label_width = scale(68).min(w / 4);
+        let drop_width = scale(32).min(w / 8).max(1);
+        let button_width = scale(80).min((w - scale(16)) / 3).max(1);
+        for (id, child, _) in controls {
+            let (x, y, w, h) = match id {
+                HELP => (m, scale(12), w, scale(24)),
+                LABEL => (m, g.input_y + scale(6), label_width, scale(24)),
+                EDIT => (
+                    m + label_width,
+                    g.input_y,
+                    (w - label_width - drop_width).max(1),
+                    scale(30),
+                ),
+                DROP => (cw - m - drop_width, g.input_y, drop_width, scale(30)),
+                LIST => (m, g.list_y, w, list_height),
+                STATUS => (m, g.list_y + scale(4) + list_height, w, g.status_height),
+                CLEAR => (m, g.button_y, button_width, scale(30)),
+                RUN => (
+                    cw - m - 2 * button_width - scale(8),
+                    g.button_y,
+                    button_width,
+                    scale(30),
+                ),
+                _ => (cw - m - button_width, g.button_y, button_width, scale(30)),
+            };
+            let _ = MoveWindow(child, x, y, w, h, true);
+            send(child, WM_SETFONT, font.0 as usize, 1);
+            if id == HELP {
+                let _ = ShowWindow(
+                    child,
+                    if g.input_y == scale(42) {
+                        SW_SHOW
+                    } else {
+                        SW_HIDE
+                    },
+                );
+            }
+            if id == LIST {
+                send(child, LB_SETITEMHEIGHT, 0, scale(24) as isize);
+            }
+        }
+        with(|s| {
+            s.font = font;
+            s.font_dpi = dpi;
+        });
+        if !oldfont.is_invalid() && oldfont != font {
+            let _ = DeleteObject(oldfont.into());
+        }
+        let _ = ShowWindow(
+            control(LIST),
+            if expanded && list_height > 0 {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+    }
 }
-
-/// Whether `new_focus` (the `WM_KILLFOCUS` wParam) lies outside the popup.
-fn focus_left_popup(new_focus: isize) -> bool {
-    if new_focus == 0 {
+fn expand(value: bool) {
+    let changed = with(|s| {
+        let changed = s.expanded != value;
+        s.expanded = value;
+        changed
+    })
+    .unwrap_or(false);
+    if !value {
+        send(control(LIST), LB_SETCURSEL, usize::MAX, 0);
+    }
+    if changed || value {
+        layout();
+    }
+}
+fn show() {
+    let already = with(|s| s.visible).unwrap_or(false);
+    if !already {
+        position();
+        with(|s| {
+            s.visible = true;
+            s.generation = s.generation.wrapping_add(1);
+        });
+        if !with(|s| s.busy).unwrap_or(false) {
+            let notice = with(|s| s.notice.clone()).flatten();
+            status(notice.as_deref().unwrap_or(""));
+        }
+    }
+    unsafe {
+        let _ = ShowWindow(window(), SW_SHOW);
+        let _ = crate::win_util::force_foreground(window());
+        let _ = SetFocus(Some(control(EDIT)));
+    }
+    send(control(EDIT), EM_SETSEL, 0, -1);
+    enabled();
+}
+fn hide() {
+    with(|s| {
+        s.visible = false;
+        s.composing = false;
+        s.generation = s.generation.wrapping_add(1);
+        s.query = s.query.wrapping_add(1);
+        s.pending = None;
+        s.waiting = None;
+    });
+    expand(false);
+    unsafe {
+        let _ = ShowWindow(window(), SW_HIDE);
+    }
+}
+fn internal_activation(next: HWND) -> bool {
+    if next.is_invalid() {
+        return false;
+    }
+    let root = window();
+    unsafe {
+        if next == root
+            || IsChild(root, next).as_bool()
+            || GetWindowThreadProcessId(next, None) == GetWindowThreadProcessId(root, None)
+        {
+            return true;
+        }
+        let mut owner = next;
+        for _ in 0..8 {
+            let Ok(parent) = GetWindow(owner, GW_OWNER) else {
+                break;
+            };
+            if parent == root {
+                return true;
+            }
+            if parent.is_invalid() {
+                break;
+            }
+            owner = parent;
+        }
+    }
+    false
+}
+fn query() {
+    let input = text(control(EDIT));
+    with(|s| {
+        s.query = s.query.wrapping_add(1);
+        s.pending = Some(Job::Query(s.query, input));
+        s.changed = Instant::now();
+        s.waiting = None;
+        s.candidates.clear();
+    });
+    send(control(LIST), LB_RESETCONTENT, 0, 0);
+    expand(false);
+    enabled();
+}
+fn adopt() -> bool {
+    let selected = send(control(LIST), LB_GETCURSEL, 0, 0).0;
+    let choice = with(|s| {
+        if s.expanded && selected >= 0 {
+            s.candidates.get(selected as usize).map(|c| c.text.clone())
+        } else {
+            None
+        }
+    })
+    .flatten();
+    if let Some(choice) = choice {
+        set_text(control(EDIT), &choice);
+        with(|s| {
+            s.pending = None;
+            s.query = s.query.wrapping_add(1);
+        });
+        expand(false);
+        unsafe {
+            let _ = SetFocus(Some(control(EDIT)));
+        }
+        send(
+            control(EDIT),
+            EM_SETSEL,
+            choice.encode_utf16().count(),
+            choice.encode_utf16().count() as isize,
+        );
+        true
+    } else {
+        false
+    }
+}
+fn run() {
+    if adopt() {
+        return;
+    }
+    let input = text(control(EDIT));
+    if input.trim().is_empty() {
+        return;
+    }
+    let queued = with(|s| {
+        if s.busy || s.actions.len() >= 32 {
+            return false;
+        }
+        let id = s.generation;
+        if s.launches.try_send((id, input)).is_err() {
+            return false;
+        }
+        s.busy = true;
+        s.launch_id = id;
+        true
+    })
+    .unwrap_or(false);
+    if queued {
+        expand(false);
+        status("正在打开…");
+        enabled();
+    }
+}
+fn poll() {
+    if with(|s| s.layout_dirty && !s.layout_active).unwrap_or(false) {
+        layout();
+    }
+    let replies = with(|s| s.replies.try_iter().collect::<Vec<_>>()).unwrap_or_default();
+    for reply in replies {
+        match reply {
+            Reply::Query(id, items) => {
+                with(|s| s.query_busy = false);
+                if !with(|s| id == s.query && s.visible && !s.composing).unwrap_or(false) {
+                    continue;
+                }
+                with(|s| {
+                    s.waiting = None;
+                    s.candidates = items.clone();
+                });
+                send(control(LIST), LB_RESETCONTENT, 0, 0);
+                let dc = unsafe { GetDC(Some(control(LIST))) };
+                let font = with(|s| s.font).unwrap_or_default();
+                let old = unsafe { SelectObject(dc, font.into()) };
+                let mut extent = 0;
+                for item in &items {
+                    let label = format!(
+                        "[{}] {}",
+                        if item.source == CandidateSource::History {
+                            "最近"
+                        } else {
+                            "路径"
+                        },
+                        item.text
+                    );
+                    let mut size = SIZE::default();
+                    unsafe {
+                        let _ = GetTextExtentPoint32W(
+                            dc,
+                            &label.encode_utf16().collect::<Vec<_>>(),
+                            &mut size,
+                        );
+                    }
+                    extent = extent.max(size.cx);
+                    send(
+                        control(LIST),
+                        LB_ADDSTRING,
+                        0,
+                        wide(&label).as_ptr() as isize,
+                    );
+                }
+                unsafe {
+                    let _ = SelectObject(dc, old);
+                    let _ = ReleaseDC(Some(control(LIST)), dc);
+                }
+                send(
+                    control(LIST),
+                    LB_SETHORIZONTALEXTENT,
+                    (extent + 16).max(0) as usize,
+                    0,
+                );
+                if !items.is_empty() {
+                    expand(true);
+                } else {
+                    expand(false);
+                }
+                enabled();
+            }
+            Reply::History(entries, error, initial, retry) => {
+                let cleared = !initial && entries.is_empty() && error.is_none();
+                let recent = entries.first().cloned();
+                with(|s| {
+                    s.history = !entries.is_empty();
+                    s.entries = entries;
+                    s.clear_retry = retry;
+                });
+                if initial
+                    && let Some(recent) = recent
+                    && text(control(EDIT)).is_empty()
+                {
+                    set_text(control(EDIT), &recent);
+                    with(|s| s.pending = None);
+                }
+                if let Some(error) = error {
+                    with(|s| s.notice = Some(error.clone()));
+                    status(&error);
+                } else if cleared {
+                    with(|s| s.notice = None);
+                    status("历史已清空");
+                }
+                enabled();
+            }
+            Reply::Launch(id, result, input) => {
+                let current = with(|s| {
+                    s.busy = false;
+                    result_is_current(s.visible, s.generation, id)
+                })
+                .unwrap_or(false);
+                if result.is_ok() {
+                    with(|s| s.actions.push_back(Job::Record(input.clone())));
+                    let restore =
+                        with(|s| !s.visible && s.generation == id.wrapping_add(1)).unwrap_or(false);
+                    if restore {
+                        set_text(control(EDIT), &input);
+                        with(|s| s.pending = None);
+                    }
+                }
+                if current {
+                    match result {
+                        Ok(()) => {
+                            set_text(control(EDIT), &input);
+                            hide();
+                        }
+                        Err(error) => {
+                            status(&error.message);
+                            unsafe {
+                                let _ = SetFocus(Some(control(EDIT)));
+                            }
+                        }
+                    }
+                } else if with(|s| s.visible).unwrap_or(false) {
+                    status("");
+                }
+                enabled();
+            }
+        }
+    }
+    let timedout = with(|s| {
+        s.waiting
+            .is_some_and(|t| t.elapsed() > Duration::from_millis(500))
+    })
+    .unwrap_or(false);
+    if timedout {
+        with(|s| {
+            s.waiting = None;
+            s.query = s.query.wrapping_add(1);
+        });
+        status("路径建议暂不可用");
+    }
+    with(|s| {
+        if let Some(job) = s.actions.pop_front() {
+            match s.jobs.try_send(job) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(job)) => s.actions.push_front(job),
+                Err(_) => {}
+            }
+            return;
+        }
+        let ready = match s.pending {
+            Some(Job::Query(..)) => {
+                !s.composing && s.changed.elapsed() >= Duration::from_millis(150)
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if ready
+            && !s.query_busy
+            && let Some(Job::Query(id, input)) = s.pending.take()
+        {
+            match s.queries.try_send((id, input, s.entries.clone())) {
+                Ok(()) => {
+                    s.waiting = Some(Instant::now());
+                    s.query_busy = true;
+                }
+                Err(mpsc::TrySendError::Full((id, input, _))) => {
+                    s.pending = Some(Job::Query(id, input))
+                }
+                Err(_) => {}
+            }
+        }
+    });
+}
+fn focus_next(back: bool) {
+    let mut ids = vec![EDIT];
+    if with(|s| s.history || s.clear_retry).unwrap_or(false) {
+        ids.push(CLEAR);
+    }
+    if unsafe { IsWindowEnabled(control(RUN)).as_bool() } {
+        ids.push(RUN);
+    }
+    ids.push(CANCEL);
+    let focus = unsafe { GetFocus() };
+    let index = ids.iter().position(|id| control(*id) == focus).unwrap_or(0);
+    let next = if back {
+        (index + ids.len() - 1) % ids.len()
+    } else {
+        (index + 1) % ids.len()
+    };
+    unsafe {
+        let _ = SetFocus(Some(control(ids[next])));
+    }
+}
+fn key(hwnd: HWND, msg: u32, w: WPARAM) -> bool {
+    let composing = with(|s| s.composing).unwrap_or(false);
+    if composing {
+        return false;
+    }
+    let code = w.0 as u16;
+    let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
+    if msg == WM_SYSKEYDOWN && code == VK_O.0 {
+        unsafe {
+            let _ = SetFocus(Some(control(EDIT)));
+        }
+        send(control(EDIT), EM_SETSEL, 0, -1);
         return true;
     }
-    let Some(hwnd) = popup() else { return true };
-    // SAFETY: `hwnd` is our live popup; `IsChild` is a pure query.
-    unsafe { !IsChild(hwnd, hwnd_from(new_focus)).as_bool() }
+    if code == VK_TAB.0 {
+        focus_next(unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0);
+        return true;
+    }
+    if code == VK_ESCAPE.0 {
+        if with(|s| s.expanded).unwrap_or(false) {
+            expand(false);
+        } else {
+            hide();
+        }
+        return true;
+    }
+    if hwnd == control(EDIT) {
+        if code == VK_A.0 && unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0 {
+            send(hwnd, EM_SETSEL, 0, -1);
+            return true;
+        }
+        if code == VK_RETURN.0 {
+            run();
+            return true;
+        }
+        if code == VK_DOWN.0 || code == VK_UP.0 {
+            if alt {
+                let expanded = with(|s| s.expanded).unwrap_or(false);
+                expand(!expanded);
+                if !expanded {
+                    query();
+                }
+                return true;
+            }
+            if !with(|s| s.expanded).unwrap_or(false) {
+                query();
+                expand(true);
+            } else {
+                let count = with(|s| s.candidates.len()).unwrap_or(0);
+                if count > 0 {
+                    let selected = send(control(LIST), LB_GETCURSEL, 0, 0).0;
+                    let next = if code == VK_DOWN.0 {
+                        (selected + 1).min(count as isize - 1)
+                    } else {
+                        if selected < 0 {
+                            count as isize - 1
+                        } else {
+                            (selected - 1).max(0)
+                        }
+                    };
+                    send(control(LIST), LB_SETCURSEL, next as usize, 0);
+                }
+            }
+            return true;
+        }
+    } else if code == VK_RETURN.0 {
+        let id = unsafe { GetDlgCtrlID(hwnd) } as u16;
+        match id {
+            RUN => run(),
+            CANCEL => hide(),
+            CLEAR => clear(),
+            DROP => dropdown(),
+            LIST => {
+                adopt();
+            }
+            _ => {}
+        }
+        return true;
+    }
+    false
+}
+fn dropdown() {
+    let expanded = with(|s| s.expanded).unwrap_or(false);
+    expand(!expanded);
+    if !expanded {
+        query();
+    }
+    unsafe {
+        let _ = SetFocus(Some(control(EDIT)));
+    }
+}
+fn clear() {
+    with(|s| {
+        if !s.actions.iter().any(|job| matches!(job, Job::Clear)) {
+            s.actions.push_back(Job::Clear);
+        }
+        s.pending = None;
+        s.query = s.query.wrapping_add(1);
+        s.candidates.clear();
+        s.entries.clear();
+        s.history = false;
+        s.clear_retry = true;
+    });
+    expand(false);
+    status("正在清空历史…");
 }
 
-/// Handles `WM_COMMAND` notifications from the child controls.
-fn handle_command(wparam: WPARAM) {
-    let id = (wparam.0 & 0xFFFF) as u16;
-    let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
-    if code != BN_CLICKED {
-        return;
-    }
-    match id {
-        ID_OK => run_command(),
-        ID_CANCEL => hide(),
-        _ => {}
-    }
-}
-
-/// Window procedure for the run-dialog popup.
-///
-/// The body runs under [`crate::win_util::guard_abi`] so a panic cannot unwind
-/// across the FFI boundary; on panic it degrades to `DefWindowProcW`.
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    // SAFETY: the guard only runs the body and degrades to the default handler
-    // on a panic; all handles come straight from Win32.
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     crate::win_util::guard_abi(
         "run_dialog::wndproc",
-        || unsafe { wndproc_inner(hwnd, msg, wparam, lparam) },
-        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
-    )
-}
-
-/// Inner body of [`wndproc`]; every unhandled message falls back to
-/// `DefWindowProcW`.
-unsafe extern "system" fn wndproc_inner(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
-            toggle();
-            LRESULT(0)
-        }
-        WM_COMMAND => {
-            handle_command(wparam);
-            LRESULT(0)
-        }
-        // Losing activation (clicking another app) dismisses the popup.
-        WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
-            if visible() {
-                hide();
-            }
-            LRESULT(0)
-        }
-        WM_KILLFOCUS => {
-            if visible() && focus_left_popup(wparam.0 as isize) {
-                hide();
-            }
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            // SAFETY: `hwnd` is our live popup; teardown of its own hotkey.
-            unsafe {
-                let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
-            }
-            POPUP.store(0, Ordering::SeqCst);
-            EDIT.store(0, Ordering::SeqCst);
-            ORIG_EDIT_PROC.store(0, Ordering::SeqCst);
-            VISIBLE.store(false, Ordering::SeqCst);
-            tracing::info!("run dialog window destroyed");
-            LRESULT(0)
-        }
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
-    }
-}
-
-/// Subclass procedure for the command field: maps Enter/Esc to run/dismiss and
-/// delegates everything else to the original `EDIT` procedure.
-///
-/// The body runs under [`crate::win_util::guard_abi`]; on panic it degrades to
-/// the same default the body uses — the original `EDIT` procedure, or
-/// `DefWindowProcW` when there is none.
-unsafe extern "system" fn edit_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    // SAFETY: the guard only runs the body and, on a panic, takes the same
-    // default path the body takes for unhandled messages (`CallWindowProcW`
-    // down the original `EDIT` proc, or `DefWindowProcW` if there is none);
-    // all handles come straight from Win32.
-    crate::win_util::guard_abi(
-        "run_dialog::edit_proc",
-        || unsafe { edit_proc_inner(hwnd, msg, wparam, lparam) },
         || unsafe {
-            let previous = ORIG_EDIT_PROC.load(Ordering::SeqCst);
-            if previous == 0 {
-                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            match msg {
+                WM_HOTKEY if w.0 == 3 => show(),
+                WM_CLOSE => hide(),
+                WM_TIMER => poll(),
+                WM_ACTIVATE if w.0 & 0xffff == WA_INACTIVE as usize => {
+                    if with(|s| s.visible).unwrap_or(false)
+                        && !internal_activation(HWND(l.0 as *mut _))
+                    {
+                        hide();
+                    }
+                }
+                WM_DPICHANGED => {
+                    if l.0 != 0 {
+                        let proposed = *(l.0 as *const RECT);
+                        let monitor = MonitorFromRect(&proposed, MONITOR_DEFAULTTONEAREST);
+                        let mut info = MONITORINFO {
+                            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                            ..Default::default()
+                        };
+                        if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                            with(|s| s.work = info.rcWork);
+                        }
+                    }
+                    with(|s| s.dpi = (w.0 & 0xffff) as u32);
+                    layout();
+                }
+                WM_DISPLAYCHANGE => position(),
+                WM_COMMAND => {
+                    let id = (w.0 & 0xffff) as u16;
+                    let code = (w.0 >> 16) as u32;
+                    if id == EDIT && code == EN_CHANGE {
+                        with(|s| {
+                            if s.busy {
+                                s.generation = s.generation.wrapping_add(1);
+                            }
+                        });
+                        if !with(|s| s.composing).unwrap_or(false) {
+                            status("");
+                            query();
+                        }
+                    } else if code == BN_CLICKED {
+                        match id {
+                            RUN => run(),
+                            CANCEL => hide(),
+                            CLEAR => clear(),
+                            DROP => dropdown(),
+                            _ => {}
+                        }
+                    } else if id == LIST && code == LBN_SELCHANGE {
+                        adopt();
+                    }
+                }
+                WM_KEYDOWN | WM_SYSKEYDOWN => {
+                    if !key(hwnd, msg, w) {
+                        return DefWindowProcW(hwnd, msg, w, l);
+                    }
+                }
+                WM_DESTROY => {
+                    let _ = UnregisterHotKey(Some(hwnd), 3);
+                    let _ = KillTimer(Some(hwnd), 1);
+                }
+                _ => return DefWindowProcW(hwnd, msg, w, l),
             }
-            let original: WNDPROC = std::mem::transmute::<isize, WNDPROC>(previous);
-            CallWindowProcW(original, hwnd, msg, wparam, lparam)
+            LRESULT(0)
         },
+        || unsafe { DefWindowProcW(hwnd, msg, w, l) },
     )
 }
-
-/// Inner body of [`edit_proc`].
-unsafe extern "system" fn edit_proc_inner(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_KEYDOWN => {
-            let key = wparam.0 as u16;
-            if key == VK_RETURN.0 {
-                run_command();
+unsafe extern "system" fn child_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    let previous = with(|s| {
+        s.controls
+            .iter()
+            .find(|c| c.1 == hwnd)
+            .map(|c| c.2)
+            .unwrap_or(0)
+    })
+    .unwrap_or(0);
+    let fallback = || unsafe {
+        if previous == 0 {
+            DefWindowProcW(hwnd, msg, w, l)
+        } else {
+            CallWindowProcW(
+                std::mem::transmute::<isize, WNDPROC>(previous),
+                hwnd,
+                msg,
+                w,
+                l,
+            )
+        }
+    };
+    crate::win_util::guard_abi(
+        "run_dialog::child_proc",
+        || {
+            if msg == WM_IME_STARTCOMPOSITION {
+                with(|s| {
+                    s.composing = true;
+                    s.query = s.query.wrapping_add(1);
+                    s.pending = None;
+                    s.waiting = None;
+                });
+                expand(false);
+            }
+            if msg == WM_IME_ENDCOMPOSITION {
+                let result = fallback();
+                with(|s| s.composing = false);
+                query();
+                return result;
+            }
+            if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && key(hwnd, msg, w) {
                 return LRESULT(0);
             }
-            if key == VK_ESCAPE.0 {
-                hide();
+            // Suppress translated control characters consumed above.
+            if msg == WM_CHAR
+                && !with(|s| s.composing).unwrap_or(false)
+                && matches!(w.0, 9 | 13 | 27 | 1)
+            {
                 return LRESULT(0);
+            }
+            fallback()
+        },
+        fallback,
+    )
+}
+pub fn shutdown() {
+    let hwnd = window();
+    if !hwnd.is_invalid() {
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+    let old = STATE.with(|cell| cell.borrow_mut().take());
+    if let Some(state) = old {
+        unsafe {
+            if !state.font.is_invalid() {
+                let _ = DeleteObject(state.font.into());
             }
         }
-        WM_KILLFOCUS if visible() && focus_left_popup(wparam.0 as isize) => hide(),
-        _ => {}
     }
-
-    let previous = ORIG_EDIT_PROC.load(Ordering::SeqCst);
-    if previous == 0 {
-        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
-    }
-    // SAFETY: `previous` is the `WNDPROC` returned by `SetWindowLongPtrW`.
-    let original: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(previous) };
-    unsafe { CallWindowProcW(original, hwnd, msg, wparam, lparam) }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_input;
-
+    use super::*;
     #[test]
-    fn trims_whitespace() {
-        assert_eq!(normalize_input("  notepad  "), "notepad");
+    fn layouts_stay_inside_each_monitor_and_keep_actions_visible() {
+        for dpi in [96, 144, 192] {
+            for work in [
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1040,
+                },
+                RECT {
+                    left: -1600,
+                    top: -200,
+                    right: 0,
+                    bottom: 700,
+                },
+                RECT {
+                    left: 40,
+                    top: 60,
+                    right: 360,
+                    bottom: 300,
+                },
+            ] {
+                let caption = 24 * dpi as i32 / 96;
+                let g = geometry(work, dpi, 20, 44 * dpi as i32 / 96, caption);
+                assert!(g.x >= work.left && g.y >= work.top, "{g:?}");
+                assert!(
+                    g.x + g.width <= work.right && g.y + g.height <= work.bottom,
+                    "{g:?}"
+                );
+                assert!(
+                    g.button_y + 30 * dpi as i32 / 96 <= g.height - caption,
+                    "actions clipped: {g:?}"
+                );
+                assert!(g.list_y >= g.input_y + 30 * dpi as i32 / 96);
+                assert!(
+                    g.status_height >= 16 * dpi as i32 / 96,
+                    "error text disappeared: {g:?}"
+                );
+            }
+        }
     }
-
     #[test]
-    fn strips_surrounding_quotes() {
-        assert_eq!(
-            normalize_input("\"C:\\Program Files\\app.exe\""),
-            "C:\\Program Files\\app.exe"
-        );
+    fn candidates_use_only_needed_rows_and_yield_space_to_error_text() {
+        let work = RECT {
+            right: 1000,
+            bottom: 500,
+            ..Default::default()
+        };
+        let one = geometry(work, 96, 1, 22, 24);
+        let many = geometry(work, 96, 20, 22, 24);
+        assert_eq!(one.list_height, 44);
+        assert_eq!(many.list_height, 164);
+        let long_error = geometry(work, 96, 20, 220, 24);
+        assert_eq!(long_error.status_height, 220);
+        assert!(long_error.list_height < many.list_height);
+        assert!(long_error.button_y + 30 <= long_error.height - 24);
     }
-
     #[test]
-    fn keeps_inner_quotes() {
-        assert_eq!(normalize_input("cmd /c \"echo hi\""), "cmd /c \"echo hi\"");
+    fn hidden_reopened_or_edited_requests_cannot_change_current_ui() {
+        let submitted = 7;
+        assert!(result_is_current(true, submitted, submitted));
+        assert!(!result_is_current(false, submitted, submitted));
+        assert!(!result_is_current(true, submitted + 1, submitted)); // edit while pending
+        assert!(!result_is_current(true, submitted + 2, submitted)); // hide, reopen
+        assert!(!result_is_current(true, 0, u64::MAX)); // generation wraps on hide
     }
-
     #[test]
-    fn empty_stays_empty() {
-        assert_eq!(normalize_input("   "), "");
+    fn native_status_measurement_handles_empty_and_wrapped_chinese() {
+        // Exercise the real Win32 boundary that previously read empty Vec's 0x2 pointer.
+        assert_eq!(measure_status(HDC::default(), "", 120), 0);
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            assert!(!dc.is_invalid());
+            let single = measure_status(dc, "找不到目标。", 500);
+            let wrapped = measure_status(
+                dc,
+                "找不到目标。请检查名称或路径后重试。没有默认打开方式，请为此文件设置关联应用。",
+                100,
+            );
+            assert!(single > 0);
+            assert!(wrapped > single);
+            for _ in 0..100 {
+                assert_eq!(measure_status(dc, "", 100), 0);
+            }
+            assert!(DeleteDC(dc).as_bool());
+        }
     }
 }
