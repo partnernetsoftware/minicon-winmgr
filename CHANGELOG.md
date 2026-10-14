@@ -3,6 +3,58 @@
 所有值得记录的变更记在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/)，
 版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## 0.1.3 — 2026-10-14
+
+主题：**通知区（托盘）收敛 + 代码健康**——不新增产品功能，把 v0.1.2 之前"看得见但不可用"的
+通知图标条做成真的，并把四类代码债（稳健 / 复用 / 抽象 / 耦合）清完。计划全文见
+[`docs/plan_0_1_3.md`](docs/plan_0_1_3.md)。
+
+### 变更
+
+- **通知区重构为「一个模型 + 各管一摊」**（`src/tray.rs` / `src/tray_bar.rs` / `src/tray_host.rs`）：
+  - `tray` 是唯一数据源：宿主表（我们作外壳时应用注册进来的真图标）优先，镜像缓存兜底
+    （以外跟随别人的 shell 时读它的 `ToolbarWindow32`，250ms 超时、只在心跳采样，**不在重绘路径上**）。
+  - `tray_bar` 只管呈现：格子几何（`Layout`）、绘制（真图标 `CopyImage` 进本进程再画，
+    占位则渐隐填充）、命中（`hit_test`）、转发（`forward`）。真图标可点；镜像占位**不可点**
+    （`is_forwardable`），杜绝把点击发给别人的 shell。
+  - `tray_host` 只剩协议：`WM_COPYDATA`/`SHELLTRAYDATA` 解析 + 注册表维护，几何/命中/转发全部迁出。
+  - 四类事件转发（`WM_LBUTTONDOWN` / `WM_LBUTTONDBLCLK` / `WM_RBUTTONDOWN` / `WM_RBUTTONUP`），
+    down/up 保持独立不合并；hover **从不转发**，只弹我们的 tooltip。绘制/命中/转发共用一份快照。
+- **设置行文案**：「显示通知图标条（实验性）」→「显示通知区域（仅作外壳时可点）」，并加单测锁死措辞。
+- **可见性收窄**：`tray` / `tray_bar` / `tray_host` / `win_util` 的 `pub` 降为 `pub(crate)`
+  （本 crate 外本就不可达，纯澄清；全仓收窄留给 0.2.0）。
+- **文档清理**：13 个模块头已与事实矛盾的 `INTERFACE FROZEN` 标记全部移除（无一是 stub）；
+  两处把"开始菜单退役"归因于窗口列表按钮的注释改为符合 v0.1.2 事实（两者系一并退役）；
+  PRD 子文档（`prd_1_1` / `prd_4_1` / `prd_6_1` / `prd_2_1` / `prd.md` / `README.md`）的托盘叙述按
+  0.1.3 决策回写。
+
+### 修复（代码健康）
+
+- **稳健**：59 处裸 `Mutex::lock().unwrap()` 清零（poison 时读穿 `lock_or_recover`，不再 panic——
+  wndproc 的 `extern "system"` ABI 禁止 unwind，首个 panic 即 abort 整个外壳）；19 个 FFI 回调
+  全部套 `guard_abi`（wndproc 退化到 `DefWindowProcW`，子类化 proc 复刻 `CallWindowProcW` 链，
+  枚举回调跳过该项继续）；静默失败补日志（前台激活三条策略全被拒、工作区写回、状态文件删除等）。
+- **复用**：`win_util` 新增 `rect_contains` / `popup_menu`+`MenuRow` / `centered_origin` /
+  `centered_upper_quarter` / `anchored_card` / `Brush`(RAII) 等共享件；弹出菜单样板 5 处、矩形命中
+  6 处、居中 3 处、画刷 7 处、`wide()` 4 份收敛为 1；`theme()` 3 份收敛为 `config::theme()`；
+  同名多义的 `GAP` 按语义改名（`BTN_GAP`/`PIN_GAP`/`SECTION_GAP`/`TIP_GAP`/`PREVIEW_GAP`/`LIST_GAP`），
+  全仓只剩 `tray_bar::GAP` 一个。
+- **耦合**：新增两个叶子模块解两处循环依赖——`hub`（shell HWND + 重建钩子，解
+  `taskbar ↔ settings_ui`）、`model`（`Shortcut`，解 `launcher ↔ recents`）。
+- **config 键单一来源**：设置面板写的每个键都是 `config::keys` 常量，写端与读端不再各自手拼字符串；
+  一致性有单测锁死（setter 写的键必须就是 parser 读的键）。
+- **日志卫生**：启动时替换模式下不再打印误导性的 "notification area mirrored count=0"；
+  图标注册/注销提升到 INFO（此前 DEBUG 级，无法从日志判断"条是空的因为没 bug 还是没人注册"）；
+  `clear_workarea_state` 不再在正常拆卸路径上打 WARN（文件本就该没了）。
+
+### 验收
+
+- `cargo test` 224 → **231**；`cargo fmt --check` / `clippy --all-targets -D warnings` 全绿。
+- computer-use 实机闭环（替换模式 + harness 应用注册真实 HICON）：真图标绘制、
+  四类事件转发逐个命中、tooltip 悬浮出现、hover/点击均不改变前台（`WS_EX_NOACTIVATE` 生效）。
+- 已知边界：本会话无 explorer，`Shell_NotifyIconW` 不向外来 `Shell_TrayWnd` 路由（8 种 cbSize 全拒、
+  sink 零消息），"真实应用自动注册"在此环境无法验证；协议注册（字节等价 payload）链路已全通。
+
 ## 0.1.2 — 2026-10-14
 
 ### 变更
