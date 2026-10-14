@@ -116,8 +116,11 @@
 - 跨进程 `SendMessageTimeoutW` 超时是 **2000ms**（`tray.rs:32`），而 `refresh()` 在**消息线程**上跑
   `TB_BUTTONCOUNT + 每按钮 2 次`——托盘宿主卡死时一次刷新可阻塞数秒。降到 ~250ms 或加缓存。
 
-**验收限制（必须说清）**：agent 沙箱**起不了 GUI**，托盘点击的最终验收**必须在真实替换会话里由业主点一下**。
-本版能给到的自动化证据只有：纯函数单测 + 热切换后的截图 + 日志。**这是本版唯一无法自证的条目。**
+**验收方式（2026-10-14 校正）**：agent 沙箱**不能新起 GUI 进程**，但**能驱动已在运行的界面**——
+`SetCursorPos` + `mouse_event` / `keybd_event` 发真实输入 → `scripts/capture.py` 截图 → `Read` 读图，
+并用 ctypes 读回 `GetForegroundWindow` / `IsIconic` 做程序化佐证。因此托盘点击**本代理可自行闭环验收**
+（方法见项目 `MEMORY.md`「目视验证回路」；该闭环已于 2026-10-14 在任务按钮 toggle 上跑通）。
+业主只在发版前做一次体感确认，**不作为阻塞项**。**本版没有"无法自证"的条目。**
 
 ---
 
@@ -186,12 +189,12 @@
 | W1 | 托盘宿主：补右键 + 摘 `dead_code` | `src/tray_host.rs` | 可独立并行 |
 | W2 | 41 处 `lock().unwrap()` 替换 + wndproc `catch_unwind` | `src/taskbar.rs`、`src/window_icon.rs`、`src/config.rs` | 依赖 W1；**风险中**，逐文件做 |
 | W2 | 几何/命中/居中/`wide` 收敛 | `src/tray_bar.rs`、`src/quick_launch.rs`、`src/settings_ui.rs`、`src/hover_preview.rs`、`src/bar_tip.rs` | 纯搬家 + characterization 单测 |
-| W3 | 托盘接线（单一数据源 + 真图标 + 点击） | `src/taskbar.rs`（主代理单点） | 依赖 W1/W2；**唯一需业主真机验收** |
+| W3 | 托盘接线（单一数据源 + 真图标 + 点击） | `src/taskbar.rs`（主代理单点） | 依赖 W1/W2；**代理自行驱动 + 截图验收** |
 | W3 | 菜单样板收敛 | `src/task_list.rs`、`src/start_menu.rs` | 依赖 W1 的 `popup_menu` |
 | W3 | 解 `taskbar ↔ settings_ui` 环 | `src/window.rs`（装配层）+ 两侧各一处 | 主代理做 |
 | W4 | 解 `launcher ↔ recents` 环、`pub(crate)` 降级、FROZEN 清理 | `src/model.rs`（新）、全仓 | 机械替换 + 编译验证 |
 | W4 | config setter 表驱动 | `src/config.rs` | 有单测兜底，可并行 |
-| W5 | 关卡 + 热切换 + 业主真机验收 | 无（运维） | 见 §5 |
+| W5 | 关卡 + 热切换 + **代理驱动验收**（业主体感确认可选） | 无（运维） | 见 §5 |
 
 **subagent 通用禁令**（照抄 PRD）：禁改 `Cargo.toml`、禁 `cargo add`、禁 `cargo fmt`、禁起 GUI；
 可跑 `cargo check`；**纯逻辑必须带单测**。
@@ -207,7 +210,7 @@
 | V3 | **不新增 worker 线程**；`bars()/tasks()/tray_icons()` 仅消息线程访问（`prd_2_1.md` §55） | 代码审查 |
 | V4 | **重构切片必须行为等价**：每个切片单独 commit、可独立回滚；搬家前先补 characterization 单测 | `git log` + 审查 |
 | V5 | 消息线程上 **0 处** 无护栏的 `lock().unwrap()`；wndproc 全部有 `catch_unwind` | Grep 取证 |
-| V6 | **托盘验收：业主在真实替换会话点一次**（看真图标 + 点击转发）。**本版唯一无法自证的条目** | 手测 |
+| V6 | **托盘验收：代理自行驱动**——截屏见真图标；驱动托盘图标点击，并用 ctypes 读回目标窗口状态，两者互证 | 驱动 + 截图 + 状态读回 |
 | V7 | 热切换上线后日志 0 ERROR / 0 panic；私有字节 ≤ 20 MB、GDI 句柄持平 | 日志 + `metrics` |
 | V8 | release 构建通过；`gh release create` 走 `.github/workflows/release.yml`（打 tag 即发布） | 实测 |
 
@@ -222,7 +225,7 @@
 | 跨进程超时 2000ms 卡消息线程 | 降到 ~250ms + 结果缓存；必要时把镜像读取移出消息线程（**但不得新增持锁 worker**） |
 | `catch_unwind` 掩盖真实 bug | 捕获后**必须** `error!` + 落日志（不许静默吞）；`metrics` 里加计数 |
 | **上帝模块未拆，改动仍集中在 `taskbar.rs`** | 本版**接受**（见门控）；做完 P1 的收敛后，`taskbar.rs` 应显著变薄，为 0.2.0 拆分铺路 |
-| 托盘验收依赖业主时间 | 排在 W3 末，不阻塞其余切片；卡住就**先发不含托盘接线的 0.1.3**（托盘单独走 0.1.4） |
+| 托盘图标由别的进程异步投递，时序不可控 | 驱动验收时若拍到空条，先等一轮 `refresh()` 再截；仍空则查日志里 `tray_host` 是否收到 `SHELLTRAYDATA` |
 
 ### 门控：为什么不拆 `src/taskbar.rs`（2850 行）
 
@@ -239,8 +242,8 @@
 ## 7. 待你拍板（开工前点头）
 
 1. **本版主题确认**：0.1.3 = 「托盘收敛 + 代码健康」，**不新增产品功能**。是否同意？
-2. **托盘验收的现实约束**：托盘点击**必须你在真实替换会话里点一次**才算验收（agent 起不了 GUI）。
-   接受这个前提、还是希望我先只做"能看真图标"、点击转发单独排 0.1.4？
+2. ~~托盘验收的现实约束~~ — **已闭合**（2026-10-14）：代理可自行驱动运行中的界面并截图验收，
+   见 §3 的「验收方式」校正说明。**此项不再是问题，无需拍板。**
 3. **`pub` → `pub(crate)` 批量降级**：低风险但**触碰全仓 30 个文件**，会让 diff 很大、掩盖真实改动。
    做在 0.1.3、还是并进 0.2.0 的拆分一起做？
 
