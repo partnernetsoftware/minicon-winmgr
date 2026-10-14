@@ -68,7 +68,9 @@
 - ⬜ 菜单内"最近使用"专区、拖拽整理分类。
 
 ## 运行对话框
-- ✅ `src/run_dialog.rs`：**Win+R** 弹出；被占用时**回退 Ctrl+Alt+R**；Enter/OK 经 `ShellExecuteW` 启动。
+- 🟡 `src/run_dialog.rs`：**Win+R** 弹出；被占用时**回退 Ctrl+Alt+R**；现有输入框 + OK/Cancel，经 `shell_launch` 启动。
+- 已知缺口：程序和参数未拆分；每次呼出清空；没有历史/补全；失败仍关窗；键盘、IME、DPI/多屏体验待完善。
+- ⬜ **0.1.4：运行对话框达到日常可用**。先让命令正确执行、失败可修改，再减少重复输入；需求、交互及验收唯一来源为 [`prd_1_1_1.md`](prd_1_1_1.md)，排期见 [`plan_0_1_4.md`](plan_0_1_4.md)。
 
 ## 窗口管理
 - ✅ Snap 热键：`src/hotkeys.rs`，`Win+←/→/↑` → 回退 `Ctrl+Alt+←/→/↑`（纯几何 `snap_rect` + 单测）。
