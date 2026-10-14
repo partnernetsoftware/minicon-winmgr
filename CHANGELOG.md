@@ -38,11 +38,18 @@
   `CreateProcessW(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`，不继承句柄。
 - **`Shell` 写 `None` 会写成空 `REG_SZ`**：改为 `RegDeleteValueW`（删除该值）。
 
+### 构建 / CI
+
+- `clippy 1.99`（CI 的 `stable`）新增 `clippy::chunks_exact_to_as_chunks` lint，
+  `src/shell_registry.rs` 与 `src/tray_host.rs` 两处 `chunks_exact(2)` 改为 `as_chunks::<2>()`。
+  本机 clippy 为 1.97、**不会报此 lint**，因此之前只在 CI 暴露——**发版前务必 `gh run list` 确认 CI**，不能只信本地。
+
 ### 文档
 
 - PRD 体系整理为 `docs/prd.md` + 子文档 `prd_{idx1}_{idx2}.md`（命名 = 树路径），新增方法学章节。
 - `prd_3_1.md` 新增「立即接管」章节；`prd_2_1.md` 补资源实测基线与 3 条新不变量。
-- `README.md` 同步 M5/M11、命令表与模块表。
+- 新增 `docs/plan_0_2_0.md`（0.2.0 版本计划），并在 `prd.md` §0.4 登记为「版本计划」。
+- `README.md` 同步 M5/M11、命令表与模块表，并链接 CHANGELOG 与下一版计划。
 
 ### 实测基线
 
