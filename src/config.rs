@@ -381,6 +381,16 @@ pub fn current() -> Config {
     crate::win_util::lock_or_recover(runtime()).clone()
 }
 
+/// The active theme, cached for the process lifetime.
+///
+/// The taskbar, the bar-tip bubble and the settings window each used to wrap
+/// the same config value in their own `OnceLock`. One accessor means one
+/// answer, and a repaint still never touches the config file.
+pub fn theme() -> Theme {
+    static T: OnceLock<Theme> = OnceLock::new();
+    *T.get_or_init(|| load().theme)
+}
+
 /// Replaces the live config and persists the single changed key.
 ///
 /// `key`/`value` describe the one field that changed, so persistence is a
