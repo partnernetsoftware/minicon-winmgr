@@ -38,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::win_util::wide;
+use crate::win_util::{lock_or_recover, wide};
 
 // `Shell_NotifyIcon` message codes carried in `SHELLTRAYDATA.dwMessage`.
 const NIM_ADD: u32 = 0;
@@ -68,6 +68,10 @@ const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONDBLCLK: u32 = 0x0203;
 #[allow(dead_code)]
 const WM_RBUTTONDOWN: u32 = 0x0204;
+#[allow(dead_code)]
+const WM_RBUTTONUP: u32 = 0x0205;
+#[allow(dead_code)]
+const WM_RBUTTONDBLCLK: u32 = 0x0206;
 
 // Cell geometry defaults for [`StripLayout`], matching `tray_bar`.
 //
@@ -156,13 +160,7 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Current hosted icons (empty when the host is not installed).
 pub fn icons() -> Vec<TrayIconHandle> {
-    let guard = match icons_store().lock() {
-        Ok(g) => g,
-        Err(poisoned) => {
-            tracing::warn!("tray icon table lock poisoned; returning recovered snapshot");
-            poisoned.into_inner()
-        }
-    };
+    let guard = lock_or_recover(icons_store());
     guard
         .iter()
         .map(|i| TrayIconHandle {
@@ -270,6 +268,10 @@ fn to_i32(v: i64) -> Option<i32> {
 }
 
 /// A mouse action to forward to a hosted icon's owner.
+///
+/// Right-button down and up are deliberately *separate* variants: many apps
+/// open their menu only on `WM_RBUTTONDOWN`, while others finalise on
+/// `WM_RBUTTONUP`, so collapsing them into one event would break those owners.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseEvent {
@@ -277,6 +279,8 @@ pub enum MouseEvent {
     LeftDown,
     LeftDoubleClick,
     RightDown,
+    RightUp,
+    RightDoubleClick,
 }
 
 impl MouseEvent {
@@ -287,6 +291,8 @@ impl MouseEvent {
             MouseEvent::LeftDown => WM_LBUTTONDOWN,
             MouseEvent::LeftDoubleClick => WM_LBUTTONDBLCLK,
             MouseEvent::RightDown => WM_RBUTTONDOWN,
+            MouseEvent::RightUp => WM_RBUTTONUP,
+            MouseEvent::RightDoubleClick => WM_RBUTTONDBLCLK,
         }
     }
 }
@@ -321,13 +327,7 @@ pub fn forward_target(icon: &TrayIconHandle, event: MouseEvent) -> Option<Forwar
 /// never hold the lock across an `IsWindow`/`PostMessageW` call.
 #[allow(dead_code)]
 fn forward_snapshot() -> Vec<TrayIconHandle> {
-    let guard = match icons_store().lock() {
-        Ok(g) => g,
-        Err(poisoned) => {
-            tracing::warn!("tray icon table lock poisoned; forwarding from recovered snapshot");
-            poisoned.into_inner()
-        }
-    };
+    let guard = lock_or_recover(icons_store());
     guard
         .iter()
         .map(|i| TrayIconHandle {
@@ -573,10 +573,7 @@ fn read_tooltip(buf: &[u8], off: usize) -> String {
 
 /// Applies one decoded notification to the icon table.
 fn apply(parsed: ParsedIcon) {
-    let mut guard = match icons_store().lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    let mut guard = lock_or_recover(icons_store());
     match parsed.dw_message {
         NIM_DELETE => {
             let before = guard.len();
@@ -842,5 +839,58 @@ mod tests {
         // A layout hit can never turn into a post while the table is empty.
         let l = StripLayout::new(0, 100, 36);
         assert!(!forward_at(MouseEvent::LeftDown, l, 50, 18));
+    }
+
+    // --- right-click forwarding ------------------------------------------
+
+    #[test]
+    fn right_button_events_map_to_real_win32_message_values() {
+        // Pin the literal values: a transposed token here would silently send
+        // the wrong button and no owner menu would ever appear.
+        assert_eq!(MouseEvent::RightDown.lparam(), 0x0204);
+        assert_eq!(MouseEvent::RightUp.lparam(), 0x0205);
+        assert_eq!(MouseEvent::RightDoubleClick.lparam(), 0x0206);
+        // Down and up must stay distinct — apps opening on down and finishing
+        // on up need the two separate messages.
+        assert_ne!(MouseEvent::RightDown.lparam(), MouseEvent::RightUp.lparam());
+    }
+
+    #[test]
+    fn right_click_hit_test_resolves_the_cell_under_the_cursor() {
+        // Same right-aligned strip as the left-button tests: 3 cells flush at
+        // x=100, centres ~[50, 70, 90).
+        let l = StripLayout::new(0, 100, 36);
+        assert_eq!(l.hit_test(3, 50, 18), Some(0));
+        assert_eq!(l.hit_test(3, 70, 18), Some(1));
+        assert_eq!(l.hit_test(3, 90, 18), Some(2));
+    }
+
+    #[test]
+    fn right_click_forward_target_keeps_the_owner_triple() {
+        let icons = [
+            icon(11, 0x1000, 0x0400),
+            icon(22, 0x2000, 0x0400),
+            icon(33, 0x3000, 0x0400),
+        ];
+        let l = StripLayout::new(0, 100, 36);
+        let index = l
+            .hit_test(icons.len(), 70, 18)
+            .expect("right-click on cell 1");
+        assert_eq!(index, 1);
+        // Event only swaps lParam; the owner triple is untouched.
+        let t = forward_target(&icons[index], MouseEvent::RightUp).expect("valid owner");
+        assert_eq!(t.hwnd, 0x2000);
+        assert_eq!(t.msg, 0x0400);
+        assert_eq!(t.wparam, 22);
+        assert_eq!(t.lparam, WM_RBUTTONUP as isize);
+    }
+
+    #[test]
+    fn right_click_in_gap_or_off_strip_hits_nothing() {
+        let l = StripLayout::new(0, 100, 36);
+        assert_eq!(l.hit_test(3, 61, 18), None); // gap column between cells
+        assert_eq!(l.hit_test(3, 41, 18), None); // left of the strip
+        assert_eq!(l.hit_test(3, 100, 18), None); // right edge is exclusive
+        assert_eq!(l.hit_test(0, 50, 18), None); // empty strip
     }
 }
