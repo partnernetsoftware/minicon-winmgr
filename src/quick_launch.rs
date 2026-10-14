@@ -194,7 +194,7 @@ pub fn layout(left: i32, n: usize, cell: i32, gap: i32, bar_h: i32) -> Vec<RECT>
 pub fn hit(rects: &[RECT], x: i32, y: i32) -> Option<usize> {
     rects
         .iter()
-        .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .position(|r| crate::win_util::rect_contains(*r, x, y))
 }
 
 /// Launches the shortcut at `path`, logging the outcome.

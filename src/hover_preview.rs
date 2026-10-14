@@ -16,9 +16,9 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
-    DeleteObject, EndPaint, FillRect, GetDC, GetMonitorInfoW, HBITMAP, HBRUSH, HGDIOBJ,
-    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, PAINTSTRUCT, ReleaseDC,
-    SRCCOPY, SelectObject, StretchBlt,
+    DeleteObject, EndPaint, FillRect, GetDC, GetMonitorInfoW, HBITMAP, HGDIOBJ, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, PAINTSTRUCT, ReleaseDC, SRCCOPY,
+    SelectObject, StretchBlt,
 };
 use windows::Win32::Storage::Xps::PrintWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -50,9 +50,6 @@ const BG_COLOR: COLORREF = COLORREF(0x0020_2020);
 const CLASS_NAME: &str = "minicon_winmgr_hover_preview";
 const WINDOW_TITLE: &str = "minicon preview";
 
-/// `ERROR_CLASS_ALREADY_EXISTS`, tolerated on repeated `install`.
-const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
-
 // --- process-lifetime state ------------------------------------------------
 // Handles are stored as `isize`; the message thread is the sole user, so this
 // is safe by construction.
@@ -75,44 +72,6 @@ fn existing(slot: &AtomicIsize) -> Option<HWND> {
 
 fn preview() -> Option<HWND> {
     existing(&PREVIEW)
-}
-
-/// Computes the preview rectangle for a hovered `btn`, preferring just above
-/// the bar and flipping below when there is no room above; centred on `btn`
-/// and clamped inside `work`. Pure, so it can be unit-tested without Win32.
-pub fn target_rect(btn: RECT, work: RECT) -> RECT {
-    let center_x = (btn.left + btn.right) / 2;
-    let mut left = center_x - PREVIEW_W / 2;
-
-    // Prefer sitting above the button; flip below if that would leave `work`.
-    let above = btn.top - PREVIEW_H - GAP;
-    let mut top = if above >= work.top {
-        above
-    } else {
-        btn.bottom + GAP
-    };
-
-    // Clamp inside the work area (right/bottom edges first so the card keeps
-    // its size when the work area is larger than the preview).
-    if left + PREVIEW_W > work.right {
-        left = work.right - PREVIEW_W;
-    }
-    if left < work.left {
-        left = work.left;
-    }
-    if top + PREVIEW_H > work.bottom {
-        top = work.bottom - PREVIEW_H;
-    }
-    if top < work.top {
-        top = work.top;
-    }
-
-    RECT {
-        left,
-        top,
-        right: left + PREVIEW_W,
-        bottom: top + PREVIEW_H,
-    }
 }
 
 /// Captures `hwnd` into a fresh `w`×`h` bitmap via `PrintWindow`
@@ -205,7 +164,7 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         };
         if RegisterClassW(&wnd_class) == 0 {
             let code = GetLastError().0;
-            if code != ERROR_CLASS_ALREADY_EXISTS {
+            if code != crate::win_util::ERROR_CLASS_ALREADY_EXISTS {
                 return Err(
                     format!("RegisterClassW(hover_preview) failed (Win32 error {code})").into(),
                 );
@@ -292,7 +251,7 @@ pub fn show(target: isize, anchor: RECT) {
     }
 
     let work = work_area(anchor);
-    let rect = target_rect(anchor, work);
+    let rect = crate::win_util::anchored_card(anchor, work, PREVIEW_W, PREVIEW_H, GAP);
 
     let mut slot = lock_or_recover(&ANCHOR);
     tracing::debug!(previous = ?*slot, current = ?anchor, "hover preview: anchor moved");
@@ -338,9 +297,9 @@ fn paint(hwnd: HWND) {
             right: PREVIEW_W,
             bottom: PREVIEW_H,
         };
-        let background: HBRUSH = CreateSolidBrush(BG_COLOR);
-        FillRect(hdc, &client, background);
-        let _ = DeleteObject(HGDIOBJ(background.0));
+        if let Some(background) = crate::win_util::Brush::solid(BG_COLOR) {
+            FillRect(hdc, &client, background.handle());
+        }
 
         let raw = BITMAP.load(Ordering::SeqCst);
         if raw != 0 {
@@ -406,75 +365,5 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PREVIEW_H, PREVIEW_W, target_rect};
-    use windows::Win32::Foundation::RECT;
-
-    fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
-        RECT {
-            left: l,
-            top: t,
-            right: r,
-            bottom: b,
-        }
-    }
-
-    #[test]
-    fn prefers_above_the_bar() {
-        let btn = rect(100, 1000, 220, 1036);
-        let work = rect(0, 0, 1920, 1040);
-        let out = target_rect(btn, work);
-        assert!(out.bottom <= btn.top, "preview must sit above the button");
-    }
-
-    #[test]
-    fn flips_below_when_no_room_above() {
-        let btn = rect(100, 4, 220, 40);
-        let work = rect(0, 0, 1920, 1040);
-        let out = target_rect(btn, work);
-        assert!(
-            out.top >= btn.bottom,
-            "preview must flip below when above is out of room"
-        );
-        assert!(out.bottom <= work.bottom, "flipped preview stays in work");
-    }
-
-    #[test]
-    fn centres_horizontally_on_the_button() {
-        let btn = rect(100, 1000, 220, 1036);
-        let work = rect(0, 0, 1920, 1040);
-        let out = target_rect(btn, work);
-        assert_eq!(out.left, (btn.left + btn.right) / 2 - PREVIEW_W / 2);
-        assert_eq!(out.right - out.left, PREVIEW_W);
-        assert_eq!(out.bottom - out.top, PREVIEW_H);
-    }
-
-    #[test]
-    fn clamps_to_work_area_edges() {
-        let work = rect(0, 0, 1920, 1040);
-        let left_btn = rect(0, 1000, 40, 1036);
-        let right_btn = rect(1900, 1000, 1920, 1036);
-
-        let left_out = target_rect(left_btn, work);
-        assert!(left_out.left >= work.left);
-        assert!(left_out.right <= work.right);
-
-        let right_out = target_rect(right_btn, work);
-        assert!(right_out.left >= work.left);
-        assert!(right_out.right <= work.right);
-    }
-
-    #[test]
-    fn respects_a_non_primary_monitor_origin() {
-        let btn = rect(2000, 1000, 2120, 1036);
-        let work = rect(1920, 0, 3840, 1040);
-        let out = target_rect(btn, work);
-        assert!(out.left >= work.left);
-        assert!(out.right <= work.right);
-        assert!(out.top >= work.top);
     }
 }

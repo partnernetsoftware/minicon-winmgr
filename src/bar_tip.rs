@@ -17,11 +17,11 @@ use windows::Win32::Foundation::{
     COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
-    DEFAULT_CHARSET, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
-    EndPaint, FillRect, FrameRect, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, HBRUSH, HGDIOBJ,
-    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DT_CENTER,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DrawTextW, EndPaint, FillRect, FrameRect, GetDC,
+    GetMonitorInfoW, GetTextExtentPoint32W, HBRUSH, HGDIOBJ, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, IDC_ARROW, LoadCursorW,
@@ -31,13 +31,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
+use crate::config::theme;
 use crate::win_util::{guard_abi, lock_or_recover, wide};
 
 const CLASS_NAME: &str = "minicon_winmgr_bar_tip";
 const WINDOW_TITLE: &str = "minicon tip";
-
-/// `ERROR_CLASS_ALREADY_EXISTS`, tolerated on a repeated `install`.
-const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 
 /// Bubble height, in logical pixels.
 const TIP_H: i32 = 24;
@@ -60,43 +58,6 @@ fn hwnd_from(raw: isize) -> HWND {
 fn tip() -> Option<HWND> {
     let raw = TIP.load(Ordering::SeqCst);
     (raw != 0).then(|| hwnd_from(raw))
-}
-
-/// The bubble rectangle for a `w`×`h` bubble anchored to `anchor` (a screen
-/// rect): centred on the anchor, preferring just above and flipping below when
-/// there is no room, then clamped inside `work`. Pure, so it is unit-testable.
-pub fn tip_rect(w: i32, h: i32, anchor: RECT, work: RECT) -> RECT {
-    let center_x = (anchor.left + anchor.right) / 2;
-    let mut left = center_x - w / 2;
-
-    let above = anchor.top - h - GAP;
-    let mut top = if above >= work.top {
-        above
-    } else {
-        anchor.bottom + GAP
-    };
-
-    // Clamp inside the work area (right/bottom edges first so the bubble keeps
-    // its size when the work area is larger than it).
-    if left + w > work.right {
-        left = work.right - w;
-    }
-    if left < work.left {
-        left = work.left;
-    }
-    if top + h > work.bottom {
-        top = work.bottom - h;
-    }
-    if top < work.top {
-        top = work.top;
-    }
-
-    RECT {
-        left,
-        top,
-        right: left + w,
-        bottom: top + h,
-    }
 }
 
 /// The tip font, created once and never freed (process-lifetime GDI object).
@@ -125,13 +86,6 @@ fn font() -> isize {
             .0 as isize
         }
     })
-}
-
-/// Theme colours, loaded once at first paint (mirrors `taskbar::theme`), so a
-/// repaint never touches the config file.
-fn theme() -> crate::config::Theme {
-    static T: OnceLock<crate::config::Theme> = OnceLock::new();
-    *T.get_or_init(|| crate::config::load().theme)
 }
 
 /// Width of `text` in the tip font, in logical pixels. Best effort (`0` on
@@ -175,7 +129,7 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         };
         if RegisterClassW(&wnd_class) == 0 {
             let code = GetLastError().0;
-            if code != ERROR_CLASS_ALREADY_EXISTS {
+            if code != crate::win_util::ERROR_CLASS_ALREADY_EXISTS {
                 return Err(format!("RegisterClassW(bar_tip) failed (Win32 error {code})").into());
             }
         }
@@ -232,7 +186,7 @@ pub fn show(label: &str, anchor: RECT) {
     };
     let w = (measure(label) + 2 * PAD_X).max(MIN_W);
     let work = work_area(anchor);
-    let rect = tip_rect(w, TIP_H, anchor, work);
+    let rect = crate::win_util::anchored_card(anchor, work, w, TIP_H, GAP);
 
     let mut slot = lock_or_recover(&TEXT);
     slot.clear();
@@ -274,12 +228,12 @@ fn paint(hwnd: HWND) {
         let _ = GetClientRect(hwnd, &mut client);
 
         let t = theme();
-        let bg = CreateSolidBrush(COLORREF(t.surface));
-        FillRect(hdc, &client, bg);
-        let _ = DeleteObject(HGDIOBJ(bg.0));
-        let border = CreateSolidBrush(COLORREF(t.accent));
-        FrameRect(hdc, &client, border);
-        let _ = DeleteObject(HGDIOBJ(border.0));
+        if let Some(bg) = crate::win_util::Brush::solid(COLORREF(t.surface)) {
+            FillRect(hdc, &client, bg.handle());
+        }
+        if let Some(border) = crate::win_util::Brush::solid(COLORREF(t.accent)) {
+            FrameRect(hdc, &client, border.handle());
+        }
 
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF(t.text));
@@ -330,67 +284,5 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{TIP_H, tip_rect};
-    use windows::Win32::Foundation::RECT;
-
-    fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
-        RECT {
-            left: l,
-            top: t,
-            right: r,
-            bottom: b,
-        }
-    }
-
-    #[test]
-    fn prefers_above_the_button() {
-        let anchor = rect(100, 1000, 140, 1036);
-        let work = rect(0, 0, 1920, 1040);
-        let out = tip_rect(120, TIP_H, anchor, work);
-        assert!(out.bottom <= anchor.top, "tip must sit above the button");
-        assert_eq!(out.bottom - out.top, TIP_H);
-    }
-
-    #[test]
-    fn flips_below_when_no_room_above() {
-        let anchor = rect(100, 4, 140, 40);
-        let work = rect(0, 0, 1920, 1040);
-        let out = tip_rect(120, TIP_H, anchor, work);
-        assert!(out.top >= anchor.bottom, "tip must flip below");
-        assert!(out.bottom <= work.bottom);
-    }
-
-    #[test]
-    fn centres_on_the_button_and_keeps_its_size() {
-        let anchor = rect(100, 1000, 140, 1036);
-        let work = rect(0, 0, 1920, 1040);
-        let out = tip_rect(120, TIP_H, anchor, work);
-        assert_eq!(out.left, (anchor.left + anchor.right) / 2 - 60);
-        assert_eq!(out.right - out.left, 120);
-    }
-
-    #[test]
-    fn clamps_to_the_work_area_edges() {
-        let work = rect(0, 0, 1920, 1040);
-        let left_anchor = rect(0, 1000, 40, 1036);
-        let right_anchor = rect(1900, 1000, 1920, 1036);
-
-        let l = tip_rect(120, TIP_H, left_anchor, work);
-        assert!(l.left >= work.left && l.right <= work.right);
-        let r = tip_rect(120, TIP_H, right_anchor, work);
-        assert!(r.left >= work.left && r.right <= work.right);
-    }
-
-    #[test]
-    fn respects_a_non_primary_monitor_origin() {
-        let anchor = rect(2000, 1000, 2040, 1036);
-        let work = rect(1920, 0, 3840, 1040);
-        let out = tip_rect(120, TIP_H, anchor, work);
-        assert!(out.left >= work.left && out.right <= work.right && out.top >= work.top);
     }
 }

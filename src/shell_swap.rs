@@ -242,7 +242,7 @@ fn spawn_detached(exe: &str) -> Result<(), Box<dyn Error>> {
     };
     use windows::core::PWSTR;
 
-    let mut name: Vec<u16> = exe.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut name: Vec<u16> = crate::win_util::wide(exe);
     let startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         ..Default::default()

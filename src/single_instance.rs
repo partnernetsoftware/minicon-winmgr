@@ -41,7 +41,7 @@ impl std::error::Error for AcquireError {}
 impl InstanceGuard {
     /// Attempts to become the singleton holder of `name`.
     pub fn acquire(name: &str) -> Result<Self, AcquireError> {
-        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = crate::win_util::wide(name);
 
         // SAFETY: `wide` is a valid null-terminated UTF-16 buffer that outlives
         // the call; all other arguments are plain values.

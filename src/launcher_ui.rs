@@ -24,10 +24,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, EN_CHANGE, ES_AUTOHSCROLL, GWLP_WNDPROC,
     GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, HMENU, IsChild, LB_ADDSTRING,
     LB_GETCOUNT, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBS_NOTIFY,
-    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowTextW, ShowWindow, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_ACTIVATE, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WNDCLASS_STYLES,
-    WNDCLASSW, WNDPROC, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SendMessageW, SetWindowLongPtrW,
+    SetWindowTextW, ShowWindow, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
+    WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WNDCLASS_STYLES, WNDCLASSW,
+    WNDPROC, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
     WS_VSCROLL,
 };
 use windows::core::PCWSTR;
@@ -126,7 +126,11 @@ pub fn init(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let (x, y) = centered_origin();
+        let (x, y) = crate::win_util::centered_upper_quarter(
+            GetSystemMetrics(SM_CXSCREEN),
+            GetSystemMetrics(SM_CYSCREEN),
+            POPUP_W,
+        );
         // Hidden on creation: no `WS_VISIBLE`.
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
@@ -201,23 +205,6 @@ pub fn init(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Screen-space origin that centres a `win_w`-wide popup and puts it in the
-/// upper quarter of the work area. Pure so it can be unit-tested.
-fn centered_origin_for(screen_w: i32, screen_h: i32, win_w: i32) -> (i32, i32) {
-    (((screen_w - win_w) / 2).max(0), (screen_h / 4).max(0))
-}
-
-fn centered_origin() -> (i32, i32) {
-    // SAFETY: pure metric queries.
-    unsafe {
-        centered_origin_for(
-            GetSystemMetrics(SM_CXSCREEN),
-            GetSystemMetrics(SM_CYSCREEN),
-            POPUP_W,
-        )
-    }
-}
-
 /// Shows the popup, resets the query, and focuses the search field.
 fn show() {
     let Some(hwnd) = popup() else { return };
@@ -232,7 +219,7 @@ fn show() {
     // SAFETY: `hwnd` is our live popup window.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
+        let _ = crate::win_util::force_foreground(hwnd);
         if let Some(edit) = edit() {
             let _ = SetFocus(Some(edit));
         }
@@ -506,24 +493,4 @@ unsafe extern "system" fn edit_proc_inner(
     // SAFETY: `previous` is the `WNDPROC` returned by `SetWindowLongPtrW`.
     let original: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(previous) };
     unsafe { CallWindowProcW(original, hwnd, msg, wparam, lparam) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::centered_origin_for;
-
-    #[test]
-    fn centers_horizontally_and_sits_in_upper_quarter() {
-        assert_eq!(centered_origin_for(1920, 1080, 560), (680, 270));
-    }
-
-    #[test]
-    fn clamps_when_window_wider_than_screen() {
-        assert_eq!(centered_origin_for(400, 800, 560).0, 0);
-    }
-
-    #[test]
-    fn zero_height_screen_stays_non_negative() {
-        assert_eq!(centered_origin_for(1920, 0, 560).1, 0);
-    }
 }

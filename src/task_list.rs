@@ -5,15 +5,8 @@
 //! Opened from the taskbar's list button. Shows a `TrackPopupMenu` with one
 //! item per group and returns the chosen window handle (None if dismissed).
 
-use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetWindowRect, MF_MENUBARBREAK,
-    MF_STRING, SetForegroundWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TRACK_POPUP_MENU_FLAGS, TrackPopupMenu,
-};
-use windows::core::PCWSTR;
-
-use crate::win_util::wide;
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
 /// Rows per column before the popup wraps into a new column.
 ///
@@ -44,81 +37,41 @@ pub fn popup(anchor: HWND, entries: &[Entry]) -> Option<isize> {
         return None;
     }
 
-    // SAFETY: the popup menu is created, used and destroyed entirely within this
-    // call. `anchor` is a live window owned by this process (the taskbar). Each
-    // `wide` buffer outlives its `AppendMenuW` call, which copies the string.
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else {
-            return None;
-        };
-
-        for (i, entry) in entries.iter().enumerate() {
-            let label = wide(&entry.label);
+    // Rows are 1-based menu ids, matching `entries`; the wrap points come from
+    // `starts_new_column`. Labels are widened (and copied) inside `popup_menu`.
+    let rows: Vec<crate::win_util::MenuRow> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
             // Wrap into a fresh column every `PER_COLUMN` rows so a long list
-            // never runs off the bottom of the screen (see `starts_new_column`).
-            let flags = if starts_new_column(i, PER_COLUMN) {
-                MF_STRING | MF_MENUBARBREAK
+            // never runs off the bottom of the screen.
+            if starts_new_column(i, PER_COLUMN) {
+                crate::win_util::MenuRow::first_in_column(i + 1, &entry.label)
             } else {
-                MF_STRING
-            };
-            // Menu ids are 1-based; `(i + 1)` is at most `entries.len()`.
-            let _ = AppendMenuW(menu, flags, i + 1, PCWSTR(label.as_ptr()));
-        }
-
-        // Prefer the cursor; fall back to the bottom-left of the anchor.
-        let mut pt = POINT::default();
-        let (x, y) = match GetCursorPos(&mut pt) {
-            Ok(()) => (pt.x, pt.y),
-            Err(_) => {
-                let mut rc = RECT::default();
-                if GetWindowRect(anchor, &mut rc).is_ok() {
-                    (rc.left, rc.bottom)
-                } else {
-                    (0, 0)
-                }
+                crate::win_util::MenuRow::command(i + 1, &entry.label)
             }
-        };
+        })
+        .collect();
 
-        // Required so the popup dismisses correctly when clicking away.
-        let _ = SetForegroundWindow(anchor);
+    // Prefer the cursor; fall back to the bottom-left of the anchor.
+    // SAFETY: `anchor` is a live window owned by this process (the taskbar).
+    let fallback = unsafe {
+        let mut rc = RECT::default();
+        GetWindowRect(anchor, &mut rc).ok().map(|()| rc)
+    };
+    // SAFETY: `anchor` is our live bar window; `popup_menu` owns the menu's
+    // whole lifetime (create → append → foreground → track → destroy).
+    let id = unsafe {
+        let (x, y) = crate::win_util::cursor_pos_or(fallback);
+        crate::win_util::popup_menu(anchor, &rows, x, y)
+    };
 
-        // With `TPM_RETURNCMD` the return value is the chosen command id (0 if
-        // the menu was dismissed without a selection).
-        let cmd = TrackPopupMenu(
-            menu,
-            TRACK_POPUP_MENU_FLAGS(popup_flags()),
-            x,
-            y,
-            Some(0),
-            anchor,
-            None,
-        );
-
-        // SAFETY: `menu` is no longer referenced after this point.
-        let _ = DestroyMenu(menu);
-
-        let id = cmd.0;
-        if id >= 1 && (id as usize) <= entries.len() {
-            Some(entries[id as usize - 1].hwnd)
-        } else {
-            None
-        }
-    }
-}
-
-/// Menu flags used for the popup (kept as a fn so it can be asserted in tests).
-pub fn popup_flags() -> u32 {
-    (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN).0
+    id.and_then(|id| entries.get(id - 1).map(|entry| entry.hwnd))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PER_COLUMN, TPM_RETURNCMD, popup_flags, starts_new_column};
-
-    #[test]
-    fn flags_include_return_cmd() {
-        assert_ne!(popup_flags() & TPM_RETURNCMD.0, 0);
-    }
+    use super::{PER_COLUMN, starts_new_column};
 
     #[test]
     fn first_column_never_breaks() {

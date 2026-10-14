@@ -16,21 +16,19 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
-    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::CreateSolidBrush;
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallWindowProcW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    EN_CHANGE, ES_AUTOHSCROLL, GWLP_WNDPROC, GetCursorPos, GetSystemMetrics, GetWindowTextLengthW,
-    GetWindowTextW, HMENU, IDYES, IsChild, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL,
-    LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBS_NOTIFY, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO,
-    MF_SEPARATOR, MF_STRING, MessageBoxW, RegisterClassW, SM_CYSCREEN, SW_HIDE, SW_SHOW,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS, TrackPopupMenu,
-    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN,
-    WM_KILLFOCUS, WNDCLASS_STYLES, WNDCLASSW, WNDPROC, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WS_VSCROLL,
+    CallWindowProcW, CreateWindowExW, DefWindowProcW, EN_CHANGE, ES_AUTOHSCROLL, GWLP_WNDPROC,
+    GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, HMENU, IDYES, IsChild, LB_ADDSTRING,
+    LB_GETCOUNT, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBS_NOTIFY,
+    MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MessageBoxW, RegisterClassW, SM_CYSCREEN, SW_HIDE,
+    SW_SHOW, SendMessageW, SetWindowLongPtrW, SetWindowTextW, ShowWindow, WA_INACTIVE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_KILLFOCUS,
+    WNDCLASS_STYLES, WNDCLASSW, WNDPROC, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::PCWSTR;
 
@@ -806,7 +804,9 @@ fn show() {
     // SAFETY: `hwnd`/`list`/`edit` are our live windows.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
+        // `force_foreground` rather than a bare `SetForegroundWindow`: a
+        // top-most tool window is routinely refused the foreground.
+        let _ = crate::win_util::force_foreground(hwnd);
         if let Some(list) = list() {
             let count = SendMessageW(list, LB_GETCOUNT, None, None).0 as i32;
             if count > 0 {
@@ -905,11 +905,6 @@ fn activate_place(index: i32) {
     }
 }
 
-/// Menu flags for the folder popup (kept as a fn so tests can assert them).
-fn stack_menu_flags() -> u32 {
-    (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN).0
-}
-
 /// Expands a pinned folder into a popup listing its children.
 ///
 /// Row 1 opens the folder itself; the following rows open each child. The
@@ -923,51 +918,34 @@ fn show_stack_menu(entry: &crate::folder_stack::StackEntry) {
     };
     let children = crate::folder_stack::list_dir(&entry.path, MAX_STACK_ITEMS);
     tracing::debug!(path = %entry.path, children = children.len(), "stack menu shown");
-    // SAFETY: the menu and every `wide` buffer live only for this call; the
-    // menu is destroyed before returning, and `anchor` is our live popup.
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else {
-            tracing::warn!(path = %entry.path, "stack menu: CreatePopupMenu failed");
-            return;
-        };
-        let open_label = wide("打开此文件夹");
-        let _ = AppendMenuW(menu, MF_STRING, 1, PCWSTR(open_label.as_ptr()));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        for (i, child) in children.iter().enumerate() {
-            let label = wide(&child.label);
-            // Ids are 1-based with 1 taken by "open", so children start at 2.
-            let _ = AppendMenuW(menu, MF_STRING, i + 2, PCWSTR(label.as_ptr()));
-        }
 
-        // Anchor at the cursor, matching the overflow menu's behaviour.
-        let mut pt = POINT::default();
-        let (x, y) = match GetCursorPos(&mut pt) {
-            Ok(()) => (pt.x, pt.y),
-            Err(_) => (0, 0),
-        };
-        // Required so the popup dismisses when clicking elsewhere.
-        let _ = SetForegroundWindow(anchor);
-        let cmd = TrackPopupMenu(
-            menu,
-            TRACK_POPUP_MENU_FLAGS(stack_menu_flags()),
-            x,
-            y,
-            Some(0),
-            anchor,
-            None,
-        );
-        // SAFETY: `menu` is no longer referenced after this point.
-        let _ = DestroyMenu(menu);
+    // Row ids are 1-based: 1 opens the folder itself, children start at 2.
+    let mut rows = Vec::with_capacity(children.len() + 2);
+    rows.push(crate::win_util::MenuRow::command(1, "打开此文件夹"));
+    rows.push(crate::win_util::MenuRow::Separator);
+    for (i, child) in children.iter().enumerate() {
+        rows.push(crate::win_util::MenuRow::command(i + 2, &child.label));
+    }
 
-        let id = cmd.0;
-        if id == 1 {
+    // Anchor at the cursor, matching the overflow menu's behaviour.
+    // SAFETY: `anchor` is our live popup; `popup_menu` owns the menu's whole
+    // lifetime.
+    let id = unsafe {
+        let (x, y) = crate::win_util::cursor_pos_or(None);
+        crate::win_util::popup_menu(anchor, &rows, x, y)
+    };
+
+    match id {
+        Some(1) => {
             crate::folder_stack::open(&entry.path);
             tracing::info!(path = %entry.path, "stack menu opened folder");
-        } else if id >= 2 && (id as usize) <= children.len() + 1 {
-            let child = &children[id as usize - 2];
+        }
+        Some(id) if id >= 2 && id <= children.len() + 1 => {
+            let child = &children[id - 2];
             crate::folder_stack::open(&child.path);
             tracing::info!(path = %child.path, label = %child.label, "stack menu opened child");
         }
+        _ => {}
     }
 }
 
@@ -1426,10 +1404,5 @@ mod tests {
     fn recent_rows_zero_limit_is_empty() {
         let entries = vec!["only".to_string()];
         assert!(recent_rows(&entries, 0).is_empty());
-    }
-
-    #[test]
-    fn stack_menu_flags_include_return_cmd() {
-        assert_ne!(stack_menu_flags() & TPM_RETURNCMD.0, 0);
     }
 }

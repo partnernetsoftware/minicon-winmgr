@@ -231,15 +231,6 @@ pub fn actions() -> &'static [(&'static str, Action)] {
     ]
 }
 
-/// Screen-space origin that centres a `win_w`×`win_h` window. Pure so it can be
-/// unit-tested without any Win32 state.
-fn centered_origin_for(screen_w: i32, screen_h: i32, win_w: i32, win_h: i32) -> (i32, i32) {
-    (
-        ((screen_w - win_w) / 2).max(0),
-        ((screen_h - win_h) / 2).max(0),
-    )
-}
-
 /// Toggles a boolean preference (pure, so the checkbox behavior is testable).
 fn toggle_flag(v: bool) -> bool {
     !v
@@ -317,7 +308,7 @@ fn row_action(rows: &[Row], i: usize) -> Option<SettingAction> {
 fn hit_row_rect(rects: &[RECT], x: i32, y: i32) -> Option<usize> {
     rects
         .iter()
-        .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .position(|r| crate::win_util::rect_contains(*r, x, y))
 }
 
 /// Index of the clickable row containing `(x, y)`, if any.
@@ -330,14 +321,14 @@ fn hit_row(rows: &[Row], rects: &[RECT], x: i32, y: i32) -> Option<usize> {
 fn hit_action(rects: &[(RECT, Action)], x: i32, y: i32) -> Option<Action> {
     rects
         .iter()
-        .find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .find(|(r, _)| crate::win_util::rect_contains(*r, x, y))
         .map(|(_, a)| *a)
 }
 
 fn centered_origin() -> (i32, i32) {
     // SAFETY: pure metric queries.
     unsafe {
-        centered_origin_for(
+        crate::win_util::centered_origin(
             GetSystemMetrics(SM_CXSCREEN),
             GetSystemMetrics(SM_CYSCREEN),
             WIN_W + FRAME_W,
@@ -348,10 +339,7 @@ fn centered_origin() -> (i32, i32) {
 
 // --- GDI resources --------------------------------------------------------
 
-fn theme() -> crate::config::Theme {
-    static T: OnceLock<crate::config::Theme> = OnceLock::new();
-    *T.get_or_init(|| crate::config::load().theme)
-}
+use crate::config::theme;
 
 fn hbrush(v: isize) -> HBRUSH {
     HBRUSH(v as *mut core::ffi::c_void)
@@ -1010,8 +998,8 @@ fn get_y(lparam: LPARAM) -> i32 {
 mod tests {
     use super::{
         Action, GroupBy, MergeStrategy, Row, SettingAction, action_rects, actions, build_rows,
-        centered_origin_for, hit_action, hit_row, hit_row_rect, row_action, row_declared_action,
-        row_enabled, row_note, row_rects, toggle_flag,
+        hit_action, hit_row, hit_row_rect, row_action, row_declared_action, row_enabled, row_note,
+        row_rects, toggle_flag,
     };
     use crate::config::Config;
     use windows::Win32::Foundation::RECT;
@@ -1133,12 +1121,17 @@ mod tests {
 
     #[test]
     fn centers_window_on_screen() {
-        assert_eq!(centered_origin_for(1920, 1080, 460, 660), (730, 210));
+        // The maths itself lives in `win_util::centered_origin` (and is tested
+        // there); this pins the shape the settings window relies on.
+        assert_eq!(
+            crate::win_util::centered_origin(1920, 1080, 460, 660),
+            (730, 210)
+        );
     }
 
     #[test]
     fn clamps_when_window_larger_than_screen() {
-        assert_eq!(centered_origin_for(400, 300, 460, 660), (0, 0));
+        assert_eq!(crate::win_util::centered_origin(400, 300, 460, 660), (0, 0));
     }
 
     #[test]
