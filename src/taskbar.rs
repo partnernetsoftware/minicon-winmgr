@@ -19,8 +19,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::config::theme;
+
 use windows::Win32::Foundation::{
-    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
@@ -40,15 +42,14 @@ use windows::Win32::UI::Shell::{
     SHAppBarMessage, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CS_DBLCLKS, CreatePopupMenu, CreateWindowExW, DI_NORMAL, DefWindowProcW,
-    DestroyMenu, DestroyWindow, DrawIconEx, GetClientRect, GetCursorPos, GetForegroundWindow,
-    GetSystemMetrics, GetWindowRect, GetWindowTextW, HICON, HWND_TOPMOST, IsIconic, IsWindow,
-    KillTimer, MF_GRAYED, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW, SM_CXSCREEN,
-    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE,
-    SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS,
-    WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    CS_DBLCLKS, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyWindow, DrawIconEx,
+    GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW, HICON,
+    HWND_TOPMOST, IsIconic, IsWindow, KillTimer, PostMessageW, RegisterClassW, SM_CXSCREEN,
+    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE, SetTimer,
+    SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -200,11 +201,7 @@ fn density_for(budget: i32, prev: Density) -> Density {
     }
 }
 
-// --- palette defaults live in `config::Theme`; loaded once at startup --------
-fn theme() -> crate::config::Theme {
-    static T: OnceLock<crate::config::Theme> = OnceLock::new();
-    *T.get_or_init(|| crate::config::load().theme)
-}
+// --- palette: `crate::config::theme()`, cached process-wide ----------------
 
 const COLORREF_BLACK: COLORREF = COLORREF(0);
 
@@ -480,6 +477,9 @@ struct BarEntry {
     hover: Option<usize>,
     /// Quick-launch pin under the cursor, if any.
     pin_hover: Option<usize>,
+    /// Notification-strip icon under the cursor, if any. Hover shows the icon's
+    /// tooltip but is deliberately **never** forwarded to its owner.
+    tray_hover: Option<usize>,
     selected: Option<usize>,
 }
 
@@ -493,11 +493,80 @@ fn tasks() -> &'static Mutex<Vec<TaskItem>> {
     T.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Mirrored notification-area icons, refreshed alongside the task list and
-/// rendered by `crate::tray_bar` in the right zone.
-fn tray_icons() -> &'static Mutex<Vec<crate::tray::TrayIcon>> {
-    static T: OnceLock<Mutex<Vec<crate::tray::TrayIcon>>> = OnceLock::new();
+/// Notification-area icons, refreshed alongside the task list and rendered by
+/// `crate::tray_bar` in the right zone.
+///
+/// This is the snapshot the strip is painted from **and** the one clicks are
+/// resolved against, so the icon under the cursor is always the icon that was
+/// drawn (0.1.3 plan §2.2 rule 4).
+fn tray_icons() -> &'static Mutex<Vec<crate::tray::TrayItem>> {
+    static T: OnceLock<Mutex<Vec<crate::tray::TrayItem>>> = OnceLock::new();
     T.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Where the notification strip sits inside a bar of client rect `client`.
+///
+/// The single source of the strip's geometry on the message thread: the painter
+/// and every mouse handler call this, so their coordinate maths cannot diverge.
+fn tray_layout(client: RECT) -> crate::tray_bar::Layout {
+    let right = client.right - PAD - CLOCK_W - PAD;
+    crate::tray_bar::Layout::new(BTN_TOP, right, BAR_H - 2 * BTN_TOP)
+}
+
+/// The notification icon under `(x, y)` in client coordinates, if any.
+///
+/// Returns a clone so no lock is held while the caller talks to another
+/// process.
+fn tray_item_at(client: RECT, x: i32, y: i32) -> Option<crate::tray::TrayItem> {
+    let icons = lock_or_recover(tray_icons());
+    let index = tray_layout(client).hit_test(icons.len(), x, y)?;
+    icons.get(index).cloned()
+}
+
+/// Index of the notification icon under `(x, y)`, without cloning it.
+fn tray_index_at(client: RECT, x: i32, y: i32) -> Option<usize> {
+    let icons = lock_or_recover(tray_icons());
+    tray_layout(client).hit_test(icons.len(), x, y)
+}
+
+/// Tooltip text for strip cell `index` plus that cell in **screen** coordinates.
+///
+/// `None` when the strip changed under us or the icon carries no tooltip.
+fn tray_tooltip(key: isize, index: usize) -> Option<(String, RECT)> {
+    let client = bar_client(key);
+    let icons = lock_or_recover(tray_icons());
+    let cell = tray_layout(client).cell_rect(index, icons.len())?;
+    let tooltip = icons.get(index)?.tooltip.clone();
+    drop(icons);
+    if tooltip.is_empty() {
+        return None;
+    }
+
+    let mut wr = RECT::default();
+    // SAFETY: `key` is one of our live bar windows; converting client → screen.
+    unsafe {
+        let _ = GetWindowRect(hwnd_from(key), &mut wr);
+    }
+    Some((
+        tooltip,
+        RECT {
+            left: cell.left + wr.left,
+            top: cell.top + wr.top,
+            right: cell.right + wr.left,
+            bottom: cell.bottom + wr.top,
+        },
+    ))
+}
+
+/// Client rect of the bar with handle `key`.
+fn bar_client(key: isize) -> RECT {
+    let mut client = RECT::default();
+    // SAFETY: `key` identifies one of our own bar windows; a stale handle just
+    // leaves `client` zeroed.
+    unsafe {
+        let _ = GetClientRect(hwnd_from(key), &mut client);
+    }
+    client
 }
 
 /// Quick-launch pins (user-curated), refreshed alongside the task list. Each
@@ -1073,15 +1142,23 @@ pub fn refresh() {
 
     // Notification icons first: their reserved strip width feeds the task
     // layout *and* the `when_full` overflow decision. Hidden entirely when the
-    // user turned the tray off (`taskbar.tray = false`).
+    // user turned the tray off (`taskbar.tray = false`). `tray::items()` is
+    // cheap — the cross-process mirror read happens on the heartbeat instead.
     let show_tray = crate::config::current().show_tray;
     let icons = if show_tray {
-        crate::tray::enumerate()
+        crate::tray::items()
     } else {
         Vec::new()
     };
     let tray_w =
         crate::tray_bar::strip_width(icons.len(), crate::tray_bar::CELL, crate::tray_bar::GAP);
+    // Tells the log reader which shape the strip is in: all-forwardable means we
+    // own the tray, none means the inert mirrored one (0.1.3 plan §2.1).
+    tracing::debug!(
+        total = icons.len(),
+        forwardable = icons.iter().filter(|i| i.is_forwardable()).count(),
+        "notification strip refreshed"
+    );
     *lock_or_recover(tray_icons()) = icons;
 
     let ref_avail = reference_task_avail(tray_w);
@@ -1322,33 +1399,43 @@ unsafe extern "system" fn wndproc_inner(
             track_leave(hwnd);
             let x = get_x(lparam);
             let y = get_y(lparam);
-            let (changed, hover, density) = {
+            let client = bar_client(key);
+            // Hover over a notification icon only ever shows *our* tooltip: the
+            // event is never forwarded (0.1.3 plan §2.2 rule 3).
+            let tray_hover = tray_index_at(client, x, y);
+            let (changed, hover, density, tray_changed) = {
                 let mut bars = lock_or_recover(bars());
                 match bars.iter_mut().find(|b| b.hwnd == key) {
                     Some(bar) => {
                         let hover = bar
                             .rects
                             .iter()
-                            .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
+                            .position(|r| crate::win_util::rect_contains(*r, x, y));
                         let pin_hover = crate::quick_launch::hit(&bar.pin_rects, x, y);
                         let changed = hover != bar.hover || pin_hover != bar.pin_hover;
                         bar.hover = hover;
                         bar.pin_hover = pin_hover;
-                        (changed, hover, bar.density)
+                        let tray_changed = tray_hover != bar.tray_hover;
+                        bar.tray_hover = tray_hover;
+                        (changed, hover, bar.density, tray_changed)
                     }
-                    None => (false, None, Density::Full),
+                    None => (false, None, Density::Full, false),
                 }
             };
             if changed {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            }
+            if changed || tray_changed {
                 // Re-arm the debounced hover timer for the new target. An
                 // icon-only square shows a title tip; the labelled tiers keep
-                // the (opt-in) thumbnail preview.
+                // the (opt-in) thumbnail preview; a strip cell shows the icon's
+                // own tooltip.
                 let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
                 crate::hover_preview::hide();
                 crate::bar_tip::hide();
-                let want =
-                    hover.is_some() && (density.is_icon_only() || crate::hover_preview::enabled());
+                let want = tray_hover.is_some()
+                    || (hover.is_some()
+                        && (density.is_icon_only() || crate::hover_preview::enabled()));
                 if want {
                     let _ = unsafe { SetTimer(Some(hwnd), HOVER_TIMER_ID, HOVER_DELAY_MS, None) };
                 }
@@ -1361,6 +1448,16 @@ unsafe extern "system" fn wndproc_inner(
                 .iter()
                 .find(|b| b.hwnd == key)
                 .and_then(|b| b.hover.map(|i| (i, b.density)));
+            let tray_hover = lock_or_recover(bars())
+                .iter()
+                .find(|b| b.hwnd == key)
+                .and_then(|b| b.tray_hover);
+            // A notification icon's own tooltip wins: its cell sits left of the
+            // clock, so it can never overlap a task button.
+            if let Some((text, anchor)) = tray_hover.and_then(|i| tray_tooltip(key, i)) {
+                crate::bar_tip::show(&text, anchor);
+                return LRESULT(0);
+            }
             if let Some((i, density)) = state {
                 let btn = lock_or_recover(bars())
                     .iter()
@@ -1407,9 +1504,12 @@ unsafe extern "system" fn wndproc_inner(
                 let mut bars = lock_or_recover(bars());
                 match bars.iter_mut().find(|b| b.hwnd == key) {
                     Some(b) => {
-                        // Take both so a reset clears every hover indicator.
+                        // Take all of them so a reset clears every hover
+                        // indicator (the strip cell needs no repaint, only the
+                        // timer state cleared).
                         let task = b.hover.take().is_some();
                         let pin = b.pin_hover.take().is_some();
+                        b.tray_hover = None;
                         task || pin
                     }
                     None => false,
@@ -1426,6 +1526,13 @@ unsafe extern "system" fn wndproc_inner(
             crate::bar_tip::hide();
             let x = get_x(lparam);
             let y = get_y(lparam);
+            // Notification strip: hand the click to the app that registered the
+            // icon, exactly as the stock tray would (0.1.3 plan §2.2). Inert in
+            // the mirrored shape — `forward` logs and does nothing.
+            if let Some(item) = tray_item_at(bar_client(key), x, y) {
+                crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::LeftDown);
+                return LRESULT(0);
+            }
             // Settings button (leftmost) opens the settings window.
             if x < PAD + SETTINGS_W {
                 crate::settings_ui::toggle();
@@ -1450,12 +1557,7 @@ unsafe extern "system" fn wndproc_inner(
                 }
             };
             // Overflow button: popup over the tasks that did not fit.
-            if let Some(r) = overflow
-                && x >= r.left
-                && x < r.right
-                && y >= r.top
-                && y < r.bottom
-            {
+            if overflow.is_some_and(|r| crate::win_util::rect_contains(r, x, y)) {
                 let entries: Vec<crate::task_list::Entry> = lock_or_recover(tasks())
                     .iter()
                     .skip(hidden_from)
@@ -1513,8 +1615,24 @@ unsafe extern "system" fn wndproc_inner(
         WM_LBUTTONDBLCLK => {
             let mut client = RECT::default();
             let _ = unsafe { GetClientRect(hwnd, &mut client) };
-            if clock_hit(client.right, get_x(lparam)) {
+            let x = get_x(lparam);
+            // Notification strip first: a double-click on a tray icon is the
+            // "default action" gesture (open the app's window).
+            if let Some(item) = tray_item_at(client, x, get_y(lparam)) {
+                crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::LeftDoubleClick);
+                return LRESULT(0);
+            }
+            if clock_hit(client.right, x) {
                 open_date_time_settings();
+            }
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            // Half of the right-click pair a hosted icon may need (some apps
+            // finalise on release); the mirrored shape ignores it.
+            let client = bar_client(key);
+            if let Some(item) = tray_item_at(client, get_x(lparam), get_y(lparam)) {
+                crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::RightUp);
             }
             LRESULT(0)
         }
@@ -1524,6 +1642,13 @@ unsafe extern "system" fn wndproc_inner(
             crate::bar_tip::hide();
             let x = get_x(lparam);
             let y = get_y(lparam);
+            // Notification strip: most tray icons open their own context menu on
+            // right-button-down, so the event goes to the owner rather than
+            // opening one of ours.
+            if let Some(item) = tray_item_at(bar_client(key), x, y) {
+                crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::RightDown);
+                return LRESULT(0);
+            }
             // Hit-test against the live geometry rather than the (possibly
             // stale) hover index, so a right-click lands on what is under it.
             let (pin_rects, rects) = {
@@ -1540,7 +1665,7 @@ unsafe extern "system" fn wndproc_inner(
             }
             let task_hit = rects
                 .iter()
-                .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
+                .position(|r| crate::win_util::rect_contains(*r, x, y));
             // Clone the hit item's fields out of the lock before any cross-process
             // work: `window_menu`/`group_menu` must never run holding a lock.
             let target = task_hit.and_then(|i| {
@@ -1560,7 +1685,9 @@ unsafe extern "system" fn wndproc_inner(
         }
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
             // Summon: focus the primary bar and start the keyboard cursor at 0.
-            let _ = unsafe { SetForegroundWindow(hwnd) };
+            // `force_foreground` (not a bare `SetForegroundWindow`) because a
+            // top-most tool window is routinely refused the foreground.
+            let _ = unsafe { crate::win_util::force_foreground(hwnd) };
             let _ = unsafe { SetFocus(Some(hwnd)) };
             let changed = {
                 let has_tasks = !lock_or_recover(tasks()).is_empty();
@@ -1982,8 +2109,8 @@ unsafe fn paint(hwnd: HWND) {
         // Notification-icon strip, sitting just left of the clock.
         let icons = lock_or_recover(tray_icons());
         if !icons.is_empty() {
-            let tray_right = client.right - PAD - CLOCK_W - PAD;
-            crate::tray_bar::paint(hdc, BTN_TOP, tray_right, BAR_H - 2 * BTN_TOP, &icons);
+            let layout = tray_layout(client);
+            crate::tray_bar::paint(hdc, &layout, &icons);
         }
         drop(icons);
 
@@ -2168,60 +2295,59 @@ fn window_menu(owner: HWND, target: HWND, title: &str) {
     let pin_disabled = exe.is_none() || (!pinned && crate::quick_launch::is_full());
     tracing::debug!(exe = ?exe, pinned, pin_disabled, "window menu: pin entry state");
 
-    // SAFETY: the menu is created and destroyed within this call; `owner` and
-    // `target` are live windows owned by this process.
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        let restore = wide("还原");
-        let minimize = wide("最小化");
-        let maximize = wide("最大化");
-        let close = wide("关闭");
-        let _ = AppendMenuW(menu, MF_STRING, MENU_RESTORE, PCWSTR(restore.as_ptr()));
-        let _ = AppendMenuW(menu, MF_STRING, MENU_MINIMIZE, PCWSTR(minimize.as_ptr()));
-        let _ = AppendMenuW(menu, MF_STRING, MENU_MAXIMIZE, PCWSTR(maximize.as_ptr()));
-        let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE, PCWSTR(close.as_ptr()));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let pin_text = wide(if pinned {
-            "从快速启动移除"
-        } else {
-            "添加到快速启动"
-        });
-        let pin_flags = if pin_disabled {
-            MF_STRING | MF_GRAYED
-        } else {
-            MF_STRING
-        };
-        let _ = AppendMenuW(menu, pin_flags, MENU_PIN, PCWSTR(pin_text.as_ptr()));
-
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        // Required so the popup dismisses correctly when clicking away.
-        let _ = SetForegroundWindow(owner);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
-            pt.x,
-            pt.y,
-            Some(0),
+    // SAFETY: `owner` and `target` are live windows owned by this process; the
+    // menu's whole lifetime lives inside `popup_menu`.
+    let picked = unsafe {
+        let (x, y) = crate::win_util::cursor_pos_or(None);
+        crate::win_util::popup_menu(
             owner,
-            None,
-        );
-        let _ = DestroyMenu(menu);
+            &[
+                crate::win_util::MenuRow::command(MENU_RESTORE, "还原"),
+                crate::win_util::MenuRow::command(MENU_MINIMIZE, "最小化"),
+                crate::win_util::MenuRow::command(MENU_MAXIMIZE, "最大化"),
+                crate::win_util::MenuRow::command(MENU_CLOSE, "关闭"),
+                crate::win_util::MenuRow::Separator,
+                if pin_disabled {
+                    crate::win_util::MenuRow::disabled(
+                        MENU_PIN,
+                        if pinned {
+                            "从快速启动移除"
+                        } else {
+                            "添加到快速启动"
+                        },
+                    )
+                } else {
+                    crate::win_util::MenuRow::command(
+                        MENU_PIN,
+                        if pinned {
+                            "从快速启动移除"
+                        } else {
+                            "添加到快速启动"
+                        },
+                    )
+                },
+            ],
+            x,
+            y,
+        )
+    };
 
-        match (cmd.0 & 0xFFFF) as usize {
-            MENU_RESTORE => {
+    // SAFETY: `target` is a live window owned by this process.
+    unsafe {
+        match picked {
+            Some(MENU_RESTORE) => {
                 let _ = ShowWindow(target, SW_RESTORE);
             }
-            MENU_MINIMIZE => {
+            Some(MENU_MINIMIZE) => {
                 let _ = ShowWindow(target, SW_MINIMIZE);
             }
-            MENU_MAXIMIZE => {
+            Some(MENU_MAXIMIZE) => {
                 let _ = ShowWindow(target, SW_MAXIMIZE);
             }
-            MENU_CLOSE => {
+            Some(MENU_CLOSE) => {
                 let _ = PostMessageW(Some(target), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
-            MENU_PIN => {
+            Some(MENU_PIN) => {
                 if let Some(path) = exe {
                     let changed = if pinned {
                         crate::quick_launch::remove(&path)
@@ -2250,68 +2376,32 @@ fn group_menu(owner: HWND, anchor: HWND, label: &str, members: &[isize]) {
     let pinned = exe.as_deref().is_some_and(crate::quick_launch::is_pinned);
     let pin_disabled = exe.is_none() || (!pinned && crate::quick_launch::is_full());
 
-    // SAFETY: the menu is created and destroyed within this call; `owner` is a
-    // live bar window owned by this process.
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        let open_all = wide("打开组内全部窗口");
-        let restore_all = wide("全部还原");
-        let minimize_all = wide("全部最小化");
-        let close_all = wide("全部关闭");
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            MENU_GROUP_OPEN_ALL,
-            PCWSTR(open_all.as_ptr()),
-        );
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            MENU_GROUP_RESTORE_ALL,
-            PCWSTR(restore_all.as_ptr()),
-        );
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            MENU_GROUP_MINIMIZE_ALL,
-            PCWSTR(minimize_all.as_ptr()),
-        );
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            MENU_GROUP_CLOSE_ALL,
-            PCWSTR(close_all.as_ptr()),
-        );
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let pin_text = wide("添加到快速启动");
-        let pin_flags = if pin_disabled {
-            MF_STRING | MF_GRAYED
-        } else {
-            MF_STRING
-        };
-        let _ = AppendMenuW(
-            menu,
-            pin_flags,
-            MENU_GROUP_PIN_ALL,
-            PCWSTR(pin_text.as_ptr()),
-        );
-
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        // Required so the popup dismisses correctly when clicking away.
-        let _ = SetForegroundWindow(owner);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
-            pt.x,
-            pt.y,
-            Some(0),
+    // SAFETY: `owner` is a live bar window owned by this process; the menu's
+    // whole lifetime lives inside `popup_menu`.
+    let picked = unsafe {
+        let (x, y) = crate::win_util::cursor_pos_or(None);
+        crate::win_util::popup_menu(
             owner,
-            None,
-        );
-        let _ = DestroyMenu(menu);
+            &[
+                crate::win_util::MenuRow::command(MENU_GROUP_OPEN_ALL, "打开组内全部窗口"),
+                crate::win_util::MenuRow::command(MENU_GROUP_RESTORE_ALL, "全部还原"),
+                crate::win_util::MenuRow::command(MENU_GROUP_MINIMIZE_ALL, "全部最小化"),
+                crate::win_util::MenuRow::command(MENU_GROUP_CLOSE_ALL, "全部关闭"),
+                crate::win_util::MenuRow::Separator,
+                if pin_disabled {
+                    crate::win_util::MenuRow::disabled(MENU_GROUP_PIN_ALL, "添加到快速启动")
+                } else {
+                    crate::win_util::MenuRow::command(MENU_GROUP_PIN_ALL, "添加到快速启动")
+                },
+            ],
+            x,
+            y,
+        )
+    };
 
-        let Some(action) = group_menu_action((cmd.0 & 0xFFFF) as usize) else {
+    // SAFETY: every member handle was validated with `IsWindow` before use.
+    unsafe {
+        let Some(action) = picked.and_then(group_menu_action) else {
             return;
         };
         tracing::info!(?action, members = members.len(), "group menu action");
@@ -2376,36 +2466,26 @@ fn pin_menu(owner: HWND, index: usize) {
         .map(|p| (p.label.clone(), p.path.clone()));
     let Some((label, path)) = pin else { return };
 
-    // SAFETY: the menu is created and destroyed within this call; `owner` is a
-    // live bar window owned by this process.
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        let open = wide(&format!("打开 {label}"));
-        let unpin = wide("从快速启动移除");
-        let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN_PIN, PCWSTR(open.as_ptr()));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, MENU_UNPIN, PCWSTR(unpin.as_ptr()));
-
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        // Required so the popup dismisses correctly when clicking away.
-        let _ = SetForegroundWindow(owner);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
-            pt.x,
-            pt.y,
-            Some(0),
+    // SAFETY: `owner` is a live bar window owned by this process; the menu's
+    // whole lifetime lives inside `popup_menu`.
+    let picked = unsafe {
+        let (x, y) = crate::win_util::cursor_pos_or(None);
+        crate::win_util::popup_menu(
             owner,
-            None,
-        );
-        let _ = DestroyMenu(menu);
+            &[
+                crate::win_util::MenuRow::command(MENU_OPEN_PIN, format!("打开 {label}")),
+                crate::win_util::MenuRow::Separator,
+                crate::win_util::MenuRow::command(MENU_UNPIN, "从快速启动移除"),
+            ],
+            x,
+            y,
+        )
+    };
 
-        match (cmd.0 & 0xFFFF) as usize {
-            MENU_OPEN_PIN => crate::quick_launch::launch_path(&path),
-            MENU_UNPIN if crate::quick_launch::remove(&path) => refresh(),
-            _ => {}
-        }
+    match picked {
+        Some(MENU_OPEN_PIN) => crate::quick_launch::launch_path(&path),
+        Some(MENU_UNPIN) if crate::quick_launch::remove(&path) => refresh(),
+        _ => {}
     }
 }
 
@@ -2777,6 +2857,48 @@ mod tests {
         let client_w = 1600;
         let tray_last = client_w - super::PAD - super::CLOCK_W - super::PAD;
         assert!(!super::clock_hit(client_w, tray_last));
+    }
+
+    #[test]
+    fn tray_layout_is_derived_from_the_client_rect_only() {
+        // The painter and every mouse handler call `tray_layout` with the same
+        // client rect, so its geometry — and therefore the hit test — must be a
+        // pure function of that rect. This pins the numbers both sides use.
+        let client = windows::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: 1600,
+            bottom: super::BAR_H,
+        };
+        let layout = super::tray_layout(client);
+        assert_eq!(
+            layout.right_x,
+            client.right - super::PAD - super::CLOCK_W - super::PAD
+        );
+        assert_eq!(
+            layout.strip_width(3),
+            crate::tray_bar::strip_width(3, crate::tray_bar::CELL, crate::tray_bar::GAP)
+        );
+        // A cell that exists is inside the bar's vertical band.
+        let cell = layout.cell_rect(0, 3).expect("one cell");
+        assert!(cell.top >= 0 && cell.bottom <= client.bottom);
+    }
+
+    #[test]
+    fn an_empty_strip_reserves_no_space() {
+        // `refresh` derives the reserved width from the icon count; nothing must
+        // be reserved (and no cell hit) when the strip is empty.
+        let layout = super::tray_layout(windows::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: 1600,
+            bottom: super::BAR_H,
+        });
+        assert_eq!(
+            crate::tray_bar::strip_width(0, crate::tray_bar::CELL, crate::tray_bar::GAP),
+            0
+        );
+        assert_eq!(layout.hit_test(0, layout.right_x - 1, 18), None);
     }
 
     // --- density / fold pure helpers ---------------------------------------

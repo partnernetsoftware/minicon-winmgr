@@ -106,11 +106,21 @@ unsafe extern "system" fn callback_inner(
         return;
     }
     // Ignore our own shell windows (belt and braces with SKIPOWNPROCESS).
+    tracing::trace!(event, ?hwnd, "window event; arming taskbar refresh");
+    request_refresh();
+}
+
+/// Arms (or re-arms) the debounced taskbar refresh.
+///
+/// Exposed for modules that change what the bar shows from outside the window
+/// event hook — e.g. a notification icon registering with our tray host — so
+/// they do not each need their own timer (or a direct call into `taskbar`,
+/// which is a dependency we are trying to remove).
+pub fn request_refresh() {
     let raw = SHELL_HWND.load(Ordering::SeqCst);
     if raw == 0 {
         return;
     }
-    tracing::trace!(event, ?hwnd, "window event; arming taskbar refresh");
     let shell = HWND(raw as *mut core::ffi::c_void);
     // SAFETY: `shell` is our live message window; re-arming the same timer id
     // resets it, coalescing bursts.

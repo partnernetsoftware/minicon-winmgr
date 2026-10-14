@@ -152,13 +152,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "monitor work area"
             );
         }
-        let tray = crate::tray::enumerate();
+        // Sample the notification area once up front so the first paint has
+        // icons; after this the heartbeat re-samples (never the repaint path).
+        crate::tray::sample_mirror();
+        let tray = crate::tray::items();
         tracing::info!(count = tray.len(), "notification area mirrored");
         for icon in &tray {
             tracing::debug!(pid = icon.pid, tooltip = %icon.tooltip, "tray icon");
         }
 
-        let hosted = crate::tray_host::icons();
+        let hosted = crate::tray_host::handles();
         if !hosted.is_empty() {
             tracing::info!(count = hosted.len(), "tray icons hosted");
         }
@@ -241,6 +244,9 @@ unsafe extern "system" fn wndproc_inner(
             } else {
                 tracing::debug!(timer_id = wparam.0, "heartbeat: message pump alive");
                 window_snapshot::log_snapshot();
+                // The mirror read is cross-process, so it rides the heartbeat
+                // rather than the repaint path (0.1.3 plan §2.3).
+                crate::tray::sample_mirror();
                 crate::taskbar::refresh();
                 crate::shell_swap::check_foreign_shell();
                 crate::metrics::log_sample();

@@ -1,6 +1,4 @@
-//! Notification-area HOST (replacement mode).
-//!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
+//! Notification-area **host protocol** (replacement mode only).
 //!
 //! Only meaningful when *we* are the shell: the host creates the `Shell_TrayWnd`
 //! window so that `Shell_NotifyIcon` from other apps delivers their icons to us.
@@ -17,15 +15,10 @@
 //!   0 cbSize, 8 hWnd, 16 uID, 20 uFlags, 24 uCallbackMessage, 32 hIcon,
 //!   40 szTip[128] (256 bytes).
 //!
-//! Click forwarding: for each registered icon we remember the owner triple
-//! `(hWnd, uCallbackMessage, uID)`. When a click lands on one of our strip
-//! cells we post the matching mouse message back to `hWnd` with
-//! `wParam = uID` and `lParam = <mouse message>` (the documented notify-icon
-//! callback shape), so the owning app reacts as if the real tray was clicked.
-//! The coordinate → icon and icon+event → message mappings are pure functions
-//! (see [`StripLayout::hit_test`] and [`forward_target`]) so they stay testable
-//! without touching a live window; the only effectful step is the guarded
-//! `PostMessageW` in [`forward_at`].
+//! This module answers exactly one question — *which icons exist* — and hands
+//! them to [`crate::tray`] as [`TrayIconHandle`]s. Geometry, painting and click
+//! forwarding live in `tray_bar`; keeping them out of here is what stopped the
+//! same cell arithmetic existing in three places (0.1.3 plan §2.4).
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -33,12 +26,12 @@ use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, HWND_BROADCAST, IsWindow, PostMessageW, RegisterClassW,
+    CreateWindowExW, DefWindowProcW, HWND_BROADCAST, PostMessageW, RegisterClassW,
     RegisterWindowMessageW, WM_COPYDATA, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
-use crate::win_util::{guard_abi, lock_or_recover, wide};
+use crate::win_util::{ERROR_CLASS_ALREADY_EXISTS, guard_abi, lock_or_recover, wide};
 
 // `Shell_NotifyIcon` message codes carried in `SHELLTRAYDATA.dwMessage`.
 const NIM_ADD: u32 = 0;
@@ -48,43 +41,11 @@ const NIM_DELETE: u32 = 2;
 // `WM_COPYDATA.dwData` marker used by the notification-area protocol.
 const SHELLTRAYDATA_MARKER: usize = 1;
 
-// ERROR_CLASS_ALREADY_EXISTS.
-const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
-
 // Number of UTF-16 units in `NOTIFYICONDATAW::szTip`.
 const TIP_CHARS: usize = 128;
 
-// Mouse messages posted back in the notify-icon callback's `lParam`. Defined
-// locally so we never need a new `windows` feature for them.
-//
-// `allow(dead_code)`: the whole click-forwarding surface below is the wiring
-// API the taskbar calls once it routes strip clicks here; until then it has no
-// in-crate caller.
-#[allow(dead_code)]
-const WM_MOUSEMOVE: u32 = 0x0200;
-#[allow(dead_code)]
-const WM_LBUTTONDOWN: u32 = 0x0201;
-#[allow(dead_code)]
-const WM_LBUTTONDBLCLK: u32 = 0x0203;
-#[allow(dead_code)]
-const WM_RBUTTONDOWN: u32 = 0x0204;
-#[allow(dead_code)]
-const WM_RBUTTONUP: u32 = 0x0205;
-#[allow(dead_code)]
-const WM_RBUTTONDBLCLK: u32 = 0x0206;
-
-// Cell geometry defaults for [`StripLayout`], matching `tray_bar`.
-//
-// `allow(dead_code)`: `StripLayout::new` is the entry point the taskbar will
-// call once the strip is painted from the *hosted* icons; until that display
-// wiring lands nothing in the crate builds a layout, so the defaults read as
-// unused. See `docs/prd_1_1.md` (tray click forwarding).
-#[allow(dead_code)]
-const HIT_CELL: i32 = 18;
-#[allow(dead_code)]
-const HIT_GAP: i32 = 2;
-
-/// One hosted tray icon.
+/// One hosted tray icon: everything a click needs to be forwarded back.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayIconHandle {
     /// Icon uid as registered by the owning app (NOTIFYICONDATA.uID).
     pub uid: u32,
@@ -94,7 +55,7 @@ pub struct TrayIconHandle {
     pub callback_msg: u32,
     /// Tooltip text (may be empty).
     pub tooltip: String,
-    /// Icon handle (as isize).
+    /// Icon handle (as isize). Owned by the **registering process**.
     pub hicon: isize,
 }
 
@@ -118,7 +79,17 @@ fn icons_store() -> &'static Mutex<Vec<TrayIconHandle>> {
 /// HWND of the sink window we created, or 0 when the host is not installed.
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
-/// Installs the tray host when `MINICON_TRAY_HOST=1`; otherwise a no-op.
+/// Whether we are currently hosting the notification area.
+///
+/// This is what decides the strip's whole behaviour: hosting means real icons
+/// and forwardable clicks; not hosting means the inert mirrored shape
+/// (0.1.3 plan §2.1).
+pub fn is_installed() -> bool {
+    TRAY_HWND.load(Ordering::SeqCst) != 0
+}
+
+/// Installs the tray host when we are the shell (or `MINICON_TRAY_HOST=1`);
+/// otherwise a no-op.
 ///
 /// When installed we create a hidden `Shell_TrayWnd` window (falling back to a
 /// private `TinyShellTraySink` class if the former cannot be created) so that
@@ -159,273 +130,8 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Current hosted icons (empty when the host is not installed).
-pub fn icons() -> Vec<TrayIconHandle> {
-    let guard = lock_or_recover(icons_store());
-    guard
-        .iter()
-        .map(|i| TrayIconHandle {
-            uid: i.uid,
-            hwnd: i.hwnd,
-            callback_msg: i.callback_msg,
-            tooltip: i.tooltip.clone(),
-            hicon: i.hicon,
-        })
-        .collect()
-}
-
-/// One cell of a horizontal icon strip, in client/logical pixels.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CellRect {
-    pub left: i32,
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
-}
-
-impl CellRect {
-    /// Half-open containment: `right`/`bottom` edges are exclusive.
-    fn contains(&self, x: i32, y: i32) -> bool {
-        x >= self.left && x < self.right && y >= self.top && y < self.bottom
-    }
-}
-
-/// Geometry of the tray strip: `cell`-px squares, `gap` px apart, vertically
-/// centred in `top..top + height`, right-aligned so the last cell ends flush at
-/// `right_x` (index 0 is leftmost). Mirrors what the taskbar paints.
-///
-/// Pure value type — no Win32 state — so both the layout maths and the hit test
-/// can be unit-tested directly.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StripLayout {
-    pub top: i32,
-    pub right_x: i32,
-    pub height: i32,
-    pub cell: i32,
-    pub gap: i32,
-}
-
-impl StripLayout {
-    /// A layout using the standard square/gap sizes, matching the painted strip.
-    #[allow(dead_code)]
-    pub const fn new(top: i32, right_x: i32, height: i32) -> Self {
-        Self {
-            top,
-            right_x,
-            height,
-            cell: HIT_CELL,
-            gap: HIT_GAP,
-        }
-    }
-
-    /// Width the strip occupies for `count` icons (0 when empty or degenerate).
-    ///
-    /// Saturating against overflow: returns 0 instead of wrapping.
-    pub fn strip_width(&self, count: usize) -> i32 {
-        if count == 0 || self.cell <= 0 {
-            return 0;
-        }
-        let n = count as i64;
-        let cell = self.cell as i64;
-        let gap = self.gap.max(0) as i64;
-        to_i32(n * cell + (n - 1) * gap).unwrap_or(0)
-    }
-
-    /// Rectangle of the cell at `index`, or `None` for an out-of-range index or
-    /// a degenerate layout. Arithmetic is done in `i64` and range-checked so a
-    /// pathological strip can never overflow/panic.
-    pub fn cell_rect(&self, index: usize, count: usize) -> Option<CellRect> {
-        if count == 0 || self.cell <= 0 || index >= count {
-            return None;
-        }
-        let cell = self.cell as i64;
-        let gap = self.gap.max(0) as i64;
-        let width = self.strip_width(count) as i64;
-        let left = self.right_x as i64 - width + index as i64 * (cell + gap);
-        let top = self.top as i64 + (self.height as i64 - cell) / 2;
-        Some(CellRect {
-            left: to_i32(left)?,
-            top: to_i32(top)?,
-            right: to_i32(left + cell)?,
-            bottom: to_i32(top + cell)?,
-        })
-    }
-
-    /// Index of the cell containing `(x, y)`, or `None` when the point falls in
-    /// a gap, outside the strip, or the strip is empty.
-    ///
-    /// Pure: the coordinate → icon-index mapping, unit-testable on its own.
-    pub fn hit_test(&self, count: usize, x: i32, y: i32) -> Option<usize> {
-        (0..count).find(|&i| self.cell_rect(i, count).is_some_and(|r| r.contains(x, y)))
-    }
-}
-
-/// Narrows an `i64` to `i32`, or `None` when it would not fit.
-#[allow(dead_code)]
-fn to_i32(v: i64) -> Option<i32> {
-    i32::try_from(v).ok()
-}
-
-/// A mouse action to forward to a hosted icon's owner.
-///
-/// Right-button down and up are deliberately *separate* variants: many apps
-/// open their menu only on `WM_RBUTTONDOWN`, while others finalise on
-/// `WM_RBUTTONUP`, so collapsing them into one event would break those owners.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MouseEvent {
-    Move,
-    LeftDown,
-    LeftDoubleClick,
-    RightDown,
-    RightUp,
-    RightDoubleClick,
-}
-
-impl MouseEvent {
-    /// The `WM_*` mouse message the owner expects in the callback's `lParam`.
-    pub const fn lparam(self) -> u32 {
-        match self {
-            MouseEvent::Move => WM_MOUSEMOVE,
-            MouseEvent::LeftDown => WM_LBUTTONDOWN,
-            MouseEvent::LeftDoubleClick => WM_LBUTTONDBLCLK,
-            MouseEvent::RightDown => WM_RBUTTONDOWN,
-            MouseEvent::RightUp => WM_RBUTTONUP,
-            MouseEvent::RightDoubleClick => WM_RBUTTONDBLCLK,
-        }
-    }
-}
-
-/// The four-tuple posted back to the icon's owning window.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ForwardTarget {
-    pub hwnd: isize,
-    pub msg: u32,
-    pub wparam: usize,
-    pub lparam: isize,
-}
-
-/// Pure mapping: an icon + mouse event → the message to post
-/// (`None` when the icon lacks a usable `hWnd`/callback message, meaning the
-/// caller should skip it).
-#[allow(dead_code)]
-pub fn forward_target(icon: &TrayIconHandle, event: MouseEvent) -> Option<ForwardTarget> {
-    if icon.hwnd == 0 || icon.callback_msg == 0 {
-        return None;
-    }
-    Some(ForwardTarget {
-        hwnd: icon.hwnd,
-        msg: icon.callback_msg,
-        wparam: icon.uid as usize,
-        lparam: event.lparam() as isize,
-    })
-}
-
-/// Snapshot of an icon's forwarding triple, captured under the store lock so we
-/// never hold the lock across an `IsWindow`/`PostMessageW` call.
-#[allow(dead_code)]
-fn forward_snapshot() -> Vec<TrayIconHandle> {
-    let guard = lock_or_recover(icons_store());
-    guard
-        .iter()
-        .map(|i| TrayIconHandle {
-            uid: i.uid,
-            hwnd: i.hwnd,
-            callback_msg: i.callback_msg,
-            tooltip: String::new(),
-            hicon: 0,
-        })
-        .collect()
-}
-
-/// Posts `event` for `snapshot[index]`. `true` iff a message was delivered.
-/// Validates the owner window first; never panics.
-#[allow(dead_code)]
-fn forward_from(snapshot: &[TrayIconHandle], event: MouseEvent, index: usize) -> bool {
-    let Some(icon) = snapshot.get(index) else {
-        tracing::debug!(index, "tray click outside the hosted icon range; ignoring");
-        return false;
-    };
-    let Some(target) = forward_target(icon, event) else {
-        tracing::debug!(
-            uid = icon.uid,
-            "hosted icon has no hWnd/callback message; skipping forward"
-        );
-        return false;
-    };
-    post_target(target, event)
-}
-
-/// The effectful step: verify `target.hwnd` is a live window and post the
-/// callback. Any invalid handle or post failure is logged and skipped.
-#[allow(dead_code)]
-fn post_target(target: ForwardTarget, event: MouseEvent) -> bool {
-    // SAFETY: `HWND` is a plain handle wrapper; a stale handle is exactly what
-    // `IsWindow` is designed to reject.
-    let hwnd = HWND(target.hwnd as *mut core::ffi::c_void);
-    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-        tracing::debug!(
-            hwnd = target.hwnd,
-            "hosted icon owner window is gone; dropping forward"
-        );
-        return false;
-    }
-    // SAFETY: `hwnd` was just confirmed live; the message/wparams are plain
-    // values. `PostMessageW` is asynchronous and never blocks the message pump.
-    match unsafe {
-        PostMessageW(
-            Some(hwnd),
-            target.msg,
-            WPARAM(target.wparam),
-            LPARAM(target.lparam),
-        )
-    } {
-        Ok(()) => {
-            tracing::debug!(
-                hwnd = target.hwnd,
-                msg = target.msg,
-                uid = target.wparam,
-                lparam = target.lparam,
-                event = ?event,
-                "forwarded tray input to icon owner"
-            );
-            true
-        }
-        Err(err) => {
-            tracing::debug!(
-                hwnd = target.hwnd,
-                msg = target.msg,
-                error = %err,
-                "PostMessageW to icon owner failed; dropping forward"
-            );
-            false
-        }
-    }
-}
-
-/// Hit-tests `(x, y)` against `layout` and forwards the matching mouse event to
-/// the icon's owner. Returns `true` iff a message was posted.
-///
-/// Best-effort: the index is resolved against the registration order of hosted
-/// icons, so a strip that paints them in a different order (or with different
-/// geometry) may mis-target. Every miss is a logged no-op, never a panic.
-#[allow(dead_code)]
-pub fn forward_at(event: MouseEvent, layout: StripLayout, x: i32, y: i32) -> bool {
-    let snapshot = forward_snapshot();
-    match layout.hit_test(snapshot.len(), x, y) {
-        Some(index) => forward_from(&snapshot, event, index),
-        None => false,
-    }
-}
-
-/// Forwards `event` directly to the icon at `index` (callers that already did
-/// their own hit test). Returns `true` iff a message was posted.
-#[allow(dead_code)]
-pub fn forward_to(event: MouseEvent, index: usize) -> bool {
-    let snapshot = forward_snapshot();
-    forward_from(&snapshot, event, index)
+pub fn handles() -> Vec<TrayIconHandle> {
+    lock_or_recover(icons_store()).clone()
 }
 
 /// Whether we should host the tray:
@@ -572,42 +278,62 @@ fn read_tooltip(buf: &[u8], off: usize) -> String {
 }
 
 /// Applies one decoded notification to the icon table.
+///
+/// Any change re-arms the taskbar's debounced refresh, so an icon that appears
+/// (or disappears) shows up on the strip within the debounce window instead of
+/// waiting for the 30 s heartbeat.
 fn apply(parsed: ParsedIcon) {
-    let mut guard = lock_or_recover(icons_store());
-    match parsed.dw_message {
-        NIM_DELETE => {
-            let before = guard.len();
-            guard.retain(|i| !(i.uid == parsed.uid && i.hwnd == parsed.hwnd));
-            tracing::debug!(
-                removed = before - guard.len(),
-                uid = parsed.uid,
-                "NIM_DELETE"
-            );
-        }
-        NIM_ADD | NIM_MODIFY => {
-            let handle = TrayIconHandle {
-                uid: parsed.uid,
-                hwnd: parsed.hwnd,
-                callback_msg: parsed.callback_msg,
-                tooltip: parsed.tooltip,
-                hicon: parsed.hicon,
-            };
-            match guard
-                .iter_mut()
-                .find(|i| i.uid == handle.uid && i.hwnd == handle.hwnd)
-            {
-                Some(existing) => *existing = handle,
-                None => guard.push(handle),
+    let changed = {
+        let mut guard = lock_or_recover(icons_store());
+        match parsed.dw_message {
+            NIM_DELETE => {
+                let before = guard.len();
+                guard.retain(|i| !(i.uid == parsed.uid && i.hwnd == parsed.hwnd));
+                let removed = before - guard.len();
+                if removed > 0 {
+                    tracing::debug!(removed, uid = parsed.uid, "NIM_DELETE");
+                }
+                removed > 0
             }
-            tracing::debug!(
-                uid = parsed.uid,
-                total = guard.len(),
-                "tray icon registered"
-            );
+            NIM_ADD | NIM_MODIFY => {
+                let handle = TrayIconHandle {
+                    uid: parsed.uid,
+                    hwnd: parsed.hwnd,
+                    callback_msg: parsed.callback_msg,
+                    tooltip: parsed.tooltip,
+                    hicon: parsed.hicon,
+                };
+                let changed = match guard
+                    .iter_mut()
+                    .find(|i| i.uid == handle.uid && i.hwnd == handle.hwnd)
+                {
+                    Some(existing) => {
+                        let changed = *existing != handle;
+                        *existing = handle;
+                        changed
+                    }
+                    None => {
+                        guard.push(handle);
+                        true
+                    }
+                };
+                if changed {
+                    tracing::debug!(
+                        uid = parsed.uid,
+                        total = guard.len(),
+                        "tray icon registered"
+                    );
+                }
+                changed
+            }
+            other => {
+                tracing::debug!(other, "ignoring unknown NIM message");
+                false
+            }
         }
-        other => {
-            tracing::debug!(other, "ignoring unknown NIM message");
-        }
+    };
+    if changed {
+        crate::window_events::request_refresh();
     }
 }
 
@@ -743,170 +469,79 @@ mod tests {
     }
 
     #[test]
-    fn icons_are_empty_when_not_installed() {
-        // No install happened in this test process, so the table stays empty.
-        assert!(icons().is_empty());
-    }
-
-    // --- click-forwarding pure logic -------------------------------------
-
-    fn icon(uid: u32, hwnd: isize, cb: u32) -> TrayIconHandle {
-        TrayIconHandle {
-            uid,
-            hwnd,
-            callback_msg: cb,
-            tooltip: String::new(),
-            hicon: 0,
-        }
+    fn handles_are_empty_when_not_installed() {
+        // No install happened in this test process, so nothing is hosted. Only
+        // the icon *we* register below is asserted on: the store is
+        // process-global and tests run in parallel, so a global "is empty"
+        // assertion would be inherently racy.
+        assert!(!is_installed());
+        assert!(handles().iter().all(|h| h.uid != 3 || h.hwnd != 0x5555));
     }
 
     #[test]
-    fn mouse_event_maps_to_the_documented_lparam() {
-        assert_eq!(MouseEvent::Move.lparam(), WM_MOUSEMOVE);
-        assert_eq!(MouseEvent::LeftDown.lparam(), WM_LBUTTONDOWN);
-        assert_eq!(MouseEvent::LeftDoubleClick.lparam(), WM_LBUTTONDBLCLK);
-        assert_eq!(MouseEvent::RightDown.lparam(), WM_RBUTTONDOWN);
+    fn applying_an_add_then_a_delete_round_trips_one_icon() {
+        let mine = |hs: &[TrayIconHandle]| hs.iter().any(|h| h.uid == 3 && h.hwnd == 0x5555);
+
+        apply(parse_shell_tray_data(&blob(NIM_ADD, 0x5555, 3, 0x0400, 0xBB, "x")).unwrap());
+        let added = handles();
+        let entry = added
+            .iter()
+            .find(|h| h.uid == 3 && h.hwnd == 0x5555)
+            .expect("NIM_ADD must register the icon");
+        assert_eq!(entry.callback_msg, 0x0400);
+        assert_eq!(entry.tooltip, "x");
+        assert_eq!(entry.hicon, 0xBB);
+
+        // NIM_MODIFY with the same key replaces rather than duplicates.
+        apply(parse_shell_tray_data(&blob(NIM_MODIFY, 0x5555, 3, 0x0400, 0xBB, "y")).unwrap());
+        let modified = handles();
+        assert!(
+            modified
+                .iter()
+                .any(|h| h.uid == 3 && h.hwnd == 0x5555 && h.tooltip == "y"),
+            "NIM_MODIFY must update the tooltip in place"
+        );
+        assert_eq!(
+            modified
+                .iter()
+                .filter(|h| h.uid == 3 && h.hwnd == 0x5555)
+                .count(),
+            1,
+            "modify must not duplicate the icon"
+        );
+
+        apply(parse_shell_tray_data(&blob(NIM_DELETE, 0x5555, 3, 0, 0, "")).unwrap());
+        assert!(!mine(&handles()), "NIM_DELETE must remove the icon");
     }
 
     #[test]
-    fn forward_target_packs_the_triple() {
-        let ic = icon(7, 0x1234, 0x0400);
-        let t = forward_target(&ic, MouseEvent::LeftDown).expect("valid triple");
-        assert_eq!(t.hwnd, 0x1234);
-        assert_eq!(t.msg, 0x0400);
-        assert_eq!(t.wparam, 7);
-        assert_eq!(t.lparam, WM_LBUTTONDOWN as isize);
-
-        // Event only changes lParam, never the owner triple.
-        let dbl = forward_target(&ic, MouseEvent::LeftDoubleClick).unwrap();
-        assert_eq!(dbl.hwnd, t.hwnd);
-        assert_eq!(dbl.msg, t.msg);
-        assert_eq!(dbl.wparam, t.wparam);
-        assert_eq!(dbl.lparam, WM_LBUTTONDBLCLK as isize);
+    fn an_unknown_nim_message_changes_nothing() {
+        apply(parse_shell_tray_data(&blob(99, 0x7777, 5, 0x0400, 0, "z")).unwrap());
+        assert!(
+            !handles().iter().any(|h| h.uid == 5 && h.hwnd == 0x7777),
+            "an unknown dwMessage must be ignored"
+        );
     }
 
     #[test]
-    fn forward_target_skips_icons_without_owner_data() {
-        // Missing hWnd, missing callback message, or both => no forward.
-        assert!(forward_target(&icon(1, 0, 0x0400), MouseEvent::LeftDown).is_none());
-        assert!(forward_target(&icon(1, 0x99, 0), MouseEvent::RightDown).is_none());
-        assert!(forward_target(&icon(1, 0, 0), MouseEvent::Move).is_none());
-    }
+    fn modify_for_an_unseen_icon_registers_it() {
+        // Apps do call NIM_MODIFY for an icon we never saw an ADD for (e.g. they
+        // started before us). Treating it as an upsert is what keeps such icons
+        // in the strip at all.
+        let missing = |hs: &[TrayIconHandle]| !hs.iter().any(|h| h.uid == 77 && h.hwnd == 0x8888);
+        assert!(missing(&handles()), "precondition: not registered yet");
 
-    #[test]
-    fn strip_width_matches_the_painted_strip() {
-        let l = StripLayout::new(0, 100, 36);
-        assert_eq!(l.strip_width(0), 0);
-        assert_eq!(l.strip_width(1), HIT_CELL);
-        assert_eq!(l.strip_width(3), 3 * HIT_CELL + 2 * HIT_GAP);
-    }
+        apply(parse_shell_tray_data(&blob(NIM_MODIFY, 0x8888, 77, 0x0400, 0xCC, "late")).unwrap());
 
-    #[test]
-    fn hit_test_is_right_aligned_and_skips_gaps() {
-        // 3 cells of 18 + 2 gaps of 2 = 58 wide, ending flush at x=100.
-        let l = StripLayout::new(0, 100, 36);
-        // Cell centres: index 0 -> ~[42,60), 1 -> [62,80), 2 -> [82,100).
-        assert_eq!(l.hit_test(3, 50, 18), Some(0));
-        assert_eq!(l.hit_test(3, 70, 18), Some(1));
-        assert_eq!(l.hit_test(3, 90, 18), Some(2));
-        // A gap column (between 60 and 62) hits nothing.
-        assert_eq!(l.hit_test(3, 61, 18), None);
-        // Left of the strip.
-        assert_eq!(l.hit_test(3, 41, 18), None);
-        // Right edge is exclusive.
-        assert_eq!(l.hit_test(3, 100, 18), None);
-    }
+        let all = handles();
+        let entry = all
+            .iter()
+            .find(|h| h.uid == 77 && h.hwnd == 0x8888)
+            .expect("NIM_MODIFY for an unseen icon must add it");
+        assert_eq!(entry.tooltip, "late");
 
-    #[test]
-    fn hit_test_respects_the_vertical_band() {
-        let l = StripLayout::new(4, 100, 36);
-        // cell 18 centred in 36 -> rows [13, 31).
-        assert_eq!(l.hit_test(1, 90, 12), None);
-        assert_eq!(l.hit_test(1, 90, 13), Some(0));
-        assert_eq!(l.hit_test(1, 90, 30), Some(0));
-        assert_eq!(l.hit_test(1, 90, 31), None);
-    }
-
-    #[test]
-    fn hit_test_edge_cases_never_match() {
-        let l = StripLayout::new(0, 100, 36);
-        assert_eq!(l.hit_test(0, 50, 18), None); // empty strip
-        let degenerate = StripLayout {
-            cell: 0,
-            ..StripLayout::new(0, 100, 36)
-        };
-        assert_eq!(degenerate.hit_test(3, 50, 18), None); // zero cell
-    }
-
-    #[test]
-    fn cell_rect_rejects_out_of_range_and_handles_overflow() {
-        let l = StripLayout::new(0, 100, 36);
-        assert!(l.cell_rect(3, 3).is_none());
-        // A strip anchored at i32::MIN underflows the left edge for 2 cells;
-        // the i64 maths + range check must yield None, not a panic.
-        let under = StripLayout::new(0, i32::MIN, 36);
-        assert!(under.cell_rect(0, 2).is_none());
-    }
-
-    #[test]
-    fn forward_to_skips_invalid_owner_and_out_of_range() {
-        // No icons registered, and index 0 is out of range => false, no panic.
-        assert!(!forward_to(MouseEvent::LeftDown, 0));
-        // A layout hit can never turn into a post while the table is empty.
-        let l = StripLayout::new(0, 100, 36);
-        assert!(!forward_at(MouseEvent::LeftDown, l, 50, 18));
-    }
-
-    // --- right-click forwarding ------------------------------------------
-
-    #[test]
-    fn right_button_events_map_to_real_win32_message_values() {
-        // Pin the literal values: a transposed token here would silently send
-        // the wrong button and no owner menu would ever appear.
-        assert_eq!(MouseEvent::RightDown.lparam(), 0x0204);
-        assert_eq!(MouseEvent::RightUp.lparam(), 0x0205);
-        assert_eq!(MouseEvent::RightDoubleClick.lparam(), 0x0206);
-        // Down and up must stay distinct — apps opening on down and finishing
-        // on up need the two separate messages.
-        assert_ne!(MouseEvent::RightDown.lparam(), MouseEvent::RightUp.lparam());
-    }
-
-    #[test]
-    fn right_click_hit_test_resolves_the_cell_under_the_cursor() {
-        // Same right-aligned strip as the left-button tests: 3 cells flush at
-        // x=100, centres ~[50, 70, 90).
-        let l = StripLayout::new(0, 100, 36);
-        assert_eq!(l.hit_test(3, 50, 18), Some(0));
-        assert_eq!(l.hit_test(3, 70, 18), Some(1));
-        assert_eq!(l.hit_test(3, 90, 18), Some(2));
-    }
-
-    #[test]
-    fn right_click_forward_target_keeps_the_owner_triple() {
-        let icons = [
-            icon(11, 0x1000, 0x0400),
-            icon(22, 0x2000, 0x0400),
-            icon(33, 0x3000, 0x0400),
-        ];
-        let l = StripLayout::new(0, 100, 36);
-        let index = l
-            .hit_test(icons.len(), 70, 18)
-            .expect("right-click on cell 1");
-        assert_eq!(index, 1);
-        // Event only swaps lParam; the owner triple is untouched.
-        let t = forward_target(&icons[index], MouseEvent::RightUp).expect("valid owner");
-        assert_eq!(t.hwnd, 0x2000);
-        assert_eq!(t.msg, 0x0400);
-        assert_eq!(t.wparam, 22);
-        assert_eq!(t.lparam, WM_RBUTTONUP as isize);
-    }
-
-    #[test]
-    fn right_click_in_gap_or_off_strip_hits_nothing() {
-        let l = StripLayout::new(0, 100, 36);
-        assert_eq!(l.hit_test(3, 61, 18), None); // gap column between cells
-        assert_eq!(l.hit_test(3, 41, 18), None); // left of the strip
-        assert_eq!(l.hit_test(3, 100, 18), None); // right edge is exclusive
-        assert_eq!(l.hit_test(0, 50, 18), None); // empty strip
+        // Clean up so a rerun of this test starts from the same state.
+        apply(parse_shell_tray_data(&blob(NIM_DELETE, 0x8888, 77, 0, 0, "")).unwrap());
+        assert!(missing(&handles()));
     }
 }
