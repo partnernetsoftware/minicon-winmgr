@@ -378,7 +378,27 @@ fn handle_command(wparam: WPARAM) {
 }
 
 /// Window procedure for the launcher popup.
+///
+/// The body runs under [`crate::win_util::guard_abi`] so a panic cannot unwind
+/// across the FFI boundary; on panic it degrades to `DefWindowProcW`.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    crate::win_util::guard_abi(
+        "launcher_ui::wndproc",
+        || unsafe { wndproc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+/// Inner body of [`wndproc`]; every unhandled message falls back to
+/// `DefWindowProcW`.
+unsafe extern "system" fn wndproc_inner(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
             toggle();
@@ -420,7 +440,36 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 /// Subclass procedure for the search field: maps keys to launcher actions and
 /// delegates everything else to the original `EDIT` procedure.
+///
+/// The body runs under [`crate::win_util::guard_abi`]; on panic it degrades to
+/// the same default the body uses — the original `EDIT` procedure, or
+/// `DefWindowProcW` when there is none.
 unsafe extern "system" fn edit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // SAFETY: the guard only runs the body and, on a panic, takes the same
+    // default path the body takes for unhandled messages (`CallWindowProcW`
+    // down the original `EDIT` proc, or `DefWindowProcW` if there is none);
+    // all handles come straight from Win32.
+    crate::win_util::guard_abi(
+        "launcher_ui::edit_proc",
+        || unsafe { edit_proc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe {
+            let previous = ORIG_EDIT_PROC.load(Ordering::SeqCst);
+            if previous == 0 {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            let original: WNDPROC = std::mem::transmute::<isize, WNDPROC>(previous);
+            CallWindowProcW(original, hwnd, msg, wparam, lparam)
+        },
+    )
+}
+
+/// Inner body of [`edit_proc`].
+unsafe extern "system" fn edit_proc_inner(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,

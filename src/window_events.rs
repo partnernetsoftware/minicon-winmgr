@@ -82,6 +82,24 @@ unsafe extern "system" fn callback(
     _thread: u32,
     _time: u32,
 ) {
+    // SAFETY: the guard only runs the body; the callback returns unit, so a
+    // panicking event just drops that one notification.
+    crate::win_util::guard_abi(
+        "window_events::callback",
+        || unsafe { callback_inner(_hook, event, hwnd, id_object, id_child, _thread, _time) },
+        || (),
+    )
+}
+
+unsafe extern "system" fn callback_inner(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
     // Only top-level object events (id_object == OBJID_WINDOW == 0, no child)
     // matter for the task list.
     if id_object != 0 || id_child != 0 || hwnd.0.is_null() {

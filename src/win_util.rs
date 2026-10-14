@@ -30,6 +30,32 @@ pub fn lock_or_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Runs `body` with a panic guard, falling back to `fallback` if it panics.
+///
+/// Every callback registered with Win32 (`WNDPROC`, `WINEVENTPROC`,
+/// `ENUMWINDOWSPROC`, console handlers) is declared `unsafe extern "system"`.
+/// Unwinding out of such a callback is undefined behaviour and, with the
+/// standard `extern "system"` shim, aborts the process — i.e. the user's
+/// desktop disappears because one message hit a bad branch.
+///
+/// So the body of every FFI callback goes through here. A caught panic is
+/// reported at `error!` with the callback's name; it is never swallowed
+/// silently, because a panic still means a real bug that has to be found.
+///
+/// `what` names the callback (e.g. `"taskbar::wndproc"`).
+pub fn guard_abi<R>(what: &str, body: impl FnOnce() -> R, fallback: impl FnOnce() -> R) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::error!(
+                callback = what,
+                "panic crossed an FFI callback; using the fallback to keep the shell alive"
+            );
+            fallback()
+        }
+    }
+}
+
 /// Encodes `s` as a null-terminated UTF-16 buffer for Win32 `PCWSTR` arguments.
 ///
 /// The returned buffer must outlive any `PCWSTR` built from it.
@@ -188,5 +214,23 @@ mod tests {
     fn wide_appends_a_terminator() {
         assert_eq!(wide("hi"), vec![u16::from(b'h'), u16::from(b'i'), 0]);
         assert_eq!(wide(""), vec![0]);
+    }
+
+    #[test]
+    fn guard_abi_returns_the_body_value_when_it_does_not_panic() {
+        assert_eq!(guard_abi("test::ok", || 7, || 0), 7);
+    }
+
+    #[test]
+    fn guard_abi_swallows_a_panic_and_returns_the_fallback() {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let got = guard_abi(
+            "test::panic",
+            || -> i32 { panic!("boom, as if from a wndproc") },
+            || 0,
+        );
+        std::panic::set_hook(previous);
+        assert_eq!(got, 0, "a panicking callback must degrade, not unwind");
     }
 }

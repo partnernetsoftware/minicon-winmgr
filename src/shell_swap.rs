@@ -52,6 +52,16 @@ struct ShellHits {
 }
 
 unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: the guard only runs the body; enumeration continues on a panic,
+    // so one unreadable window is skipped rather than aborting the scan.
+    crate::win_util::guard_abi(
+        "shell_swap::collect",
+        || unsafe { collect_inner(hwnd, lparam) },
+        || BOOL(1),
+    )
+}
+
+unsafe extern "system" fn collect_inner(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // SAFETY: `lparam` is the `&mut ShellHits` we passed to `EnumWindows`; it
     // outlives the enumeration.
     let hits = unsafe { &mut *(lparam.0 as *mut ShellHits) };

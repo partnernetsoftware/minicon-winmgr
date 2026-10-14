@@ -14,7 +14,7 @@
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use crate::session;
-use crate::win_util::wide;
+use crate::win_util::{guard_abi, wide};
 use crate::window_snapshot;
 
 use windows::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -185,6 +185,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Window procedure for the shell message window.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    guard_abi(
+        "window::wndproc",
+        || unsafe { wndproc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+/// Inner implementation of [`wndproc`], wrapped by the abort-safety guard.
+unsafe extern "system" fn wndproc_inner(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_CLOSE => {
             tracing::info!("WM_CLOSE received; destroying window");
@@ -238,6 +254,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// Console control handler: forwards Ctrl+C / break / close to the message
 /// thread by posting `WM_CLOSE`, keeping all shutdown work on one thread.
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
+    // SAFETY: the guard only runs the body and degrades to the system default
+    // handler on a panic; the handle comes straight from our own storage.
+    guard_abi(
+        "window::console_ctrl_handler",
+        || unsafe { console_ctrl_handler_inner(ctrl_type) },
+        || BOOL(0),
+    )
+}
+
+/// Inner implementation of [`console_ctrl_handler`], wrapped by the guard.
+unsafe extern "system" fn console_ctrl_handler_inner(ctrl_type: u32) -> BOOL {
     let raw = SHELL_HWND.load(Ordering::SeqCst);
     if raw != 0 {
         tracing::info!(ctrl_type, "console control event; posting WM_CLOSE");

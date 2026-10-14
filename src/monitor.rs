@@ -43,6 +43,21 @@ unsafe extern "system" fn enum_proc(
     _clip: *mut RECT,
     lparam: LPARAM,
 ) -> BOOL {
+    // SAFETY: the guard only runs the body; enumeration continues on a panic,
+    // so one bad monitor is skipped rather than aborting the whole enumeration.
+    crate::win_util::guard_abi(
+        "monitor::enum_proc",
+        || unsafe { enum_proc_inner(monitor, _hdc, _clip, lparam) },
+        || BOOL(1),
+    )
+}
+
+unsafe extern "system" fn enum_proc_inner(
+    monitor: HMONITOR,
+    _hdc: HDC,
+    _clip: *mut RECT,
+    lparam: LPARAM,
+) -> BOOL {
     // SAFETY: `lparam` was set by `enumerate` to a valid `*mut Vec<MonitorInfo>`.
     let out = unsafe { &mut *(lparam.0 as *mut Vec<MonitorInfo>) };
     let mut info = MONITORINFO {

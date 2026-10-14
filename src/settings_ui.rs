@@ -39,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 use crate::config::{self, GroupBy, MergeStrategy};
-use crate::win_util::wide;
+use crate::win_util::{guard_abi, wide};
 
 // --- layout / identity ----------------------------------------------------
 const WIN_W: i32 = 460;
@@ -936,6 +936,22 @@ fn paint(hwnd: HWND) {
 
 /// Window procedure for the settings window.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    guard_abi(
+        "settings_ui::wndproc",
+        || unsafe { wndproc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+/// Inner implementation of [`wndproc`], wrapped by the abort-safety guard.
+unsafe extern "system" fn wndproc_inner(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_PAINT => {
             paint(hwnd);

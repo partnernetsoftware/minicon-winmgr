@@ -149,7 +149,27 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Window procedure for the hidden snap-hotkey window.
+///
+/// The body runs under [`crate::win_util::guard_abi`] so a panic cannot unwind
+/// across the FFI boundary; on panic it degrades to `DefWindowProcW`.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    crate::win_util::guard_abi(
+        "hotkeys::wndproc",
+        || unsafe { wndproc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+/// Inner body of [`wndproc`]; every unhandled message falls back to
+/// `DefWindowProcW`.
+unsafe extern "system" fn wndproc_inner(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_HOTKEY => {
             let action = match wparam.0 as i32 {

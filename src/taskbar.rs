@@ -56,7 +56,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::win_util::{lock_or_recover, wide};
+use crate::win_util::{guard_abi, lock_or_recover, wide};
 
 // --- layout tokens --------------------------------------------------------
 const BAR_H: i32 = 36;
@@ -1274,6 +1274,21 @@ fn layout(start_left: i32, client_w: i32, n: usize, tray_w: i32, prev: Density) 
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    guard_abi(
+        "taskbar::wndproc",
+        || unsafe { wndproc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+unsafe extern "system" fn wndproc_inner(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     let key = hwnd.0 as isize;
     match msg {
         WM_PAINT => {

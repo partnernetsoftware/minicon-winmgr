@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 use crate::launcher::Shortcut;
-use crate::win_util::{lock_or_recover, wide};
+use crate::win_util::{guard_abi, lock_or_recover, wide};
 
 // --- geometry / ids -------------------------------------------------------
 const ORB_W: i32 = 320;
@@ -1079,6 +1079,22 @@ fn focus_left_popup(new_focus: isize) -> bool {
 
 /// Window procedure for the start-menu popup.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    guard_abi(
+        "start_menu::wndproc",
+        || unsafe { wndproc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+/// Inner implementation of [`wndproc`], wrapped by the abort-safety guard.
+unsafe extern "system" fn wndproc_inner(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as u16;
@@ -1140,6 +1156,22 @@ unsafe extern "system" fn list_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    guard_abi(
+        "start_menu::list_proc",
+        || unsafe { list_proc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+/// Inner implementation of [`list_proc`], wrapped by the abort-safety guard.
+unsafe extern "system" fn list_proc_inner(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_KEYDOWN => {
             let key = wparam.0 as u16;
@@ -1175,6 +1207,22 @@ unsafe extern "system" fn list_proc(
 /// the popup's own `WM_KEYDOWN` never sees them — Enter/Esc/Down/Up have to be
 /// intercepted here, on the control that actually owns the keyboard focus.
 unsafe extern "system" fn search_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    guard_abi(
+        "start_menu::search_proc",
+        || unsafe { search_proc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+/// Inner implementation of [`search_proc`], wrapped by the abort-safety guard.
+unsafe extern "system" fn search_proc_inner(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,

@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::win_util::{lock_or_recover, wide};
+use crate::win_util::{guard_abi, lock_or_recover, wide};
 
 /// Default preview size, in logical pixels.
 pub const PREVIEW_W: i32 = 240;
@@ -374,6 +374,22 @@ fn paint(hwnd: HWND) {
 
 /// Window procedure for the preview popup.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    guard_abi(
+        "hover_preview::wndproc",
+        || unsafe { wndproc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+/// Un-guarded window procedure body; only reached through [`wndproc`].
+unsafe extern "system" fn wndproc_inner(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_PAINT => {
             paint(hwnd);

@@ -111,6 +111,16 @@ fn is_cloaked(hwnd: HWND) -> bool {
 }
 
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: the guard only runs the body; enumeration continues on a panic,
+    // so one bad window is skipped rather than truncating the snapshot.
+    crate::win_util::guard_abi(
+        "window_snapshot::enum_proc",
+        || unsafe { enum_proc_inner(hwnd, lparam) },
+        || BOOL(1),
+    )
+}
+
+unsafe extern "system" fn enum_proc_inner(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // SAFETY: `lparam` was set by `snapshot` to a valid `*mut Vec<WindowInfo>`.
     let out = unsafe { &mut *(lparam.0 as *mut Vec<WindowInfo>) };
     out.push(unsafe { read_window(hwnd) });

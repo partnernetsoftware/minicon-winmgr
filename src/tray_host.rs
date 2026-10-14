@@ -38,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::win_util::{lock_or_recover, wide};
+use crate::win_util::{guard_abi, lock_or_recover, wide};
 
 // `Shell_NotifyIcon` message codes carried in `SHELLTRAYDATA.dwMessage`.
 const NIM_ADD: u32 = 0;
@@ -613,6 +613,22 @@ fn apply(parsed: ParsedIcon) {
 
 /// Window procedure of the hidden tray sink.
 unsafe extern "system" fn tray_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // SAFETY: the guard only runs the body and degrades to the default handler
+    // on a panic; all handles come straight from Win32.
+    guard_abi(
+        "tray_host::tray_wndproc",
+        || unsafe { tray_wndproc_inner(hwnd, msg, wparam, lparam) },
+        || unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    )
+}
+
+/// Un-guarded window procedure body; only reached through [`tray_wndproc`].
+unsafe extern "system" fn tray_wndproc_inner(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
