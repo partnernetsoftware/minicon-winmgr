@@ -236,7 +236,7 @@
 | **居中原点 2 份逐字相同** | `launcher_ui.rs:206` ↔ `run_dialog.rs:239`（**逐字相同**）；`settings_ui.rs:236` 是另一种（垂直也居中） | 合成 `win_util::centered_origin(screen, win, quarter: bool)`，两种模式都走它 |
 | **锚点弹层定位 2 份** | `hover_preview.rs:83` ↔ `bar_tip.rs:68`（**连注释都同构**） | 合成 `win_util::anchored_card(anchor, work, w, h, gap)` |
 | **主题访问器 3 份** | `bar_tip.rs:132` / `settings_ui.rs:351` / `taskbar.rs:204` 各自 `OnceLock<Theme>` 包同一个 config 值 | 收敛为 `config::theme()` 单一访问器 |
-| **同义常量散落** | `ERROR_CLASS_ALREADY_EXISTS=1410` 三份（`bar_tip.rs:40`/`hover_preview.rs:54`/`tray_host.rs:52`）；同名多义 `GAP` = 4（`taskbar.rs:64`/`quick_launch.rs:21`/`start_menu.rs:47`）与 = 6（`bar_tip.rs:47`/`hover_preview.rs:46`）、= 8（`launcher_ui.rs:42`/`run_dialog.rs:39`） | 1410 收进 `win_util`；各组 `GAP` **改成语义名**（`BTN_GAP` / `TIP_GAP` / `ROW_GAP`），消除"同名多义" |
+| **同义常量散落** | `ERROR_CLASS_ALREADY_EXISTS=1410` 三份（`bar_tip.rs:40`/`hover_preview.rs:54`/`tray_host.rs:52`）；同名多义 `GAP` = 4（`taskbar.rs:64`/`quick_launch.rs:21`/`start_menu.rs:47`）与 = 6（`bar_tip.rs:47`/`hover_preview.rs:46`）、= 8（`launcher_ui.rs:42`/`run_dialog.rs:39`） | 1410 收进 `win_util` ✅；各组 `GAP` 改语义名 ✅ `0fd2da6`——**实际名比本表的示例更贴用法**：`BTN_GAP`（taskbar）/ `PIN_GAP`（quick_launch）/ `SECTION_GAP`（start_menu）/ `TIP_GAP`（bar_tip）/ `PREVIEW_GAP`（hover_preview）/ `LIST_GAP`（launcher_ui）/ `BTN_GAP`（run_dialog）；`tray_bar::GAP` 保留，成为全仓唯一 `GAP` |
 | **画刷 create/delete 手工配对 7 处** | `bar_tip.rs:277,280`、`hover_preview.rs:191,341`、`launcher_ui.rs:106`、`run_dialog.rs:88`、`start_menu.rs:484` | `win_util::Brush`（RAII `Drop` → `DeleteObject`）。**注意**：`taskbar.rs:571-577`、`settings_ui.rs:363-370,447` 是**长生命周期**画刷（存进结构体/`WNDCLASS`），**不要**套 RAII |
 | **裸 `SetForegroundWindow` 9 处** | `launcher_ui.rs:235`、`run_dialog.rs:267`、`start_menu.rs:809,953`、`taskbar.rs:1563,2199,2302,2392`、`task_list.rs:83` | 统一改调 `win_util::force_foreground`（分层策略，减少"点了没反应"） |
 
@@ -297,7 +297,8 @@
 > **进度（2026-10-14，W7 开工前）**：W1–W6 全部落地。`cargo test` 起点 224 → **231 passed**；
 > `cargo fmt --check` 通过；`cargo clippy --all-targets -- -D warnings` 干净。
 > 切片提交：`a771d60`（本计划 v2）、`927c118`（W2）、`0fddbf5`（W3）、`41033c5`（W4）、`021e533`（W5）、
-> `348a9c6` + `c1f9f5e`（W6）。**剩余：W7**——§6 的 V1–V11 验收 + 热切换目视 + 发版。
+> `348a9c6` + `c1f9f5e`（W6）、`0fd2da6`（P1-1 收尾：`GAP` 语义化改名，至此 §3 的 P1-1 表全部关闭）。
+> **剩余：W7**——§6 的 V1–V11 验收 + 热切换目视 + 发版。
 >
 > **规模实测**：`src/` **36 个文件 / 14,861 行**（起点 33 / 14,282）。三巨头 `taskbar.rs` **2,995**
 > （起点 2,873）、`start_menu.rs` 1,406、`settings_ui.rs` 1,321；新增叶子模块 `hub.rs` 81 + `model.rs` 18。
