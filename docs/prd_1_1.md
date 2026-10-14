@@ -20,17 +20,44 @@
 - ✅ 快速启动：`src/quick_launch.rs`，**用户手动钉住**的应用（右键窗口菜单加入），持久化在 exe 旁 `quick-launch.txt`（`label<TAB>path`，可 `MINICON_QUICKLAUNCH_FILE` 覆盖），上限 **8**（常量 `MAX_PINS`）。图标取自 exe；取不到则显示首字。左键启动、右键"打开/移除"。
 - ⛔ 列表按钮（≡）**已于 2026-10-14 退役**（业主指示，任务区左侧不再有该按钮）。`src/task_list.rs` 模块保留——`»` 溢出按钮与分组按钮仍用它弹窗，弹出分组窗口菜单、选中即切换。
 - ✅ 设置入口：最左"滑杆"按钮 → `src/settings_ui.rs`。
-- ✅ 右侧只读区：**仅时钟**（`yy-mm-dd HH:MM`，5s 定时器保证准点）+ 其左侧通知图标条（可经 `taskbar.tray` 关闭）。**双击时钟**打开系统日期/时间设置（`ShellExecuteW` → `control.exe timedate.cpl`，与系统托盘时钟双击一致）；交互细节与降级注记见 [`prd_4_1.md`](prd_4_1.md) §4。
+- ✅ 右侧只读区：**仅时钟**（`yy-mm-dd HH:MM`，5s 定时器保证准点）+ 其左侧**通知区域条**（可经 `taskbar.tray` 关闭；
+  两种运行形态下的图标与可点性见下节「通知区 / 托盘」）。**双击时钟**打开系统日期/时间设置（`ShellExecuteW` → `control.exe timedate.cpl`，与系统托盘时钟双击一致）；交互细节与降级注记见 [`prd_4_1.md`](prd_4_1.md) §4。
 - ✅ 多显示器：每屏一栏，任务列表共享，布局/hover/键盘光标按栏独立。
 - ✅ AppBar 停靠（`SHAppBarMessage`）；无 explorer 中转时**自管工作区**（见可靠性文档）。
 - ✅ 贴底：按**显示器物理边界** `rcMonitor` 锚定。
 - 🟡 主题来自 `config`（`minicon.conf` / `MINICON_CONFIG`）。
 
 ## 通知区 / 托盘
-- ✅ 镜像：`src/tray.rs`，companion 模式读现有 shell 的托盘（`Shell_TrayWnd→ToolbarWindow32`）；第三方外壳接管时读不到 → `count=0`。
-- ✅ 图标条：`src/tray_bar.rs`，任务栏右区绘制镜像图标（无图标则不占位）。
-- ✅ 宿主（替换模式）：`src/tray_host.rs`，`MINICON_TRAY_HOST=1` 或自身为 shell 时注册宿主，经 `WM_COPYDATA` → `NOTIFYICONDATAW`。
-- ⬜ 通知区图标**点击转发**（把点击回投给宿主程序）——`tray_host` 进阶。
+
+**通知区的行为由运行形态唯一决定**（0.1.3 定义，完整规格见 [`plan_0_1_3.md`](plan_0_1_3.md) §2.1–§2.3）：
+
+| | **替换模式**（本程序是 shell） | **伴随模式**（explorer 仍是 shell） |
+|---|---|---|
+| 判定 | 宿主已安装 = `MINICON_TRAY_HOST=1`，或 `shell_registry::is_self_shell()` 为真 | 其余（`MINICON_TRAY_HOST=0` 强制归此） |
+| 数据来源 | **宿主拥有**：别的进程 `Shell_NotifyIcon` → `WM_COPYDATA` → 我们（推送，**零跨进程读**） | **镜像**：读邻居的 `ToolbarWindow32`（拉取，跨进程） |
+| 图标 | **真图标**（`CopyImage(IMAGE_ICON)` 取本进程副本 → `DrawIconEx` → 用完 `DestroyIcon` **副本**，绝不销毁外来句柄） | **降级占位方块**（拿不到 hicon），对比度刻意低于真图标 |
+| 可点击 | ✅ 转发回图标所属进程 | ❌ **不转发**、不显示 tooltip、不改变光标 |
+| 未注册任何图标时 | 条宽 0（不占位） | 同 |
+
+- ✅ 数据源 `src/tray.rs`：`TrayItem{tooltip,pid,hicon,owner}` 是**唯一模型**，`items()` 是**唯一入口**（宿主优先 → 镜像兜底）。
+  可点性 = `owner.is_some()`——宿主路径注册时即拿到 `(hWnd, uID, uCallbackMessage)` 三元组，镜像路径拿不到
+  （`TBBUTTON.dwData` 不是进程 id），故镜像图标恒不可点。
+- ✅ 呈现与交互 `src/tray_bar.rs`：`Layout` 是**唯一几何**（`CELL=18`/`GAP=2`/条宽/命中，带 i64 溢出保护），
+  `paint()` 唯一绘制、`forward()` 唯一转发。
+- ✅ 宿主协议 `src/tray_host.rs`：只产数据（`TrayIconHandle{uid,hwnd,callback_msg,tooltip,hicon}`），
+  不管几何、不管绘制、不管命中。
+- ✅ **点击转发**（0.1.3 交付）：左键按下 / 左键双击 / 右键按下 / 右键抬起**各自单独**发一条
+  `PostMessageW(owner_hwnd, uCallbackMessage, uID, 事件值)`（与真托盘的 notify-icon 回调同形）。
+  右键 down/up **必须分开**——有的程序在 down 弹菜单、有的在 up 才收尾，合并会打断后者。
+- ✅ **hover 不转发**：鼠标移动不向宿主发 `WM_MOUSEMOVE`（会给别的进程刷消息，且"我们条上的坐标 ≠ 对方图标的坐标"
+  会造成误判），改为显示**我们自己的** tooltip 气泡（`src/bar_tip.rs`），文本取图标 `szTip`。
+- ✅ 绘制 / 命中 / 转发**共用同一次刷新产生的快照 + 同一份 `Layout`**——不会出现"画完之后表变了、点错图标"。
+- ✅ 失败不打扰：owner 窗口已销毁 / `PostMessageW` 失败 / 命中落空 → 记日志后静默忽略，**不弹框、不 panic**。
+- ✅ **性能硬约束**：镜像读取跨进程超时 **250 ms**（原 2000 ms 跑在消息线程上，宿主卡死时一次刷新可卡住数秒），
+  且**移出 `refresh()`**——改由**心跳（默认 30 s）+ 启动时**各采样一次并缓存，`refresh()` 只读缓存；
+  替换模式跨进程调用 **0 次**；**不新增线程**。代价：镜像模式下新出现的图标最多延迟一个心跳周期才显示。
+- ⬜ 伴随模式下的真图标 / 真转发（**明确不做**：与 explorer 自己的真托盘重复，且要读邻居进程的 `ImageList`
+  与 `TRAYDATA` 指针，会把跨进程面翻倍）。
 
 ## 程序菜单 / 启动器
 - ✅ 启动器检索：`src/launcher.rs`（`--launch` / `--launch-run` CLI；`launch` 会写 recents）。
@@ -51,7 +78,7 @@
 ## 设置
 - ✅ `src/settings_ui.rs`：**设置窗**，GDI 自绘的**真控件**（单选圆点 / 复选方框，纯几何 + 命中判定，可单测）：
   - 任务栏：显示任务栏（复选，重启后生效）
-  - 任务栏：显示通知图标条（实验性）（复选，即时生效）
+  - 任务栏：显示通知区域（仅作外壳时可点）（复选，即时生效）
   - 窗口合并：从不合并 / 任务栏放不下时合并 / 始终合并（三态单选）
   - 合并依据：按应用（exe）/ 按进程（pid）（单选，合并≠从不时可用）
   - 行为：悬停显示缩略图预览（复选，即时生效）

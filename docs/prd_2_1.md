@@ -55,7 +55,10 @@
 1. **taskbar 状态只允许消息线程访问**：`tasks()` / `bars()` / `tray_icons()` / `pins()` 共用唯一消息线程。
    当前加锁顺序**不统一**（`paint` tasks→bars→pins；`refresh` bars→tasks），仅因单线程才安全。
    → **禁止新增 worker 线程去抢这些锁**。定时器也走消息线程（如 `CLOCK_TIMER_ID` / `HOVER_TIMER_ID`）。
-2. **文件/跨进程 IO 不得在持 `bars()`/`tasks()` 锁时做**（`refresh` 会同步读托盘 + 扫开始菜单；过长会卡 UI）。
+2. **文件/跨进程 IO 不得在持 `bars()`/`tasks()` 锁时做**。镜像通知区的跨进程读曾在这里同步跑（2000 ms 超时，
+   宿主卡死即把整条栏卡住数秒）——0.1.3 已把它**移出 `refresh()`**，改为**心跳（默认 30 s）采样 + 缓存**、
+   超时降到 **250 ms**，`refresh()` 只读缓存（见 [`prd_1_1.md`](prd_1_1.md)「通知区 / 托盘」）。其余 IO
+   （如扫描开始菜单）仍须遵守本条。
 3. **悬停预览禁止在 `WM_MOUSEMOVE` 同步 `PrintWindow`**：用 `WM_TIMER` 节流（350ms），单窗口 show/hide 复用，
    `HBITMAP` 在 target 变化与 `WM_DESTROY` 时释放。
 4. **窗口类必须设 `hCursor`**（`IDC_ARROW`）：否则悬停显示"应用正在启动"的忙光标。
