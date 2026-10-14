@@ -37,7 +37,7 @@ const POPUP_W: i32 = 560;
 const POPUP_H: i32 = 340;
 const MARGIN: i32 = 8;
 const EDIT_H: i32 = 28;
-const GAP: i32 = 8;
+const LIST_GAP: i32 = 8;
 const ID_EDIT: u16 = 1001;
 const ID_LIST: u16 = 1002;
 /// Distinct from the taskbar's hotkey id (1).
@@ -166,7 +166,7 @@ pub fn init(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         )?;
         EDIT.store(edit.0 as isize, Ordering::SeqCst);
 
-        let list_top = MARGIN + EDIT_H + GAP;
+        let list_top = MARGIN + EDIT_H + LIST_GAP;
         let list = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(list_class.as_ptr()),

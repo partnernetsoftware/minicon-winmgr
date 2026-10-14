@@ -34,7 +34,7 @@ const MARGIN: i32 = 12;
 const EDIT_H: i32 = 26;
 const BTN_W: i32 = 84;
 const BTN_H: i32 = 26;
-const GAP: i32 = 8;
+const BTN_GAP: i32 = 8;
 const ID_EDIT: u16 = 2001;
 const ID_OK: u16 = 2002;
 const ID_CANCEL: u16 = 2003;
@@ -153,7 +153,7 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         // Buttons sit on a right-aligned row along the bottom edge.
         let btn_y = POPUP_H - MARGIN - BTN_H;
         let cancel_x = POPUP_W - MARGIN - BTN_W;
-        let ok_x = cancel_x - GAP - BTN_W;
+        let ok_x = cancel_x - BTN_GAP - BTN_W;
 
         let ok_text = wide("OK");
         let _ok = CreateWindowExW(

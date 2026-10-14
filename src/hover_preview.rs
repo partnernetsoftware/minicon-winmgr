@@ -41,7 +41,7 @@ pub fn enabled() -> bool {
 }
 
 /// Vertical gap between the button and the preview.
-const GAP: i32 = 6;
+const PREVIEW_GAP: i32 = 6;
 /// Dark backing colour so letterboxed thumbnails read as a single card.
 const BG_COLOR: COLORREF = COLORREF(0x0020_2020);
 
@@ -249,7 +249,7 @@ pub fn show(target: isize, anchor: RECT) {
     }
 
     let work = work_area(anchor);
-    let rect = crate::win_util::anchored_card(anchor, work, PREVIEW_W, PREVIEW_H, GAP);
+    let rect = crate::win_util::anchored_card(anchor, work, PREVIEW_W, PREVIEW_H, PREVIEW_GAP);
 
     let mut slot = lock_or_recover(&ANCHOR);
     tracing::debug!(previous = ?*slot, current = ?anchor, "hover preview: anchor moved");

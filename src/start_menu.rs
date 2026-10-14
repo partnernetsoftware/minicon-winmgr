@@ -40,7 +40,7 @@ const MARGIN: i32 = 6;
 /// Height of the search `EDIT` sitting at the very top of the popup.
 const SEARCH_H: i32 = 22;
 /// Gap between the search field and the four stacked list boxes.
-const GAP: i32 = 4;
+const SECTION_GAP: i32 = 4;
 /// Nominal list-box row height (Win32 `LISTBOX` default item height in pixels).
 const ROW_H: i32 = 16;
 /// How many recents the `最近使用` box shows (its height is fixed to this many
@@ -250,9 +250,10 @@ fn list_layout(orb_h: i32, place_rows: usize) -> [Rect; 4] {
     let power_h = power_actions().len() as i32 * ROW_H;
     // The five stacked controls leave four gaps; the search field also eats its
     // own height off the top. Whatever is left belongs to the app list.
-    let apps_h = (orb_h - 2 * MARGIN - SEARCH_H - 4 * GAP - places_h - recent_h - power_h).max(0);
+    let apps_h =
+        (orb_h - 2 * MARGIN - SEARCH_H - 4 * SECTION_GAP - places_h - recent_h - power_h).max(0);
 
-    let apps_y = MARGIN + SEARCH_H + GAP;
+    let apps_y = MARGIN + SEARCH_H + SECTION_GAP;
     let apps = Rect {
         x: MARGIN,
         y: apps_y,
@@ -261,19 +262,19 @@ fn list_layout(orb_h: i32, place_rows: usize) -> [Rect; 4] {
     };
     let places = Rect {
         x: MARGIN,
-        y: apps_y + apps_h + GAP,
+        y: apps_y + apps_h + SECTION_GAP,
         w,
         h: places_h,
     };
     let recent = Rect {
         x: MARGIN,
-        y: places.y + places_h + GAP,
+        y: places.y + places_h + SECTION_GAP,
         w,
         h: recent_h,
     };
     let power = Rect {
         x: MARGIN,
-        y: recent.y + recent_h + GAP,
+        y: recent.y + recent_h + SECTION_GAP,
         w,
         h: power_h,
     };
@@ -1335,12 +1336,12 @@ mod tests {
     #[test]
     fn list_layout_stacks_four_boxes_without_overlap() {
         let [apps, places, recent, power] = list_layout(ORB_H, places().len());
-        // Apps starts below the search field; the rest follow with GAP between.
+        // Apps starts below the search field; the rest follow with SECTION_GAP between.
         assert_eq!(apps.x, MARGIN);
-        assert_eq!(apps.y, MARGIN + SEARCH_H + GAP);
-        assert_eq!(places.y, apps.y + apps.h + GAP);
-        assert_eq!(recent.y, places.y + places.h + GAP);
-        assert_eq!(power.y, recent.y + recent.h + GAP);
+        assert_eq!(apps.y, MARGIN + SEARCH_H + SECTION_GAP);
+        assert_eq!(places.y, apps.y + apps.h + SECTION_GAP);
+        assert_eq!(recent.y, places.y + places.h + SECTION_GAP);
+        assert_eq!(power.y, recent.y + recent.h + SECTION_GAP);
         // Every box sits strictly below the one above it and inside the popup.
         assert!(apps.y + apps.h <= places.y);
         assert!(places.y + places.h <= recent.y);

@@ -42,7 +42,7 @@ const TIP_H: i32 = 24;
 /// Horizontal padding inside the bubble (both sides).
 const PAD_X: i32 = 10;
 /// Vertical gap between the button and the bubble.
-const GAP: i32 = 6;
+const TIP_GAP: i32 = 6;
 /// Minimum bubble width.
 const MIN_W: i32 = 40;
 
@@ -186,7 +186,7 @@ pub fn show(label: &str, anchor: RECT) {
     };
     let w = (measure(label) + 2 * PAD_X).max(MIN_W);
     let work = work_area(anchor);
-    let rect = crate::win_util::anchored_card(anchor, work, w, TIP_H, GAP);
+    let rect = crate::win_util::anchored_card(anchor, work, w, TIP_H, TIP_GAP);
 
     let mut slot = lock_or_recover(&TEXT);
     slot.clear();

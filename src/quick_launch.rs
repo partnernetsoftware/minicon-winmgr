@@ -15,7 +15,7 @@ use windows::Win32::Foundation::RECT;
 /// Square button edge, in logical pixels.
 pub const CELL: i32 = 26;
 /// Gap between adjacent buttons, in logical pixels.
-pub const GAP: i32 = 4;
+pub const PIN_GAP: i32 = 4;
 /// Maximum number of pinned buttons. Past this the taskbar greys the "add"
 /// entry out (see [`is_full`]).
 pub const MAX_PINS: usize = 8;
@@ -204,16 +204,16 @@ pub fn launch_path(path: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{GAP, MAX_PINS, Pin, contains, hit, layout, parse, push, serialize};
+    use super::{MAX_PINS, PIN_GAP, Pin, contains, hit, layout, parse, push, serialize};
 
     #[test]
     fn empty_has_no_rects() {
-        assert!(layout(0, 0, 26, GAP, 36).is_empty());
+        assert!(layout(0, 0, 26, PIN_GAP, 36).is_empty());
     }
 
     #[test]
     fn non_positive_cell_has_no_rects() {
-        assert!(layout(0, 3, 0, GAP, 36).is_empty());
+        assert!(layout(0, 3, 0, PIN_GAP, 36).is_empty());
     }
 
     #[test]
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn rects_are_vertically_centred() {
-        let rects = layout(0, 2, 26, GAP, 36);
+        let rects = layout(0, 2, 26, PIN_GAP, 36);
         // (36 - 26) / 2 == 5
         for r in &rects {
             assert_eq!(r.top, 5);
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn hit_reports_containing_index() {
-        let rects = layout(0, 3, 26, GAP, 36);
+        let rects = layout(0, 3, 26, PIN_GAP, 36);
         // Centre of the second cell.
         assert_eq!(hit(&rects, 30 + 13, 5 + 13), Some(1));
         // Left edge of the first cell is inside; its right edge is not, and the
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn hit_misses_outside() {
-        let rects = layout(0, 3, 26, GAP, 36);
+        let rects = layout(0, 3, 26, PIN_GAP, 36);
         assert_eq!(hit(&rects, -1, 5), None);
         assert_eq!(hit(&rects, 0, 4), None); // above the bar
         assert_eq!(hit(&rects, 10_000, 5), None);

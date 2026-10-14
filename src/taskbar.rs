@@ -62,7 +62,12 @@ use crate::win_util::{guard_abi, lock_or_recover, wide};
 // --- layout tokens --------------------------------------------------------
 const BAR_H: i32 = 36;
 const PAD: i32 = 10;
-const GAP: i32 = 4;
+/// Spacing between adjacent elements of the bar. Primarily the gap between
+/// task buttons, but it is the bar's shared token: the quick-launch strip, the
+/// notification strip and the `»` overflow all space themselves with it too.
+/// (Named per the 0.1.3 plan's de-duplication pass — it used to be a bare `GAP`
+/// in seven modules with five different values.)
+const BTN_GAP: i32 = 4;
 /// Width reserved for the start-menu entry slot, right of the settings button.
 /// Only reserved when the feature is on — see [`grip_w`].
 const GRIP: i32 = 12;
@@ -615,7 +620,7 @@ fn after_settings() -> i32 {
 /// Pure core of [`after_settings`], so the "never fuse two buttons" rule is
 /// unit-testable without touching the process-global config.
 fn after_settings_for(grip: i32) -> i32 {
-    PAD + SETTINGS_W + grip.max(GAP)
+    PAD + SETTINGS_W + grip.max(BTN_GAP)
 }
 
 /// Left edge of the quick-launch strip, just right of the settings button.
@@ -1097,7 +1102,7 @@ fn reference_client_width() -> i32 {
 /// minus the fixed left cluster, the clock zone, and the tray strip.
 fn reference_task_avail(tray_w: i32) -> i32 {
     let start_left = after_settings();
-    let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
+    let tray = if tray_w > 0 { tray_w + BTN_GAP } else { 0 };
     (reference_client_width() - start_left - PAD - RIGHT_W - tray).max(0)
 }
 
@@ -1112,9 +1117,9 @@ fn overflows(avail: i32, n: usize, gap: i32) -> bool {
 /// tier — the trigger for `when_full` to fall back to grouping.
 fn would_overflow(client_w: i32, n: usize, tray_w: i32) -> bool {
     let start_left = after_settings();
-    let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
+    let tray = if tray_w > 0 { tray_w + BTN_GAP } else { 0 };
     let avail = (client_w - start_left - PAD - RIGHT_W - tray).max(0);
-    overflows(avail, n, GAP)
+    overflows(avail, n, BTN_GAP)
 }
 
 /// Whether laying out `n` per-window buttons in `avail` would fall to the
@@ -1171,16 +1176,23 @@ pub fn refresh() {
         if count == 0 {
             0
         } else {
-            count as i32 * crate::quick_launch::CELL + (count as i32 - 1) * crate::quick_launch::GAP
+            count as i32 * crate::quick_launch::CELL
+                + (count as i32 - 1) * crate::quick_launch::PIN_GAP
         }
     };
-    let fold_avail = (ref_avail - if raw_pins_w > 0 { raw_pins_w + GAP } else { 0 }).max(0);
+    let fold_avail = (ref_avail
+        - if raw_pins_w > 0 {
+            raw_pins_w + BTN_GAP
+        } else {
+            0
+        })
+    .max(0);
     let (merge, group_by) = merge_policy();
     let use_grouping = match merge {
         // `never` normally keeps one button per window — but once the density
         // would drop to icon-only, identical squares for the same application
         // become indistinguishable, so the application folds locally (+N).
-        crate::config::MergeStrategy::Never => fold_needed(fold_avail, windows.len(), GAP),
+        crate::config::MergeStrategy::Never => fold_needed(fold_avail, windows.len(), BTN_GAP),
         crate::config::MergeStrategy::Always => true,
         // Group only once a per-window bar would overflow at the densest tier.
         crate::config::MergeStrategy::WhenFull => {
@@ -1216,18 +1228,19 @@ pub fn refresh() {
         0
     } else {
         pins_now.len() as i32 * crate::quick_launch::CELL
-            + (pins_now.len() as i32 - 1) * crate::quick_launch::GAP
+            + (pins_now.len() as i32 - 1) * crate::quick_launch::PIN_GAP
     };
     *lock_or_recover(pins()) = pins_now;
 
     // Fold the quick-launch strip this round when it is the sole cause of task
     // overflow (fold the tray first — it is gone before this; the pins next;
     // the task strip last). The pin data stays; only its width is dropped.
-    let hide_pins_now = pins_w > 0 && hide_pins(ref_avail - pins_w - GAP, ref_avail, n, GAP);
+    let hide_pins_now =
+        pins_w > 0 && hide_pins(ref_avail - pins_w - BTN_GAP, ref_avail, n, BTN_GAP);
     let pins_w = if hide_pins_now { 0 } else { pins_w };
 
     let after_pins = if pins_w > 0 {
-        pins_left() + pins_w + GAP
+        pins_left() + pins_w + BTN_GAP
     } else {
         after_settings()
     };
@@ -1253,7 +1266,7 @@ pub fn refresh() {
                 pins_left(),
                 pin_count,
                 crate::quick_launch::CELL,
-                crate::quick_launch::GAP,
+                crate::quick_launch::PIN_GAP,
                 BAR_H,
             )
         };
@@ -1300,7 +1313,7 @@ struct ButtonLayout {
 
 /// One task-button rect at position `i` given a fixed button width.
 fn rect_at(left: i32, i: usize, bw: i32) -> RECT {
-    let x = left + i as i32 * (bw + GAP);
+    let x = left + i as i32 * (bw + BTN_GAP);
     RECT {
         left: x,
         top: BTN_TOP,
@@ -1325,9 +1338,9 @@ fn layout(start_left: i32, client_w: i32, n: usize, tray_w: i32, prev: Density) 
             density: prev,
         };
     }
-    let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
+    let tray = if tray_w > 0 { tray_w + BTN_GAP } else { 0 };
     let avail = (client_w - start_left - PAD - RIGHT_W - tray).max(0);
-    let bud = budget(avail, n, GAP);
+    let bud = budget(avail, n, BTN_GAP);
     let density = density_for(bud, prev);
 
     // The whole set fits in the chosen tier → proportional width, clamped to it.
@@ -1347,18 +1360,18 @@ fn layout(start_left: i32, client_w: i32, n: usize, tray_w: i32, prev: Density) 
     // bar never degrades to a lone `»`. Only the icon-only tier can reach here
     // (`bud < floor`), so the squares are 40px wide.
     let bw = density.floor();
-    let room = avail - OVERFLOW_W - GAP;
+    let room = avail - OVERFLOW_W - BTN_GAP;
     let mut k = if room >= 0 {
-        (room / (bw + GAP)) as usize
+        (room / (bw + BTN_GAP)) as usize
     } else {
         0
     };
     k = k.min(n);
-    if k == 0 && n >= 1 && avail >= bw + GAP + OVERFLOW_W {
+    if k == 0 && n >= 1 && avail >= bw + BTN_GAP + OVERFLOW_W {
         k = 1;
     }
     let rects: Vec<RECT> = (0..k).map(|i| rect_at(start_left, i, bw)).collect();
-    let ox = start_left + k as i32 * (bw + GAP);
+    let ox = start_left + k as i32 * (bw + BTN_GAP);
     let overflow = (k < n).then(|| RECT {
         left: ox,
         top: BTN_TOP,
@@ -2600,7 +2613,7 @@ mod tests {
     fn after_settings_always_keeps_a_gap() {
         assert_eq!(
             after_settings_for(0),
-            super::PAD + super::SETTINGS_W + super::GAP,
+            super::PAD + super::SETTINGS_W + super::BTN_GAP,
             "with no start-menu slot the next button keeps a full gap"
         );
         assert_eq!(
