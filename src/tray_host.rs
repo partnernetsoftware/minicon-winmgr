@@ -370,20 +370,38 @@ unsafe extern "system" fn tray_wndproc_inner(
             let cds = lparam.0 as *const COPYDATASTRUCT;
             if !cds.is_null() {
                 let cds = &*cds;
-                if cds.dwData == SHELLTRAYDATA_MARKER
-                    && !cds.lpData.is_null()
-                    && cds.cbData as usize >= 4
-                {
+                if cds.dwData != SHELLTRAYDATA_MARKER {
+                    tracing::debug!(marker = cds.dwData, "tray sink: unrelated WM_COPYDATA");
+                } else if cds.lpData.is_null() || cds.cbData < 4 {
+                    tracing::warn!(cb = cds.cbData, "tray sink: tray payload too small");
+                } else {
                     let raw =
                         std::slice::from_raw_parts(cds.lpData as *const u8, cds.cbData as usize);
-                    if let Some(parsed) = parse_shell_tray_data(raw) {
-                        apply(parsed);
+                    // A payload that reaches us but does not parse used to be
+                    // dropped without a trace — indistinguishable from "no app
+                    // ever registered", which is the exact ambiguity that ate
+                    // a session during the 0.1.3 acceptance run.
+                    match parse_shell_tray_data(raw) {
+                        Some(parsed) => apply(parsed),
+                        None => {
+                            tracing::warn!(cb = cds.cbData, "tray sink: unparseable tray payload");
+                        }
                     }
                 }
             }
         }
         return LRESULT(0);
     }
+    // Nothing else is *expected* here, but shell32 decides whether to accept a
+    // `Shell_NotifyIcon` registration by talking to the tray window, and a
+    // refused registration is otherwise invisible from our side. At DEBUG so
+    // "why did Shell_NotifyIcon return FALSE?" has an answer in the log.
+    tracing::debug!(
+        msg,
+        wparam = wparam.0,
+        lparam = lparam.0,
+        "tray sink: message"
+    );
     // SAFETY: standard default handling for every other message.
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
