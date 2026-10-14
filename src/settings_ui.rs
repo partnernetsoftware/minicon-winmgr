@@ -30,11 +30,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetForegroundWindow,
-    GetSystemMetrics, IDYES, IsWindowVisible, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_OK, MB_YESNO,
-    MessageBoxW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU,
+    CreateWindowExW, DefWindowProcW, GetClientRect, GetForegroundWindow, GetSystemMetrics, IDYES,
+    IsWindow, IsWindowVisible, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_OK, MB_YESNO, MessageBoxW,
+    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, ShowWindow, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_PAINT, WNDCLASS_STYLES,
+    WNDCLASSW, WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU,
 };
 use windows::core::PCWSTR;
 
@@ -43,7 +43,14 @@ use crate::win_util::wide;
 
 // --- layout / identity ----------------------------------------------------
 const WIN_W: i32 = 460;
-const WIN_H: i32 = 700;
+/// Client-area height the row layout is computed against.
+const WIN_H: i32 = 720;
+/// Non-client frame of the settings window (caption + borders). `WIN_W`/`WIN_H`
+/// describe the **client** area the layout maths uses, but `CreateWindowExW`
+/// takes the **window** size — so the frame must be added on creation, or the
+/// last action button is clipped off-screen (a real, shipped bug).
+const FRAME_W: i32 = 16;
+const FRAME_H: i32 = 44;
 const MARGIN: i32 = 22;
 const TITLE_H: i32 = 30;
 const ROW_H: i32 = 28;
@@ -61,6 +68,9 @@ const WINDOW_TITLE: &str = "设置";
 // Handle stored as `isize`; the message thread is the sole user, so this is
 // safe by construction.
 static SETTINGS: AtomicIsize = AtomicIsize::new(0);
+/// Module handle remembered from [`install`] so the window can be re-created
+/// later if it is ever destroyed (see [`toggle`]).
+static HINST: AtomicIsize = AtomicIsize::new(0);
 
 // --- pure data model (unit-testable, no Win32) ----------------------------
 
@@ -86,49 +96,84 @@ pub enum Row {
         enabled: bool,
         action: SettingAction,
     },
-    /// A checkbox.
+    /// A checkbox; `enabled` is false when a prerequisite is unmet.
     Toggle {
         text: &'static str,
         on: bool,
+        enabled: bool,
         action: SettingAction,
     },
     /// A read-only `label: value` row.
     Info { text: &'static str, value: String },
 }
 
+/// Whether a settings row is currently usable.
+///
+/// The single source of truth for "is this row clickable right now": when the
+/// taskbar is hidden, every option that only makes sense while the bar is on
+/// screen is greyed out and inert. The taskbar toggle itself, and the shell
+/// take-over / give-back action buttons (which are not rows here), stay usable.
+///
+/// Pure so the dependency rules can be unit-tested without any Win32 state.
+pub fn row_enabled(action: SettingAction, show_taskbar: bool) -> bool {
+    match action {
+        SettingAction::ToggleShowTaskbar => true,
+        SettingAction::SetMerge(_)
+        | SettingAction::SetGroupBy(_)
+        | SettingAction::ToggleShowTray
+        | SettingAction::ToggleHoverPreview => show_taskbar,
+    }
+}
+
+/// Dependency note appended to a greyed row's label, when the taskbar is the
+/// prerequisite that is unmet. Pure, so the wording is testable.
+fn row_note(action: SettingAction, show_taskbar: bool) -> Option<&'static str> {
+    (!row_enabled(action, show_taskbar)).then_some("（需先显示任务栏）")
+}
+
 /// Builds the settings rows for the given configuration snapshot.
 pub fn build_rows(cfg: &config::Config) -> Vec<Row> {
-    // The grouping key only matters when merging is on.
-    let by_enabled = cfg.merge != MergeStrategy::Never;
+    let show = cfg.show_taskbar;
+    // The grouping key only matters when merging is on — and, like the merge
+    // strategy itself, only while the taskbar is actually shown.
+    let by_enabled = row_enabled(SettingAction::SetGroupBy(GroupBy::Exe), show)
+        && cfg.merge != MergeStrategy::Never;
     vec![
         Row::Heading("任务栏"),
         Row::Toggle {
             text: "显示任务栏（重启后生效）",
             on: cfg.show_taskbar,
+            enabled: row_enabled(SettingAction::ToggleShowTaskbar, show),
             action: SettingAction::ToggleShowTaskbar,
         },
         Row::Toggle {
             text: "显示通知图标条（实验性）",
             on: cfg.show_tray,
+            enabled: row_enabled(SettingAction::ToggleShowTray, show),
             action: SettingAction::ToggleShowTray,
         },
+        // No row for the start menu: its taskbar entry was retired (the
+        // window-list button already covers "find any window"), so there is
+        // nothing left to toggle. The feature is still reachable by hand —
+        // config key `taskbar.menu` / env `MINICON_START_MENU` — and re-enabling
+        // it there brings the entry slot back.
         Row::Heading("窗口合并"),
         Row::Radio {
             text: MergeStrategy::Never.label(),
             on: cfg.merge == MergeStrategy::Never,
-            enabled: true,
+            enabled: row_enabled(SettingAction::SetMerge(MergeStrategy::Never), show),
             action: SettingAction::SetMerge(MergeStrategy::Never),
         },
         Row::Radio {
             text: MergeStrategy::WhenFull.label(),
             on: cfg.merge == MergeStrategy::WhenFull,
-            enabled: true,
+            enabled: row_enabled(SettingAction::SetMerge(MergeStrategy::WhenFull), show),
             action: SettingAction::SetMerge(MergeStrategy::WhenFull),
         },
         Row::Radio {
             text: MergeStrategy::Always.label(),
             on: cfg.merge == MergeStrategy::Always,
-            enabled: true,
+            enabled: row_enabled(SettingAction::SetMerge(MergeStrategy::Always), show),
             action: SettingAction::SetMerge(MergeStrategy::Always),
         },
         Row::Heading("合并依据"),
@@ -148,6 +193,7 @@ pub fn build_rows(cfg: &config::Config) -> Vec<Row> {
         Row::Toggle {
             text: "悬停显示缩略图预览",
             on: cfg.hover_preview,
+            enabled: row_enabled(SettingAction::ToggleHoverPreview, show),
             action: SettingAction::ToggleHoverPreview,
         },
         Row::Heading("外观"),
@@ -244,23 +290,40 @@ fn action_rects(client: RECT, n_rows: usize) -> Vec<(RECT, Action)> {
         .collect()
 }
 
-/// The action a row triggers, or `None` when it is not clickable.
-fn row_action(rows: &[Row], i: usize) -> Option<SettingAction> {
+/// The action a row *would* trigger, even when the row is currently disabled.
+/// Used to tell "no action here" (headings, info) from "disabled right now".
+fn row_declared_action(rows: &[Row], i: usize) -> Option<SettingAction> {
     match rows.get(i)? {
-        Row::Radio {
-            action, enabled, ..
-        } if *enabled => Some(*action),
-        Row::Toggle { action, .. } => Some(*action),
+        Row::Radio { action, .. } | Row::Toggle { action, .. } => Some(*action),
         _ => None,
     }
 }
 
-/// Index of the clickable row containing `(x, y)`, if any.
-fn hit_row(rows: &[Row], rects: &[RECT], x: i32, y: i32) -> Option<usize> {
+/// The action a row triggers, or `None` when it is not clickable (headings,
+/// info rows, and any row whose prerequisites are unmet).
+fn row_action(rows: &[Row], i: usize) -> Option<SettingAction> {
+    match rows.get(i)? {
+        Row::Radio {
+            action, enabled, ..
+        }
+        | Row::Toggle {
+            action, enabled, ..
+        } if *enabled => Some(*action),
+        _ => None,
+    }
+}
+
+/// Index of the row rect containing `(x, y)`, clickable or not.
+fn hit_row_rect(rects: &[RECT], x: i32, y: i32) -> Option<usize> {
     rects
         .iter()
         .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
-        .filter(|&i| row_action(rows, i).is_some())
+}
+
+/// Index of the clickable row containing `(x, y)`, if any.
+#[cfg(test)]
+fn hit_row(rows: &[Row], rects: &[RECT], x: i32, y: i32) -> Option<usize> {
+    hit_row_rect(rects, x, y).filter(|&i| row_action(rows, i).is_some())
 }
 
 /// Action whose button contains `(x, y)`, if any.
@@ -277,8 +340,8 @@ fn centered_origin() -> (i32, i32) {
         centered_origin_for(
             GetSystemMetrics(SM_CXSCREEN),
             GetSystemMetrics(SM_CYSCREEN),
-            WIN_W,
-            WIN_H,
+            WIN_W + FRAME_W,
+            WIN_H + FRAME_H,
         )
     }
 }
@@ -360,8 +423,13 @@ fn existing(slot: &AtomicIsize) -> Option<HWND> {
     (raw != 0).then(|| hwnd_from(raw))
 }
 
+/// The live settings window, if any.
+///
+/// A stored handle that no longer names a window is treated as "gone": the
+/// window is only ever destroyed by a `WM_DESTROY` we did not intend (see
+/// [`toggle`]), so stale handles must not make the settings button dead.
 fn window() -> Option<HWND> {
-    existing(&SETTINGS)
+    existing(&SETTINGS).filter(|h| unsafe { IsWindow(Some(*h)).as_bool() })
 }
 
 /// Creates the (hidden) settings window class + window.
@@ -369,6 +437,7 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
     if window().is_some() {
         return Ok(()); // already initialised
     }
+    HINST.store(hinstance.0 as isize, Ordering::SeqCst);
     // SAFETY: standard Win32 window setup; every buffer outlives its call and
     // `wndproc` is a valid `extern "system"` function. The class brush comes
     // from the theme and is process-lifetime.
@@ -409,8 +478,8 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0),
             x,
             y,
-            WIN_W,
-            WIN_H,
+            WIN_W + FRAME_W,
+            WIN_H + FRAME_H,
             None,
             None,
             Some(hinstance),
@@ -435,9 +504,23 @@ pub fn toggle() {
     tracing::info!(visible = vis, foreground = fg, "settings toggle requested");
     if vis && fg {
         hide();
-    } else {
-        show();
+        return;
     }
+    // The window is reused for the whole process lifetime. If it is missing —
+    // never created, or destroyed behind our back — re-create it instead of
+    // leaving the taskbar's settings button permanently dead.
+    if window().is_none() {
+        let hinst = HINST.load(Ordering::SeqCst);
+        if hinst == 0 {
+            tracing::warn!("settings toggle ignored: no module handle recorded");
+            return;
+        }
+        if let Err(err) = install(HINSTANCE(hinst as *mut std::ffi::c_void)) {
+            tracing::error!(%err, "settings window re-create failed");
+            return;
+        }
+    }
+    show();
 }
 
 /// Actual on-screen state (queried from Win32, not a cached flag).
@@ -530,6 +613,14 @@ fn run_action(action: Action) {
 }
 
 fn do_replace() {
+    // Already the shell? Nothing to hand over — and stopping the session's
+    // shell would stop *us* (we own the tray host's `Shell_TrayWnd`). Refuse
+    // before the confirmation so the user is never asked to approve a no-op.
+    if crate::shell_swap::self_is_shell() {
+        tracing::info!("settings: takeover skipped, already running as the shell");
+        info_box("当前已经是 minicon 在充当桌面外壳，无需接管。");
+        return;
+    }
     // Taking over is immediate now: the desktop shell that is running in this
     // session gets stopped, not just the registry value written. That closes
     // the user's desktop, so it is confirmed first (default: No).
@@ -583,7 +674,16 @@ fn do_replace() {
 }
 
 fn do_rollback() {
-    // Confirm, defaulting to "No" — this restarts Explorer over our bar.
+    // Confirm, defaulting to "No" — this hands the desktop back to Explorer.
+    // When *we* are the shell the handover completes at the next sign-in (our
+    // own bar is holding the session and cannot restart Explorer under itself),
+    // so say so instead of over-promising.
+    let we_are_shell = crate::shell_swap::self_is_shell();
+    let tail = if we_are_shell {
+        "当前正是本程序在充当桌面外壳，切换将在下次登录时完成。"
+    } else {
+        "将立即重新启动 explorer。"
+    };
     // Distinguish "no takeover was ever recorded" (give-back refuses, so we stop
     // up front rather than promising a restore we will not perform) from a
     // recorded-but-empty value (which restores the Windows default shell).
@@ -593,10 +693,9 @@ fn do_rollback() {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(v) => format!("还原系统桌面：立即把外壳还原为\n{v}\n并重新启动 explorer。\n\n确定？"),
+        Some(v) => format!("还原系统桌面：把外壳还原为\n{v}\n{tail}\n\n确定？"),
         None if backed_up.is_some() => {
-            "还原系统桌面：立即把外壳还原为系统默认（explorer）\n并重新启动 explorer。\n\n确定？"
-                .to_string()
+            format!("还原系统桌面：把外壳还原为系统默认（explorer）\n{tail}\n\n确定？")
         }
         None => {
             info_box("没有记录到接管前的桌面外壳（本程序未曾接管过桌面），无法还原。");
@@ -624,9 +723,15 @@ fn do_rollback() {
                 started = report.started,
                 "settings: shell given back"
             );
-            let mut message = String::from("已还原系统桌面（立即生效）。\n");
+            let mut message = if we_are_shell {
+                String::from("已还原系统桌面设置。\n")
+            } else {
+                String::from("已还原系统桌面（立即生效）。\n")
+            };
             message.push_str(if report.started {
                 "已重新启动 explorer。"
+            } else if we_are_shell {
+                "下次登录将由 explorer 接管桌面。"
             } else {
                 "本会话已有桌面外壳在运行。"
             });
@@ -723,7 +828,9 @@ fn paint(hwnd: HWND) {
     // SAFETY: `hwnd` is live; `client` receives its client rect.
     let _ = unsafe { GetClientRect(hwnd, &mut client) };
     let t = theme();
-    let rows = build_rows(&config::current());
+    let cfg = config::current();
+    let show_taskbar = cfg.show_taskbar;
+    let rows = build_rows(&cfg);
     let rects = row_rects(client, rows.len());
 
     // SAFETY: all GDI handles below are process-lifetime; the client rect is
@@ -764,7 +871,10 @@ fn paint(hwnd: HWND) {
                     draw_line(hdc, &val_rect, value, t.muted, DT_RIGHT);
                 }
                 Row::Radio {
-                    text, on, enabled, ..
+                    text,
+                    on,
+                    enabled,
+                    action,
                 } => {
                     draw_radio(hdc, r, *on);
                     let tr = RECT {
@@ -772,17 +882,33 @@ fn paint(hwnd: HWND) {
                         right: r.right,
                         ..*r
                     };
+                    // Disabled rows are drawn in the muted foreground and spell
+                    // out the unmet prerequisite.
                     let color = if *enabled { t.text } else { t.muted };
-                    draw_line(hdc, &tr, text, color, DT_LEFT);
+                    let label = match row_note(*action, show_taskbar) {
+                        Some(note) => format!("{text}{note}"),
+                        None => (*text).to_string(),
+                    };
+                    draw_line(hdc, &tr, &label, color, DT_LEFT);
                 }
-                Row::Toggle { text, on, .. } => {
+                Row::Toggle {
+                    text,
+                    on,
+                    enabled,
+                    action,
+                } => {
                     draw_checkbox(hdc, r, *on);
                     let tr = RECT {
                         left: r.left + TEXT_LEFT,
                         right: r.right,
                         ..*r
                     };
-                    draw_line(hdc, &tr, text, t.text, DT_LEFT);
+                    let color = if *enabled { t.text } else { t.muted };
+                    let label = match row_note(*action, show_taskbar) {
+                        Some(note) => format!("{text}{note}"),
+                        None => (*text).to_string(),
+                    };
+                    draw_line(hdc, &tr, &label, color, DT_LEFT);
                 }
             }
         }
@@ -825,11 +951,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let _ = unsafe { GetClientRect(hwnd, &mut client) };
             let rows = build_rows(&config::current());
             let rects = row_rects(client, rows.len());
-            if let Some(i) = hit_row(&rows, &rects, x, y)
-                && let Some(action) = row_action(&rows, i)
-            {
-                run_setting(action, hwnd);
-                return LRESULT(0);
+            if let Some(i) = hit_row_rect(&rects, x, y) {
+                if let Some(action) = row_action(&rows, i) {
+                    run_setting(action, hwnd);
+                    return LRESULT(0);
+                }
+                // A disabled setting row is inert: swallow the click (so it can
+                // never fall through to the action buttons) and record why.
+                if let Some(action) = row_declared_action(&rows, i) {
+                    tracing::debug!(?action, "ignoring click on disabled setting row");
+                    return LRESULT(0);
+                }
             }
             if let Some(action) = hit_action(&action_rects(client, rows.len()), x, y) {
                 run_action(action);
@@ -841,15 +973,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_CLOSE => {
-            // SAFETY: `hwnd` is our live window.
-            unsafe {
-                let _ = DestroyWindow(hwnd);
-            }
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            SETTINGS.store(0, Ordering::SeqCst);
-            tracing::info!("settings window destroyed");
+            // Closing hides instead of destroying: the window is reused, and a
+            // destroyed window leaves the settings button with nothing to show.
+            hide();
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -867,11 +993,23 @@ fn get_y(lparam: LPARAM) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, MergeStrategy, Row, SettingAction, action_rects, actions, build_rows,
-        centered_origin_for, hit_action, hit_row, row_action, row_rects, toggle_flag,
+        Action, GroupBy, MergeStrategy, Row, SettingAction, action_rects, actions, build_rows,
+        centered_origin_for, hit_action, hit_row, hit_row_rect, row_action, row_declared_action,
+        row_enabled, row_note, row_rects, toggle_flag,
     };
     use crate::config::Config;
     use windows::Win32::Foundation::RECT;
+
+    /// Every setting action the dialog can carry, for exhaustive checks.
+    fn all_setting_actions() -> [SettingAction; 5] {
+        [
+            SettingAction::SetMerge(MergeStrategy::Never),
+            SettingAction::SetGroupBy(GroupBy::Exe),
+            SettingAction::ToggleShowTaskbar,
+            SettingAction::ToggleShowTray,
+            SettingAction::ToggleHoverPreview,
+        ]
+    }
 
     fn client() -> RECT {
         RECT {
@@ -1004,5 +1142,129 @@ mod tests {
         let mid = ((r0.left + r0.right) / 2, (r0.top + r0.bottom) / 2);
         assert_eq!(hit_action(&rects, mid.0, mid.1), Some(a0));
         assert_eq!(hit_action(&rects, 0, 0), None);
+    }
+
+    /// The stock row set must fit the client area the layout assumes
+    /// (`WIN_H`); the non-client frame is added on top at creation time.
+    #[test]
+    fn default_rows_and_actions_fit_the_client_height() {
+        let rows = build_rows(&Config::default());
+        let rects = action_rects(client(), rows.len());
+        let last = rects.last().expect("there are action buttons").0;
+        assert!(
+            last.bottom + super::MARGIN <= super::WIN_H,
+            "content ends at {} but the client is only {} tall",
+            last.bottom + super::MARGIN,
+            super::WIN_H
+        );
+    }
+
+    #[test]
+    fn every_row_is_usable_while_the_taskbar_is_shown() {
+        for action in all_setting_actions() {
+            assert!(
+                row_enabled(action, true),
+                "{action:?} should be usable while the taskbar is shown"
+            );
+            assert_eq!(row_note(action, true), None, "{action:?} needs no note");
+        }
+    }
+
+    #[test]
+    fn taskbar_dependent_rows_disable_without_the_taskbar() {
+        for action in [
+            SettingAction::SetMerge(MergeStrategy::Never),
+            SettingAction::SetGroupBy(GroupBy::Exe),
+            SettingAction::ToggleShowTray,
+            SettingAction::ToggleHoverPreview,
+        ] {
+            assert!(
+                !row_enabled(action, false),
+                "{action:?} must be disabled without the taskbar"
+            );
+            assert_eq!(
+                row_note(action, false),
+                Some("（需先显示任务栏）"),
+                "{action:?} should explain its dependency"
+            );
+        }
+        // The taskbar toggle itself stays usable, so it can be turned back on.
+        assert!(row_enabled(SettingAction::ToggleShowTaskbar, false));
+        assert_eq!(row_note(SettingAction::ToggleShowTaskbar, false), None);
+    }
+
+    #[test]
+    fn hiding_the_taskbar_greys_exactly_the_dependent_rows() {
+        // Merge on, so the merge dependency does not mask the taskbar one.
+        let cfg = Config {
+            show_taskbar: false,
+            merge: MergeStrategy::Always,
+            ..Config::default()
+        };
+        let rows = build_rows(&cfg);
+        for (i, r) in rows.iter().enumerate() {
+            let (action, enabled) = match r {
+                Row::Radio {
+                    action, enabled, ..
+                }
+                | Row::Toggle {
+                    action, enabled, ..
+                } => (*action, *enabled),
+                Row::Heading(_) | Row::Info { .. } => continue,
+            };
+            assert_eq!(
+                enabled,
+                row_enabled(action, false),
+                "row {i} ({action:?}) disagrees with row_enabled"
+            );
+        }
+        // Only "显示任务栏" remains interactive; every other row is inert.
+        let interactive: Vec<SettingAction> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Radio {
+                    action, enabled, ..
+                }
+                | Row::Toggle {
+                    action, enabled, ..
+                } if *enabled => Some(*action),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(interactive, vec![SettingAction::ToggleShowTaskbar]);
+    }
+
+    #[test]
+    fn disabled_rows_report_their_action_but_stay_unclickable() {
+        let cfg = Config {
+            show_taskbar: false,
+            merge: MergeStrategy::Always,
+            ..Config::default()
+        };
+        let rows = build_rows(&cfg);
+        let rects = row_rects(client(), rows.len());
+        // The "通知图标条" toggle: declared, but not clickable while greyed.
+        let i = rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    Row::Toggle {
+                        action: SettingAction::ToggleShowTray,
+                        enabled: false,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            row_declared_action(&rows, i),
+            Some(SettingAction::ToggleShowTray)
+        );
+        assert_eq!(row_action(&rows, i), None);
+        let r = rects[i];
+        let mid = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        assert_eq!(hit_row_rect(&rects, mid.0, mid.1), Some(i));
+        assert_eq!(hit_row(&rows, &rects, mid.0, mid.1), None);
     }
 }

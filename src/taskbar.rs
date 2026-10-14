@@ -42,13 +42,13 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_DBLCLKS, CreatePopupMenu, CreateWindowExW, DI_NORMAL, DefWindowProcW,
     DestroyMenu, DestroyWindow, DrawIconEx, GetClientRect, GetCursorPos, GetForegroundWindow,
-    GetSystemMetrics, GetWindowRect, GetWindowTextW, HICON, HWND_TOPMOST, IsWindow, KillTimer,
-    MF_GRAYED, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE, SetForegroundWindow,
-    SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_CLOSE,
-    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_TIMER, WNDCLASSW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GetSystemMetrics, GetWindowRect, GetWindowTextW, HICON, HWND_TOPMOST, IsIconic, IsWindow,
+    KillTimer, MF_GRAYED, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW, SM_CXSCREEN,
+    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE,
+    SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS,
+    WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -62,8 +62,10 @@ use crate::win_util::wide;
 const BAR_H: i32 = 36;
 const PAD: i32 = 10;
 const GAP: i32 = 4;
+/// Width reserved for the start-menu entry slot, right of the settings button.
+/// Only reserved when the feature is on — see [`grip_w`].
 const GRIP: i32 = 12;
-/// Width of the settings button (left of the menu button).
+/// Width of the settings button — the leftmost control on the bar.
 const SETTINGS_W: i32 = 26;
 /// Horizontal space reserved on the right edge for the clock. Task buttons may
 /// never intrude into it. The notification-icon strip is reserved on top of
@@ -91,8 +93,6 @@ const ICON_ONLY_SIZE: i32 = 20;
 const BTN_TOP: i32 = 6;
 /// Width of the clock text (`yy-mm-dd HH:MM`).
 const CLOCK_W: i32 = 132;
-/// Width of the window-list button that sits between the pins and the tasks.
-const LIST_W: i32 = 26;
 /// Width of the overflow button shown when task buttons cannot all fit.
 const OVERFLOW_W: i32 = 44;
 /// The identity slot at the left of every task button: the application icon's
@@ -460,10 +460,8 @@ struct BarEntry {
     overflow: Option<RECT>,
     /// First task index hidden behind the overflow button (== rects.len()).
     hidden_from: usize,
-    /// Quick-launch pin rects (left of the list button).
+    /// Quick-launch pin rects (left of the task strip).
     pin_rects: Vec<RECT>,
-    /// Window-list button rect.
-    list_rect: Option<RECT>,
     /// Current button-width tier for this bar (hysteresis state).
     density: Density,
     hover: Option<usize>,
@@ -505,9 +503,42 @@ fn group_anchors() -> &'static Mutex<HashMap<String, isize>> {
     A.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Left edge of the quick-launch strip, just right of the brand grip.
+/// Width of the start-menu entry slot, which sits between the settings button
+/// and the window-list button.
+///
+/// **Zero unless the start menu is enabled.** The entry is no longer offered in
+/// the UI: the window-list button already covers "find any window", so a second
+/// entry point is redundant (product decision, 2026-10-14). The feature stays
+/// reachable through the config file only (`taskbar.menu` / `MINICON_START_MENU`,
+/// default off), and the slot materialises again if someone turns it on — a
+/// permanently reserved 12px dead gap next to settings is worse than nothing.
+fn grip_w() -> i32 {
+    if crate::config::current().start_menu {
+        GRIP
+    } else {
+        0
+    }
+}
+
+/// Left edge of the button that follows the settings button (the quick-launch
+/// strip, or the window-list button when there are no pins).
+///
+/// `grip_w()` when the start-menu slot is live, otherwise the standard
+/// inter-button gap — two buttons that draw the same `surface` background must
+/// never touch, or they read as one two-glyph block.
+fn after_settings() -> i32 {
+    after_settings_for(grip_w())
+}
+
+/// Pure core of [`after_settings`], so the "never fuse two buttons" rule is
+/// unit-testable without touching the process-global config.
+fn after_settings_for(grip: i32) -> i32 {
+    PAD + SETTINGS_W + grip.max(GAP)
+}
+
+/// Left edge of the quick-launch strip, just right of the settings button.
 fn pins_left() -> i32 {
-    PAD + SETTINGS_W + GRIP
+    PAD + SETTINGS_W + grip_w()
 }
 
 struct Brushes {
@@ -667,7 +698,15 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
 
         for (i, (x, y, w, h)) in areas.into_iter().enumerate() {
             let hwnd = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                // `WS_EX_NOACTIVATE` is what makes the bar behave like the stock
+                // shell: clicking a button must not deactivate the app the user
+                // is looking at. Without it a mouse-down activates the bar, so
+                // `GetForegroundWindow` inside the click handler reports *us*
+                // and the activate/minimize toggle can never see the real state.
+                // Keyboard navigation is unaffected — it is entered via the
+                // summon hotkey, which activates the bar with an explicit
+                // `SetForegroundWindow` (allowed for this style).
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(class_title.as_ptr()),
                 WS_POPUP | WS_VISIBLE,
@@ -965,7 +1004,7 @@ fn reference_client_width() -> i32 {
 /// (a slightly conservative start, per the PRD): the reference client width
 /// minus the fixed left cluster, the clock zone, and the tray strip.
 fn reference_task_avail(tray_w: i32) -> i32 {
-    let start_left = PAD + SETTINGS_W + GRIP + LIST_W + GAP;
+    let start_left = after_settings();
     let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
     (reference_client_width() - start_left - PAD - RIGHT_W - tray).max(0)
 }
@@ -980,7 +1019,7 @@ fn overflows(avail: i32, n: usize, gap: i32) -> bool {
 /// Whether `n` per-window buttons would spill past the bar even at the densest
 /// tier — the trigger for `when_full` to fall back to grouping.
 fn would_overflow(client_w: i32, n: usize, tray_w: i32) -> bool {
-    let start_left = PAD + SETTINGS_W + GRIP + LIST_W + GAP;
+    let start_left = after_settings();
     let tray = if tray_w > 0 { tray_w + GAP } else { 0 };
     let avail = (client_w - start_left - PAD - RIGHT_W - tray).max(0);
     overflows(avail, n, GAP)
@@ -1090,9 +1129,9 @@ pub fn refresh() {
     let after_pins = if pins_w > 0 {
         pins_left() + pins_w + GAP
     } else {
-        PAD + SETTINGS_W + GRIP
+        after_settings()
     };
-    let tasks_left = after_pins + LIST_W + GAP;
+    let tasks_left = after_pins;
 
     let mut bars = bars().lock().unwrap();
     if bars.is_empty() {
@@ -1118,12 +1157,6 @@ pub fn refresh() {
                 BAR_H,
             )
         };
-        bar.list_rect = Some(RECT {
-            left: after_pins,
-            top: BTN_TOP,
-            right: after_pins + LIST_W,
-            bottom: BAR_H - BTN_TOP,
-        });
         let bl = layout(tasks_left, client.right, n, tray_w, bar.density);
         bar.rects = bl.rects;
         bar.overflow = bl.overflow;
@@ -1363,46 +1396,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 crate::settings_ui::toggle();
                 return LRESULT(0);
             }
-            // Menu dot opens the start menu.
-            if x < PAD + SETTINGS_W + GRIP {
+            // Start-menu entry slot. Not offered in the UI any more (see
+            // [`grip_w`]), so this only fires for a config-file opt-in — and the
+            // slot has zero width unless that opt-in is set.
+            if crate::config::current().start_menu
+                && x >= PAD + SETTINGS_W
+                && x < PAD + SETTINGS_W + grip_w()
+            {
                 crate::start_menu::toggle();
                 return LRESULT(0);
             }
             // Snapshot this bar's interactive geometry.
-            let (pin_rects, list_rect, overflow, hidden_from, hover) = {
+            let (pin_rects, overflow, hidden_from, hover) = {
                 let bars = bars().lock().unwrap();
                 match bars.iter().find(|b| b.hwnd == key) {
-                    Some(b) => (
-                        b.pin_rects.clone(),
-                        b.list_rect,
-                        b.overflow,
-                        b.hidden_from,
-                        b.hover,
-                    ),
-                    None => (Vec::new(), None, None, 0, None),
+                    Some(b) => (b.pin_rects.clone(), b.overflow, b.hidden_from, b.hover),
+                    None => (Vec::new(), None, 0, None),
                 }
             };
-            // Window-list button: popup over every task group.
-            if let Some(r) = list_rect
-                && x >= r.left
-                && x < r.right
-                && y >= r.top
-                && y < r.bottom
-            {
-                let entries: Vec<crate::task_list::Entry> = tasks()
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|t| crate::task_list::Entry {
-                        label: t.label.clone(),
-                        hwnd: t.hwnd,
-                    })
-                    .collect();
-                if let Some(target) = crate::task_list::popup(hwnd, &entries) {
-                    activate(hwnd_from(target));
-                }
-                return LRESULT(0);
-            }
             // Overflow button: popup over the tasks that did not fit.
             if let Some(r) = overflow
                 && x >= r.left
@@ -1440,6 +1451,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     .get(i)
                     .map(|t| (t.hwnd, t.members.clone()))
             });
+            tracing::debug!(?hover, task_hit = target.is_some(), "task button down");
             if let Some((target, members)) = target {
                 let fg = unsafe { GetForegroundWindow() }.0 as isize;
                 // A grouped button whose group already owns the foreground opens
@@ -1458,7 +1470,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         activate(hwnd_from(sel));
                     }
                 } else if target != 0 {
-                    activate(hwnd_from(target));
+                    toggle_or_activate(hwnd_from(target));
                 }
             }
             LRESULT(0)
@@ -1704,28 +1716,33 @@ unsafe fn paint(hwnd: HWND) {
             FillRect(hdc, &knob, hbrush(br.accent));
         }
 
-        // Brand grip: a small accent dot (the menu button), right of settings.
-        let dot = RECT {
-            left: PAD + SETTINGS_W + 3,
-            top: BAR_H / 2 - 3,
-            right: PAD + SETTINGS_W + 9,
-            bottom: BAR_H / 2 + 3,
-        };
-        FillRect(hdc, &dot, hbrush(br.accent));
+        // Start-menu entry: a small accent dot in the slot right of settings.
+        // The entry is no longer offered in the UI (see `grip_w`) — the
+        // window-list button already covers "find any window" — so this paints
+        // only for a config-file opt-in (`taskbar.menu`). The slot itself has
+        // zero width otherwise, so nothing is reserved and no dead gap remains.
+        if crate::config::current().start_menu {
+            let dot = RECT {
+                left: PAD + SETTINGS_W + 3,
+                top: BAR_H / 2 - 3,
+                right: PAD + SETTINGS_W + 9,
+                bottom: BAR_H / 2 + 3,
+            };
+            FillRect(hdc, &dot, hbrush(br.accent));
+        }
 
         let old_font = SelectObject(hdc, HGDIOBJ(font() as *mut core::ffi::c_void));
         SetBkMode(hdc, TRANSPARENT);
 
         let fg = GetForegroundWindow().0 as isize;
         let tasks = tasks().lock().unwrap();
-        let (rects, overflow, pin_rects, list_rect, hover, pin_hover, selected, density) = {
+        let (rects, overflow, pin_rects, hover, pin_hover, selected, density) = {
             let bars = bars().lock().unwrap();
             match bars.iter().find(|b| b.hwnd == hwnd.0 as isize) {
                 Some(b) => (
                     b.rects.clone(),
                     b.overflow,
                     b.pin_rects.clone(),
-                    b.list_rect,
                     b.hover,
                     b.pin_hover,
                     b.selected,
@@ -1735,7 +1752,6 @@ unsafe fn paint(hwnd: HWND) {
                     Vec::new(),
                     None,
                     Vec::new(),
-                    None,
                     None,
                     None,
                     None,
@@ -1936,21 +1952,6 @@ unsafe fn paint(hwnd: HWND) {
                 &mut tr,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
             );
-        }
-
-        // Window-list button: a three-bar "menu" glyph.
-        if let Some(r) = list_rect {
-            FillRect(hdc, &r, hbrush(br.surface));
-            let cx = (r.left + r.right) / 2;
-            for k in -1..=1 {
-                let bar = RECT {
-                    left: cx - 5,
-                    top: BAR_H / 2 + k * 4 - 1,
-                    right: cx + 5,
-                    bottom: BAR_H / 2 + k * 4 + 1,
-                };
-                FillRect(hdc, &bar, hbrush(br.accent));
-            }
         }
 
         // Notification-icon strip, sitting just left of the clock.
@@ -2385,6 +2386,41 @@ fn pin_menu(owner: HWND, index: usize) {
     }
 }
 
+/// Taskbar button left-click semantics, matching the stock shell's toggle:
+/// a window that already owns the foreground is minimized; anything else is
+/// brought to the foreground (restoring it first if it was minimized). The
+/// click itself never activates our bar (`WS_EX_NOACTIVATE`), so
+/// `GetForegroundWindow` still reports the window the user was looking at —
+/// exactly the state we need to decide the direction of the toggle.
+fn toggle_or_activate(target: HWND) {
+    // SAFETY: `target` is a live top-level window from our task list. Guard
+    // against a stale handle (window closed and the value reused) so we never
+    // minimize or foreground the wrong window.
+    unsafe {
+        if !IsWindow(Some(target)).as_bool() {
+            tracing::debug!(?target, "click: target window no longer exists");
+            return;
+        }
+        // A minimized window is never the foreground window, so the `IsIconic`
+        // guard is belt-and-braces: it keeps us from minimizing an already
+        // minimized window if the two ever disagree.
+        let fg = GetForegroundWindow();
+        tracing::debug!(
+            ?target,
+            ?fg,
+            is_fg = fg == target,
+            iconic = IsIconic(target).as_bool(),
+            "task button click"
+        );
+        if fg == target && !IsIconic(target).as_bool() {
+            tracing::debug!(?target, "click: minimizing active window (toggle)");
+            let _ = ShowWindow(target, SW_MINIMIZE);
+        } else {
+            crate::win_util::force_foreground(target);
+        }
+    }
+}
+
 /// Brings `target` to the foreground, restoring it first if minimized.
 fn activate(target: HWND) {
     // SAFETY: `target` is a live top-level window from our task list. Guard
@@ -2449,9 +2485,27 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Density, GroupAction, budget, choose_anchor, density_for, digit_index, fold_needed,
-        group_label, group_menu_action, hide_pins, layout, overflows, stable_order, step_index,
+        Density, GroupAction, after_settings_for, budget, choose_anchor, density_for, digit_index,
+        fold_needed, group_label, group_menu_action, hide_pins, layout, overflows, stable_order,
+        step_index,
     };
+
+    /// The settings button must never touch whatever follows it: with the
+    /// start-menu slot off it still keeps the standard inter-button gap, and
+    /// with the slot on that width is used verbatim.
+    #[test]
+    fn after_settings_always_keeps_a_gap() {
+        assert_eq!(
+            after_settings_for(0),
+            super::PAD + super::SETTINGS_W + super::GAP,
+            "with no start-menu slot the next button keeps a full gap"
+        );
+        assert_eq!(
+            after_settings_for(super::GRIP),
+            super::PAD + super::SETTINGS_W + super::GRIP,
+            "an enabled start-menu slot is used as-is"
+        );
+    }
 
     /// Minimal task item carrying just the fields `stable_order` looks at.
     fn item(key: &str) -> super::TaskItem {

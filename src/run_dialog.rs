@@ -17,15 +17,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_WIN, RegisterHotKey, SetFocus, UnregisterHotKey, VK_ESCAPE, VK_R,
     VK_RETURN,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CallWindowProcW, CreateWindowExW, DefWindowProcW,
     ES_AUTOHSCROLL, GWLP_WNDPROC, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    IsChild, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWNORMAL,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow, WA_INACTIVE,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
-    WM_KILLFOCUS, WNDCLASS_STYLES, WNDCLASSW, WNDPROC, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    IsChild, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowTextW, ShowWindow, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WNDCLASS_STYLES,
+    WNDCLASSW, WNDPROC, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
@@ -326,24 +324,10 @@ fn run_command() {
         tracing::warn!("run dialog: empty command ignored");
         return;
     }
-    let operation = wide("open");
-    let file = wide(&cmd);
-    // SAFETY: both wide buffers outlive the call; null `parameters`/`directory`
-    // are valid for the shell `open` verb.
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(operation.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    // ShellExecuteW returns a value <= 32 to signal failure.
-    let code = result.0 as isize;
-    if code <= 32 {
-        tracing::warn!(%cmd, code, "run dialog: ShellExecuteW failed to launch command");
+    // Typed text can be anything, including a bare `explorer` — which would
+    // take the shell. `shell_launch` rewrites that case before running it.
+    if !crate::shell_launch::open(&cmd) {
+        tracing::warn!(%cmd, "run dialog: launch failed");
     } else {
         tracing::info!(%cmd, "run dialog launched command");
     }

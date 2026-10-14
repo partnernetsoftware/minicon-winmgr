@@ -133,6 +133,16 @@ pub struct Config {
     pub group_by: GroupBy,
     /// Hover thumbnail preview (`behavior.hover_preview`); off by default.
     pub hover_preview: bool,
+    /// Whether the start menu (its taskbar entry dot) is available
+    /// (`taskbar.menu`). **Off by default, and no longer offered in the UI**:
+    /// the entry was retired because the window-list button already covers
+    /// "find any window" (product decision, 2026-10-14). Retained as a
+    /// config-file / env escape hatch so the feature (Places, folder stacks,
+    /// search, recents) stays reachable without shipping a menu row.
+    pub start_menu: bool,
+    /// Pinned folders rendered as start-menu rows (`folders = a;b`); each row
+    /// expands to its children on click. Empty by default.
+    pub folders: Vec<String>,
 }
 
 impl Default for Config {
@@ -145,6 +155,8 @@ impl Default for Config {
             merge: MergeStrategy::Never,
             group_by: GroupBy::Exe,
             hover_preview: false,
+            start_menu: false,
+            folders: Vec::new(),
         }
     }
 }
@@ -237,6 +249,15 @@ fn apply(cfg: &mut Config, key: &str, value: &str) {
                 cfg.hover_preview = b;
             }
         }
+        "taskbar.menu" | "start_menu" => {
+            if let Some(b) = parse_bool(value) {
+                cfg.start_menu = b;
+            }
+        }
+        // Semicolon-separated folder list; shared with the start menu.
+        "folders" => {
+            cfg.folders = crate::folder_stack::parse_folders(value);
+        }
         _ => {}
     }
 }
@@ -296,6 +317,14 @@ fn apply_env(cfg: &mut Config) {
         && let Some(b) = parse_bool(&v)
     {
         cfg.show_tray = b;
+    }
+    if let Ok(v) = std::env::var("MINICON_START_MENU")
+        && let Some(b) = parse_bool(&v)
+    {
+        cfg.start_menu = b;
+    }
+    if let Ok(v) = std::env::var("MINICON_FOLDERS") {
+        cfg.folders = crate::folder_stack::parse_folders(&v);
     }
 }
 
@@ -606,6 +635,28 @@ theme.surface = #2C2626
         assert!(parse("taskbar.tray = yes\n").show_tray);
         // Unknown value leaves the default in place.
         assert!(parse("taskbar.tray = maybe\n").show_tray);
+    }
+
+    #[test]
+    fn start_menu_is_opt_in_and_parses_both_keys() {
+        // Off by default: the shell is taskbar-driven, the menu is opt-in.
+        assert!(!Config::default().start_menu);
+        assert!(parse("taskbar.menu = true\n").start_menu);
+        assert!(parse("start_menu = 1\n").start_menu);
+        assert!(!parse("taskbar.menu = off\n").start_menu);
+        // Unknown value leaves the default in place.
+        assert!(!parse("taskbar.menu = maybe\n").start_menu);
+    }
+
+    #[test]
+    fn folders_parse_into_deduped_paths() {
+        // Empty by default.
+        assert!(Config::default().folders.is_empty());
+        // Semicolon-separated, trimmed, duplicates dropped, order kept.
+        let cfg = parse("folders = C:\\a; D:\\b ;; C:\\a\n");
+        assert_eq!(cfg.folders, vec!["C:\\a", "D:\\b"]);
+        // An empty value clears the list rather than leaving a blank entry.
+        assert!(parse("folders =\n").folders.is_empty());
     }
 
     #[test]

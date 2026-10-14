@@ -5,29 +5,32 @@
 //! Self-contained: owns its window class and wndproc, reuses `crate::launcher`
 //! for discovery/launch. `toggle()` is called by the taskbar's brand-dot click.
 //!
-//! Layout: a borderless top-most popup holding three stacked `LISTBOX`es of the
-//! same visual style — the discovered Start Menu shortcuts (top), a `Places`
-//! navigation list (middle) and a `Power` list (bottom). Each list box is
-//! subclassed so `Enter` / `Esc` are handled without a dialog manager (the list
-//! owns keyboard focus).
+//! Layout: a borderless top-most popup holding a search `EDIT` over four
+//! stacked `LISTBOX`es of the same visual style — the discovered Start Menu
+//! shortcuts (top), a `Places` navigation list, a `最近使用` (recents) list and
+//! a `Power` list (bottom). Every control is subclassed so `Enter` / `Esc` are
+//! handled without a dialog manager (the focused control owns the keyboard, so
+//! both the search field and the list boxes need their own hooks).
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
-    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+    COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::CreateSolidBrush;
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_RETURN};
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, CreateWindowExW, DefWindowProcW, GWLP_WNDPROC, GetSystemMetrics, HMENU, IDYES,
-    IsChild, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK,
-    LBS_NOTIFY, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MessageBoxW, RegisterClassW, SM_CYSCREEN,
-    SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-    ShowWindow, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_DESTROY,
-    WM_KEYDOWN, WM_KILLFOCUS, WNDCLASS_STYLES, WNDCLASSW, WNDPROC, WS_BORDER, WS_CHILD,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WS_VSCROLL,
+    AppendMenuW, CallWindowProcW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    EN_CHANGE, ES_AUTOHSCROLL, GWLP_WNDPROC, GetCursorPos, GetSystemMetrics, GetWindowTextLengthW,
+    GetWindowTextW, HMENU, IDYES, IsChild, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL,
+    LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBS_NOTIFY, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO,
+    MF_SEPARATOR, MF_STRING, MessageBoxW, RegisterClassW, SM_CYSCREEN, SW_HIDE, SW_SHOW,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
+    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS, TrackPopupMenu,
+    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN,
+    WM_KILLFOCUS, WNDCLASS_STYLES, WNDCLASSW, WNDPROC, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::PCWSTR;
 
@@ -38,14 +41,31 @@ use crate::win_util::wide;
 const ORB_W: i32 = 320;
 const ORB_H: i32 = 440;
 const MARGIN: i32 = 6;
-/// Gap between the three stacked list boxes.
+/// Height of the search `EDIT` sitting at the very top of the popup.
+const SEARCH_H: i32 = 22;
+/// Gap between the search field and the four stacked list boxes.
 const GAP: i32 = 4;
 /// Nominal list-box row height (Win32 `LISTBOX` default item height in pixels).
 const ROW_H: i32 = 16;
+/// How many recents the `最近使用` box shows (its height is fixed to this many
+/// rows; the surplus comes out of the app box).
+const RECENT_ROWS: usize = 8;
+/// How many pinned-folder rows the layout reserves height for. Extra pins
+/// still get their rows (the box scrolls); this only bounds the box height so
+/// a long pin list cannot squeeze the app list away.
+const MAX_STACK_ROWS: usize = 6;
+/// Maximum children listed when a pinned folder expands.
+///
+/// A native popup menu cannot scroll, so a long listing runs off the screen
+/// and becomes unusable. Keep it to a scannable slice; the leading
+/// "打开此文件夹" row is the escape hatch to the full listing in Explorer.
+const MAX_STACK_ITEMS: usize = 15;
 
 const ID_LIST: u16 = 2001;
 const ID_PLACES: u16 = 2002;
 const ID_POWER: u16 = 2003;
+const ID_RECENT: u16 = 2004;
+const ID_SEARCH: u16 = 2005;
 
 const CLASS_NAME: &str = "minicon_winmgr_start_menu";
 const WINDOW_TITLE: &str = "minicon start menu";
@@ -56,19 +76,42 @@ const BG_COLOR: COLORREF = COLORREF(0x00FF_FFFF);
 // Handles are stored as `isize`; the message thread is the sole user, so this
 // is safe by construction.
 static ORB: AtomicIsize = AtomicIsize::new(0);
+static SEARCH: AtomicIsize = AtomicIsize::new(0);
 static LIST: AtomicIsize = AtomicIsize::new(0);
 static PLACES: AtomicIsize = AtomicIsize::new(0);
+static RECENT: AtomicIsize = AtomicIsize::new(0);
 static POWER: AtomicIsize = AtomicIsize::new(0);
+static ORIG_SEARCH_PROC: AtomicIsize = AtomicIsize::new(0);
 static ORIG_LIST_PROC: AtomicIsize = AtomicIsize::new(0);
 static ORIG_PLACES_PROC: AtomicIsize = AtomicIsize::new(0);
+static ORIG_RECENT_PROC: AtomicIsize = AtomicIsize::new(0);
 static ORIG_POWER_PROC: AtomicIsize = AtomicIsize::new(0);
 static VISIBLE: AtomicBool = AtomicBool::new(false);
-/// Whether the shortcut/place/power lists have been discovered and pushed into
-/// the list boxes.
+/// Whether the shortcut/place/recents/power lists have been discovered and
+/// pushed into the list boxes.
 static LOADED: AtomicBool = AtomicBool::new(false);
 
-/// Discovered Start Menu shortcuts, in list-box row order.
+/// The app rows currently shown, in list-box row order (so a row index can be
+/// mapped back to its shortcut path when a search is active).
 static ITEMS: Mutex<Vec<Shortcut>> = Mutex::new(Vec::new());
+/// The `最近使用` rows currently shown, in list-box row order. Read once per
+/// `show()` (from [`crate::recents`]) — never per keystroke.
+static RECENT_ITEMS: Mutex<Vec<Shortcut>> = Mutex::new(Vec::new());
+
+/// The full discovered shortcut set, cached for the process lifetime. Read-only
+/// after the first call, so it needs no lock (avoids holding one across the
+/// `recents` file IO in `search_ranked`).
+fn all_items() -> &'static [Shortcut] {
+    static ALL: OnceLock<Vec<Shortcut>> = OnceLock::new();
+    ALL.get_or_init(|| {
+        let found = crate::launcher::discover_shortcuts();
+        tracing::info!(
+            count = found.len(),
+            "start menu indexed Start Menu shortcuts"
+        );
+        found
+    })
+}
 
 // --- pure data models (unit-testable, no Win32) ---------------------------
 
@@ -109,6 +152,20 @@ pub fn places() -> &'static [Place] {
         },
     ];
     PLACES
+}
+
+/// The pinned folder rows, in pin order (labels from the last path segment).
+///
+/// Reads the live configuration, so it reflects the `folders = a;b` value from
+/// either config file.
+fn pinned_entries() -> Vec<crate::folder_stack::StackEntry> {
+    crate::folder_stack::entries(&crate::config::current().folders)
+}
+
+/// Rows the places list box reserves height for: the fixed places plus the
+/// pinned folders, the folder part capped by [`MAX_STACK_ROWS`].
+fn place_row_count() -> usize {
+    places().len() + pinned_entries().len().min(MAX_STACK_ROWS)
 }
 
 /// A concrete power transition. Kept separate from the label so execution and
@@ -176,33 +233,136 @@ struct Rect {
     h: i32,
 }
 
-/// Computes the stacked layout of [apps, places, power] list boxes inside a
-/// popup `orb_h` pixels tall. Pure so it can be unit-tested.
-fn list_layout(orb_h: i32) -> [Rect; 3] {
-    let w = ORB_W - 2 * MARGIN;
-    let places_h = places().len() as i32 * ROW_H;
-    let power_h = power_actions().len() as i32 * ROW_H;
-    let apps_h = (orb_h - 2 * MARGIN - places_h - power_h - 2 * GAP).max(0);
-
-    let apps = Rect {
+/// The search field spans the top margin, directly above the app list.
+fn search_rect() -> Rect {
+    Rect {
         x: MARGIN,
         y: MARGIN,
+        w: ORB_W - 2 * MARGIN,
+        h: SEARCH_H,
+    }
+}
+
+/// Computes the stacked layout of [apps, places, recent, power] list boxes
+/// inside a popup `orb_h` pixels tall, below the search field. `place_rows` is
+/// the number of rows the places box reserves (fixed places plus pinned
+/// folders). Pure so it can be unit-tested.
+fn list_layout(orb_h: i32, place_rows: usize) -> [Rect; 4] {
+    let w = ORB_W - 2 * MARGIN;
+    let places_h = place_rows as i32 * ROW_H;
+    let recent_h = RECENT_ROWS as i32 * ROW_H;
+    let power_h = power_actions().len() as i32 * ROW_H;
+    // The five stacked controls leave four gaps; the search field also eats its
+    // own height off the top. Whatever is left belongs to the app list.
+    let apps_h = (orb_h - 2 * MARGIN - SEARCH_H - 4 * GAP - places_h - recent_h - power_h).max(0);
+
+    let apps_y = MARGIN + SEARCH_H + GAP;
+    let apps = Rect {
+        x: MARGIN,
+        y: apps_y,
         w,
         h: apps_h,
     };
     let places = Rect {
         x: MARGIN,
-        y: MARGIN + apps_h + GAP,
+        y: apps_y + apps_h + GAP,
         w,
         h: places_h,
     };
+    let recent = Rect {
+        x: MARGIN,
+        y: places.y + places_h + GAP,
+        w,
+        h: recent_h,
+    };
     let power = Rect {
         x: MARGIN,
-        y: MARGIN + apps_h + GAP + places_h + GAP,
+        y: recent.y + recent_h + GAP,
         w,
         h: power_h,
     };
-    [apps, places, power]
+    [apps, places, recent, power]
+}
+
+/// Case-insensitive substring match used by the search box. An empty (or
+/// whitespace-only) `query` matches everything; both sides are trimmed.
+///
+/// Deliberately *literal*: this is the predictable gate for typed input, and
+/// the fuzzy scorer in [`crate::launcher`] is kept as a fallback for queries
+/// that are only a loose subsequence.
+fn matches(query: &str, name: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let needle = query.to_lowercase();
+    name.trim().to_lowercase().contains(needle.as_str())
+}
+
+/// The first `limit` entries of `entries`, preserving order. `limit == 0`
+/// yields nothing. Pure so it can be unit-tested.
+fn recent_rows(entries: &[String], limit: usize) -> Vec<String> {
+    entries.iter().take(limit).cloned().collect()
+}
+
+/// Display name for a recent `path`: the matching shortcut's name when the app
+/// is still discovered, otherwise the bare file name.
+fn resolve_name(all: &[Shortcut], path: &str) -> String {
+    all.iter()
+        .find(|s| s.path == path)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| {
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.to_owned())
+                .unwrap_or_else(|| path.to_owned())
+        })
+}
+
+/// Rows for the app list under `query`. Ordering is the launcher's (its default
+/// most-used ranking for an empty query, fuzzy relevance otherwise); the
+/// literal substring hits ([`matches`]) are lifted ahead of the fuzzy-only ones
+/// so an obvious prefix always leads, while loose subsequence matches
+/// ("vsc" → "Visual Studio Code") stay reachable below.
+fn app_rows(all: &[Shortcut], query: &str) -> Vec<Shortcut> {
+    let mut literal: Vec<Shortcut> = Vec::new();
+    let mut fuzzy: Vec<Shortcut> = Vec::new();
+    for s in crate::launcher::search_ranked(all, query, all.len()) {
+        let row = Shortcut {
+            name: s.name.clone(),
+            path: s.path.clone(),
+        };
+        if matches(query, &s.name) {
+            literal.push(row);
+        } else {
+            fuzzy.push(row);
+        }
+    }
+    literal.extend(fuzzy);
+    literal
+}
+
+/// Rows for the `最近使用` list box: the most-launched recents first, each
+/// resolved to its shortcut name (falling back to the bare file name when the
+/// shortcut is gone), capped at `limit`. Pure apart from nothing — takes the
+/// already-loaded stats so no file IO happens under a lock.
+fn recent_entries(all: &[Shortcut], stats: &[(String, u32)], limit: usize) -> Vec<Shortcut> {
+    // `recents` records launch counts, not timestamps, so "recent" is read as
+    // "most-used" — the same order the empty-query app list uses.
+    let mut ordered: Vec<&(String, u32)> = stats.iter().collect();
+    // Stable sort: equal counts keep their original (file) order.
+    ordered.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+    let rows: Vec<Shortcut> = ordered
+        .into_iter()
+        .map(|(path, _)| Shortcut {
+            name: resolve_name(all, path),
+            path: path.clone(),
+        })
+        .collect();
+    let labels: Vec<String> = rows.iter().map(|s| s.name.clone()).collect();
+    let labels = recent_rows(&labels, limit);
+    rows.into_iter().take(labels.len()).collect()
 }
 
 // --- handle helpers -------------------------------------------------------
@@ -215,12 +375,20 @@ fn orb() -> Option<HWND> {
     existing(&ORB)
 }
 
+fn search_field() -> Option<HWND> {
+    existing(&SEARCH)
+}
+
 fn list() -> Option<HWND> {
     existing(&LIST)
 }
 
 fn places_list() -> Option<HWND> {
     existing(&PLACES)
+}
+
+fn recent_list() -> Option<HWND> {
+    existing(&RECENT)
 }
 
 fn power_list() -> Option<HWND> {
@@ -232,11 +400,12 @@ fn existing(slot: &AtomicIsize) -> Option<HWND> {
     (raw != 0).then(|| hwnd_from(raw))
 }
 
-/// Which of the three stacked list boxes `hwnd` is, if any.
+/// Which of the four stacked list boxes `hwnd` is, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ListKind {
     Apps,
     Places,
+    Recent,
     Power,
 }
 
@@ -245,6 +414,8 @@ fn list_kind(hwnd: HWND) -> Option<ListKind> {
         Some(ListKind::Apps)
     } else if places_list() == Some(hwnd) {
         Some(ListKind::Places)
+    } else if recent_list() == Some(hwnd) {
+        Some(ListKind::Recent)
     } else if power_list() == Some(hwnd) {
         Some(ListKind::Power)
     } else {
@@ -257,6 +428,7 @@ fn orig_proc_for(hwnd: HWND) -> isize {
     match list_kind(hwnd) {
         Some(ListKind::Apps) => ORIG_LIST_PROC.load(Ordering::SeqCst),
         Some(ListKind::Places) => ORIG_PLACES_PROC.load(Ordering::SeqCst),
+        Some(ListKind::Recent) => ORIG_RECENT_PROC.load(Ordering::SeqCst),
         Some(ListKind::Power) => ORIG_POWER_PROC.load(Ordering::SeqCst),
         None => 0,
     }
@@ -266,6 +438,13 @@ fn orig_proc_for(hwnd: HWND) -> isize {
 /// `Vec` with no invariants a panic could break).
 fn items_guard() -> std::sync::MutexGuard<'static, Vec<Shortcut>> {
     ITEMS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Locks the recents-row cache; see [`items_guard`].
+fn recent_guard() -> std::sync::MutexGuard<'static, Vec<Shortcut>> {
+    RECENT_ITEMS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -349,11 +528,22 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         )?;
         ORB.store(hwnd.0 as isize, Ordering::SeqCst);
 
-        // Three uniformly styled list boxes: apps (top), places, power (bottom).
-        let rects = list_layout(ORB_H);
-        let ids = [ID_LIST, ID_PLACES, ID_POWER];
-        let slots = [&LIST, &PLACES, &POWER];
-        let orig_slots = [&ORIG_LIST_PROC, &ORIG_PLACES_PROC, &ORIG_POWER_PROC];
+        // Search field at the very top: typing filters the app list below.
+        let edit = create_edit(hwnd, hinstance, search_rect())?;
+        SEARCH.store(edit.0 as isize, Ordering::SeqCst);
+        let previous_edit = subclass_edit(edit);
+        ORIG_SEARCH_PROC.store(previous_edit, Ordering::SeqCst);
+
+        // Four uniformly styled list boxes: apps (top), places, recents, power.
+        let rects = list_layout(ORB_H, place_row_count());
+        let ids = [ID_LIST, ID_PLACES, ID_RECENT, ID_POWER];
+        let slots = [&LIST, &PLACES, &RECENT, &POWER];
+        let orig_slots = [
+            &ORIG_LIST_PROC,
+            &ORIG_PLACES_PROC,
+            &ORIG_RECENT_PROC,
+            &ORIG_POWER_PROC,
+        ];
         for i in 0..slots.len() {
             let child = create_listbox(hwnd, hinstance, ids[i], rects[i])?;
             slots[i].store(child.0 as isize, Ordering::SeqCst);
@@ -413,6 +603,48 @@ unsafe fn subclass_list(hwnd: HWND) -> isize {
     unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, addr as usize as isize) }
 }
 
+/// Creates the search `EDIT` child at `rect` (single-line, scrolling).
+///
+/// # Safety
+/// `parent`/`hinstance` must be live objects; the returned handle is owned by
+/// the parent window.
+unsafe fn create_edit(
+    parent: HWND,
+    hinstance: HINSTANCE,
+    rect: Rect,
+) -> windows::core::Result<HWND> {
+    let edit_class = wide("EDIT");
+    let no_text = wide("");
+    // SAFETY: buffers outlive the call; `parent` is our live popup.
+    unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR(edit_class.as_ptr()),
+            PCWSTR(no_text.as_ptr()),
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32),
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            Some(parent),
+            Some(HMENU(ID_SEARCH as isize as *mut core::ffi::c_void)),
+            Some(hinstance),
+            None,
+        )
+    }
+}
+
+/// Installs `search_proc` as `hwnd`'s window procedure, returning the previous
+/// one (0 on failure).
+///
+/// # Safety
+/// `hwnd` must be a live window that accepts `GWLP_WNDPROC`.
+unsafe fn subclass_edit(hwnd: HWND) -> isize {
+    let addr = search_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+    // SAFETY: `addr` is a valid `extern "system"` wndproc.
+    unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, addr as usize as isize) }
+}
+
 /// Screen-space origin: left-aligned, nudged up from the bottom edge (where
 /// the ORB / brand dot sits). Pure so it can be unit-tested.
 fn anchor_origin_for(screen_h: i32, win_h: i32) -> (i32, i32) {
@@ -461,48 +693,121 @@ unsafe fn fill_list<'a>(list: HWND, labels: impl IntoIterator<Item = &'a str>) {
     }
 }
 
-/// Discovers shortcuts on first use and pushes app/place/power rows into the
-/// list boxes.
+/// Discovers shortcuts on first use and pushes app/place/recents/power rows
+/// into the list boxes. Called once per process (guarded by [`LOADED`]).
 fn ensure_items() {
     if LOADED.load(Ordering::SeqCst) {
         return;
     }
-    let all = crate::launcher::discover_shortcuts();
+    let all = all_items();
     // Show the most-used apps first (empty query ranks by launch frequency).
-    let found: Vec<crate::launcher::Shortcut> = crate::launcher::search_ranked(&all, "", all.len())
-        .into_iter()
-        .map(|s| crate::launcher::Shortcut {
-            name: s.name.clone(),
-            path: s.path.clone(),
-        })
-        .collect();
+    let found = app_rows(all, "");
+    // Recents are file IO; read them here, once, with no lock held. We re-read
+    // them (rather than reusing the ranking above) so we can fall back to bare
+    // file names for recently launched apps whose shortcut has since vanished.
+    let stats = crate::recents::load();
+    let recent = recent_entries(all, &stats, RECENT_ROWS);
     tracing::info!(
         count = found.len(),
+        recent = recent.len(),
         places = places().len(),
+        pinned = pinned_entries().len(),
         power = power_actions().len(),
         "start menu indexed shortcuts and built fixed sections"
     );
-    // SAFETY: all three handles are our live list boxes.
+    // SAFETY: all four handles are our live list boxes.
     unsafe {
         if let Some(list) = list() {
             fill_list(list, found.iter().map(|s| s.name.as_str()));
         }
         if let Some(places_box) = places_list() {
-            fill_list(places_box, places().iter().map(|p| p.label));
+            // Fixed places first, then the pinned folders (which expand on
+            // click); row indices line up with `activate_place`.
+            let labels: Vec<String> = places()
+                .iter()
+                .map(|p| p.label.to_string())
+                .chain(pinned_entries().into_iter().map(|e| e.label))
+                .collect();
+            fill_list(places_box, labels.iter().map(String::as_str));
+        }
+        if let Some(recent_box) = recent_list() {
+            fill_list(recent_box, recent.iter().map(|s| s.name.as_str()));
         }
         if let Some(power_box) = power_list() {
             fill_list(power_box, power_actions().iter().map(|a| a.label));
         }
     }
     *items_guard() = found;
+    *recent_guard() = recent;
     LOADED.store(true, Ordering::SeqCst);
 }
 
-/// Shows the popup, selects the first entry, and focuses the apps list.
+/// Reads the current search-field text (empty when unavailable).
+fn read_search_text() -> String {
+    let Some(edit) = search_field() else {
+        return String::new();
+    };
+    // SAFETY: `edit` is our live control; `buf` is sized from the control.
+    unsafe {
+        let len = GetWindowTextLengthW(edit);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let copied = GetWindowTextW(edit, &mut buf);
+        if copied <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buf[..copied as usize])
+    }
+}
+
+/// Re-filters the app list for the current search text and repopulates it.
+fn refresh_apps() {
+    let Some(list) = list() else { return };
+    let query = read_search_text();
+    // `all_items` is lock-free, so the launcher's file IO (empty-query ranking)
+    // never runs while holding a lock.
+    let rows = app_rows(all_items(), &query);
+    let count = rows.len();
+    // SAFETY: `list` is our live list box; strings are copied by the control.
+    unsafe {
+        fill_list(list, rows.iter().map(|s| s.name.as_str()));
+        if count > 0 {
+            SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
+        }
+    }
+    *items_guard() = rows;
+    tracing::debug!(count, %query, "start menu app list filtered");
+}
+
+/// Moves keyboard focus to the app list so its arrow keys scroll the results.
+fn focus_apps() {
+    let Some(list) = list() else { return };
+    // SAFETY: `list` is our live list box.
+    unsafe {
+        let count = SendMessageW(list, LB_GETCOUNT, None, None).0 as i32;
+        if count > 0 && selected_index(list) < 0 {
+            SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
+        }
+        let _ = SetFocus(Some(list));
+    }
+}
+
+/// Shows the popup, clears the search field, and focuses it so the user can
+/// start typing immediately. Row 0 of the app list is preselected.
 fn show() {
     let Some(hwnd) = orb() else { return };
     ensure_items();
-    // SAFETY: `hwnd`/`list` are our live windows.
+    // Clearing the field (empty already on the first show) resets the app list.
+    if let Some(edit) = search_field() {
+        let empty = wide("");
+        // SAFETY: `empty` outlives the call; `edit` is our live control.
+        unsafe {
+            let _ = SetWindowTextW(edit, PCWSTR(empty.as_ptr()));
+        }
+    }
+    // SAFETY: `hwnd`/`list`/`edit` are our live windows.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
@@ -511,7 +816,9 @@ fn show() {
             if count > 0 {
                 SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
             }
-            let _ = SetFocus(Some(list));
+        }
+        if let Some(edit) = search_field() {
+            let _ = SetFocus(Some(edit));
         }
     }
     VISIBLE.store(true, Ordering::SeqCst);
@@ -561,43 +868,111 @@ fn launch_selected() {
 /// Opens `target` via `ShellExecuteW` (`open` verb). Returns `false` when the
 /// shell reports an error (return value <= 32).
 fn open_target(target: &str) -> bool {
-    let operation = wide("open");
-    let file = wide(target);
-    // SAFETY: both wide buffers outlive the call; null `parameters`/`directory`
-    // are valid for the shell `open` verb.
-    unsafe {
-        let result = ShellExecuteW(
-            None,
-            PCWSTR(operation.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
-        result.0 as isize > 32
+    // Every place is a folder, i.e. an Explorer job. Going through
+    // `shell_launch` guarantees Explorer receives an argument and therefore
+    // stays a file browser instead of claiming the shell.
+    crate::shell_launch::open(target)
+}
+
+/// Activates the `Places` row at `index`: a fixed place opens directly, a
+/// pinned folder expands into a popup of its children.
+fn activate_place(index: i32) {
+    if let Some(place) = place_at(index) {
+        if open_target(place.target) {
+            tracing::info!(
+                label = place.label,
+                target = place.target,
+                "start menu opened place"
+            );
+        } else {
+            tracing::warn!(
+                label = place.label,
+                target = place.target,
+                "start menu open place failed"
+            );
+        }
+        hide();
+        return;
+    }
+    if index < 0 {
+        tracing::debug!("start menu: no place selected");
+        return;
+    }
+    // Rows past the fixed places are the pinned folders.
+    match pinned_entries().get(index as usize - places().len()) {
+        Some(entry) => {
+            let entry = entry.clone();
+            show_stack_menu(&entry);
+            hide();
+        }
+        None => tracing::debug!("start menu: no place selected"),
     }
 }
 
-/// Opens the `Places` entry at `index` and hides the menu.
-fn activate_place(index: i32) {
-    let Some(place) = place_at(index) else {
-        tracing::debug!("start menu: no place selected");
+/// Menu flags for the folder popup (kept as a fn so tests can assert them).
+fn stack_menu_flags() -> u32 {
+    (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN).0
+}
+
+/// Expands a pinned folder into a popup listing its children.
+///
+/// Row 1 opens the folder itself; the following rows open each child. The
+/// listing is capped by [`MAX_STACK_ITEMS`] so a huge folder cannot stall the
+/// message thread, and every path goes through `folder_stack::open` — i.e. the
+/// shell-safe launcher, because a bare `explorer.exe` would steal the shell.
+fn show_stack_menu(entry: &crate::folder_stack::StackEntry) {
+    let Some(anchor) = orb() else {
+        tracing::debug!("stack menu: no anchor window");
         return;
     };
-    if open_target(place.target) {
-        tracing::info!(
-            label = place.label,
-            target = place.target,
-            "start menu opened place"
+    let children = crate::folder_stack::list_dir(&entry.path, MAX_STACK_ITEMS);
+    tracing::debug!(path = %entry.path, children = children.len(), "stack menu shown");
+    // SAFETY: the menu and every `wide` buffer live only for this call; the
+    // menu is destroyed before returning, and `anchor` is our live popup.
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            tracing::warn!(path = %entry.path, "stack menu: CreatePopupMenu failed");
+            return;
+        };
+        let open_label = wide("打开此文件夹");
+        let _ = AppendMenuW(menu, MF_STRING, 1, PCWSTR(open_label.as_ptr()));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        for (i, child) in children.iter().enumerate() {
+            let label = wide(&child.label);
+            // Ids are 1-based with 1 taken by "open", so children start at 2.
+            let _ = AppendMenuW(menu, MF_STRING, i + 2, PCWSTR(label.as_ptr()));
+        }
+
+        // Anchor at the cursor, matching the overflow menu's behaviour.
+        let mut pt = POINT::default();
+        let (x, y) = match GetCursorPos(&mut pt) {
+            Ok(()) => (pt.x, pt.y),
+            Err(_) => (0, 0),
+        };
+        // Required so the popup dismisses when clicking elsewhere.
+        let _ = SetForegroundWindow(anchor);
+        let cmd = TrackPopupMenu(
+            menu,
+            TRACK_POPUP_MENU_FLAGS(stack_menu_flags()),
+            x,
+            y,
+            Some(0),
+            anchor,
+            None,
         );
-    } else {
-        tracing::warn!(
-            label = place.label,
-            target = place.target,
-            "start menu open place failed"
-        );
+        // SAFETY: `menu` is no longer referenced after this point.
+        let _ = DestroyMenu(menu);
+
+        let id = cmd.0;
+        if id == 1 {
+            crate::folder_stack::open(&entry.path);
+            tracing::info!(path = %entry.path, "stack menu opened folder");
+        } else if id >= 2 && (id as usize) <= children.len() + 1 {
+            let child = &children[id as usize - 2];
+            crate::folder_stack::open(&child.path);
+            tracing::info!(path = %child.path, label = %child.label, "stack menu opened child");
+        }
     }
-    hide();
 }
 
 /// Opens whatever `Places` row is selected in the places list box.
@@ -674,6 +1049,28 @@ fn activate_selected_power() {
     activate_power(index);
 }
 
+/// Launches the `最近使用` row at `index` (via the launcher's shell-safe path,
+/// which also records the launch for future ranking) and hides the menu.
+fn activate_selected_recent() {
+    let Some(list) = recent_list() else { return };
+    // SAFETY: `list` is our live recents list box.
+    let index = unsafe { selected_index(list) };
+    if index < 0 {
+        tracing::debug!("start menu: no recent selected");
+        return;
+    }
+    let path = recent_guard().get(index as usize).map(|s| s.path.clone());
+    let Some(path) = path else {
+        tracing::debug!("start menu: no recent selected");
+        return;
+    };
+    match crate::launcher::launch(&path) {
+        Ok(()) => tracing::info!(%path, "start menu launched recent"),
+        Err(err) => tracing::warn!(%path, %err, "start menu recent launch failed"),
+    }
+    hide();
+}
+
 /// Whether `new_focus` (the `WM_KILLFOCUS` wParam) lies outside the popup.
 fn focus_left_popup(new_focus: isize) -> bool {
     if new_focus == 0 {
@@ -690,10 +1087,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as u16;
             let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
-            if code == LBN_DBLCLK {
+            if id == ID_SEARCH && code == EN_CHANGE {
+                // The search box changed: refilter the app list.
+                refresh_apps();
+            } else if code == LBN_DBLCLK {
                 match id {
                     ID_LIST => launch_selected(),
                     ID_PLACES => activate_selected_place(),
+                    ID_RECENT => activate_selected_recent(),
                     ID_POWER => activate_selected_power(),
                     _ => {}
                 }
@@ -715,11 +1116,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             ORB.store(0, Ordering::SeqCst);
+            SEARCH.store(0, Ordering::SeqCst);
             LIST.store(0, Ordering::SeqCst);
             PLACES.store(0, Ordering::SeqCst);
+            RECENT.store(0, Ordering::SeqCst);
             POWER.store(0, Ordering::SeqCst);
+            ORIG_SEARCH_PROC.store(0, Ordering::SeqCst);
             ORIG_LIST_PROC.store(0, Ordering::SeqCst);
             ORIG_PLACES_PROC.store(0, Ordering::SeqCst);
+            ORIG_RECENT_PROC.store(0, Ordering::SeqCst);
             ORIG_POWER_PROC.store(0, Ordering::SeqCst);
             VISIBLE.store(false, Ordering::SeqCst);
             LOADED.store(false, Ordering::SeqCst);
@@ -730,7 +1135,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-/// Subclass procedure for the three list boxes: maps Enter/Esc to the right
+/// Subclass procedure for the four list boxes: maps Enter/Esc to the right
 /// menu action (chosen by which list received the key) and delegates everything
 /// else to the original `LISTBOX` procedure.
 unsafe extern "system" fn list_proc(
@@ -746,6 +1151,7 @@ unsafe extern "system" fn list_proc(
                 match list_kind(hwnd) {
                     Some(ListKind::Apps) => launch_selected(),
                     Some(ListKind::Places) => activate_selected_place(),
+                    Some(ListKind::Recent) => activate_selected_recent(),
                     Some(ListKind::Power) => activate_selected_power(),
                     None => {}
                 }
@@ -761,6 +1167,46 @@ unsafe extern "system" fn list_proc(
     }
 
     let previous = orig_proc_for(hwnd);
+    if previous == 0 {
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    }
+    // SAFETY: `previous` is the `WNDPROC` returned by `SetWindowLongPtrW`.
+    let original: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(previous) };
+    unsafe { CallWindowProcW(original, hwnd, msg, wparam, lparam) }
+}
+
+/// Subclass procedure for the search field. The `EDIT` swallows key events, so
+/// the popup's own `WM_KEYDOWN` never sees them — Enter/Esc/Down/Up have to be
+/// intercepted here, on the control that actually owns the keyboard focus.
+unsafe extern "system" fn search_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_KEYDOWN => {
+            let key = wparam.0 as u16;
+            if key == VK_RETURN.0 {
+                launch_selected();
+                return LRESULT(0);
+            }
+            if key == VK_ESCAPE.0 {
+                hide();
+                return LRESULT(0);
+            }
+            if key == VK_DOWN.0 || key == VK_UP.0 {
+                // Hand the arrow keys to the app list; the native list box then
+                // moves its own selection on subsequent presses.
+                focus_apps();
+                return LRESULT(0);
+            }
+        }
+        WM_KILLFOCUS if visible() && focus_left_popup(wparam.0 as isize) => hide(),
+        _ => {}
+    }
+
+    let previous = ORIG_SEARCH_PROC.load(Ordering::SeqCst);
     if previous == 0 {
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
     }
@@ -867,17 +1313,79 @@ mod tests {
     }
 
     #[test]
-    fn list_layout_stacks_three_boxes_without_overlap() {
-        let [apps, places, power] = list_layout(ORB_H);
-        // Apps starts at the margin and places/power follow with GAP between.
+    fn list_layout_stacks_four_boxes_without_overlap() {
+        let [apps, places, recent, power] = list_layout(ORB_H, places().len());
+        // Apps starts below the search field; the rest follow with GAP between.
         assert_eq!(apps.x, MARGIN);
-        assert_eq!(apps.y, MARGIN);
+        assert_eq!(apps.y, MARGIN + SEARCH_H + GAP);
         assert_eq!(places.y, apps.y + apps.h + GAP);
-        assert_eq!(power.y, places.y + places.h + GAP);
-        // Everything fits inside the popup.
+        assert_eq!(recent.y, places.y + places.h + GAP);
+        assert_eq!(power.y, recent.y + recent.h + GAP);
+        // Every box sits strictly below the one above it and inside the popup.
+        assert!(apps.y + apps.h <= places.y);
+        assert!(places.y + places.h <= recent.y);
+        assert!(recent.y + recent.h <= power.y);
         assert!(power.y + power.h <= ORB_H - MARGIN);
+        // The search field clears the app box and stays inside the popup.
+        let search = search_rect();
+        assert!(search.y + search.h <= apps.y);
+        assert_eq!(search.w, ORB_W - 2 * MARGIN);
         // Widths match and are positive.
         assert_eq!(apps.w, ORB_W - 2 * MARGIN);
-        assert!(apps.h > 0 && places.h > 0 && power.h > 0);
+        assert!(apps.h > 0 && places.h > 0 && recent.h > 0 && power.h > 0);
+        assert_eq!(recent.h, RECENT_ROWS as i32 * ROW_H);
+    }
+
+    #[test]
+    fn pinned_rows_borrow_height_from_the_app_box() {
+        let [apps, ..] = list_layout(ORB_H, places().len());
+        let [apps_pinned, places_pinned, recent_pinned, power_pinned] =
+            list_layout(ORB_H, places().len() + MAX_STACK_ROWS);
+        // The extra folder rows come out of the app box...
+        assert!(apps_pinned.h < apps.h);
+        // ...but every box still fits (and stays positive) inside the popup.
+        assert!(apps_pinned.h > 0 && places_pinned.h > 0 && recent_pinned.h > 0);
+        assert!(power_pinned.h > 0);
+        assert!(power_pinned.y + power_pinned.h <= ORB_H - MARGIN);
+    }
+
+    #[test]
+    fn matches_is_case_insensitive_substring() {
+        assert!(matches("code", "Visual Studio Code"));
+        assert!(matches("CODE", "Visual Studio Code"));
+        assert!(matches("studio", "Visual Studio Code"));
+        // Substring only: "vsc" is a fuzzy subsequence but not a literal one.
+        assert!(!matches("vsc", "Visual Studio Code"));
+        assert!(!matches("zzz", "Visual Studio Code"));
+    }
+
+    #[test]
+    fn matches_empty_query_is_true_and_trims_both_sides() {
+        assert!(matches("", "Anything"));
+        assert!(matches("   ", "Anything"));
+        assert!(matches("  code  ", "  Visual Studio Code "));
+        assert!(!matches("   zzz  ", "  Visual Studio Code "));
+    }
+
+    #[test]
+    fn recent_rows_truncates_and_keeps_order() {
+        let entries: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            recent_rows(&entries, 2),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(recent_rows(&entries, 10), entries);
+        assert!(recent_rows(&entries, 0).is_empty());
+    }
+
+    #[test]
+    fn recent_rows_zero_limit_is_empty() {
+        let entries = vec!["only".to_string()];
+        assert!(recent_rows(&entries, 0).is_empty());
+    }
+
+    #[test]
+    fn stack_menu_flags_include_return_cmd() {
+        assert_ne!(stack_menu_flags() & TPM_RETURNCMD.0, 0);
     }
 }

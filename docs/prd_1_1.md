@@ -14,11 +14,11 @@
 - ✅ **溢出自适应**：窗口多到放不下时显示 `N 可见 + » 折叠`，时钟区永不被覆盖；点 `»` 弹出未显示窗口。合并档下点组按钮：若组内窗口已在前台则弹出成员列表，否则切回锚窗口。
 - ✅ **即时刷新**：`src/window_events.rs` 用 `SetWinEventHook`（create/destroy/show/hide/foreground/minimize，去抖 120ms）
   驱动刷新——关闭窗口后按钮立刻消失，不必等 30s 心跳；菜单动作后也立即 `refresh()`。
-- ✅ 左键切换窗口（最小化先还原）；右键窗口菜单（还原/最小化/最大化/关闭 + **添加到快速启动 / 从快速启动移除**，取不到 exe 或已满则置灰）。**分组按钮（组内 >1 窗口）**右键弹批量菜单：打开组内全部 / 全部还原 / 全部最小化 / 全部关闭 / 添加到快速启动。
+- ✅ 左键切换窗口（**激活↔最小化**：已是前台则最小化，否则还原并置前台）；右键窗口菜单（还原/最小化/最大化/关闭 + **添加到快速启动 / 从快速启动移除**，取不到 exe 或已满则置灰）。**分组按钮（组内 >1 窗口）**右键弹批量菜单：打开组内全部 / 全部还原 / 全部最小化 / 全部关闭 / 添加到快速启动。
 - ✅ 键盘导航：**Alt+`** 唤出并聚焦，←/→ 选择、Enter 切换、Esc 取消（环绕逻辑有单测）；进入导航后 **`1..9` 直跳**第 n 个可见按钮（`digit_index`）。
 - ✅ icon-only 悬停标题气泡：`src/bar_tip.rs`（常驻 `WS_POPUP`，无新线程），仅 icon-only 按钮出气泡；Full/Compact 档维持原 opt-in 缩略图预览。
 - ✅ 快速启动：`src/quick_launch.rs`，**用户手动钉住**的应用（右键窗口菜单加入），持久化在 exe 旁 `quick-launch.txt`（`label<TAB>path`，可 `MINICON_QUICKLAUNCH_FILE` 覆盖），上限 **8**（常量 `MAX_PINS`）。图标取自 exe；取不到则显示首字。左键启动、右键"打开/移除"。
-- ✅ 列表按钮：`src/task_list.rs`，弹出全部分组窗口菜单，选中即切换。
+- ⛔ 列表按钮（≡）**已于 2026-10-14 退役**（业主指示，任务区左侧不再有该按钮）。`src/task_list.rs` 模块保留——`»` 溢出按钮与分组按钮仍用它弹窗，弹出分组窗口菜单、选中即切换。
 - ✅ 设置入口：最左"滑杆"按钮 → `src/settings_ui.rs`。
 - ✅ 右侧只读区：**仅时钟**（`yy-mm-dd HH:MM`，5s 定时器保证准点）+ 其左侧通知图标条（可经 `taskbar.tray` 关闭）。**双击时钟**打开系统日期/时间设置（`ShellExecuteW` → `control.exe timedate.cpl`，与系统托盘时钟双击一致）；交互细节与降级注记见 [`prd_4_1.md`](prd_4_1.md) §4。
 - ✅ 多显示器：每屏一栏，任务列表共享，布局/hover/键盘光标按栏独立。
@@ -35,7 +35,9 @@
 ## 程序菜单 / 启动器
 - ✅ 启动器检索：`src/launcher.rs`（`--launch` / `--launch-run` CLI；`launch` 会写 recents）。
 - ✅ 启动器 UI：`src/launcher_ui.rs`，**Alt+Space** 弹窗，按频次排序（`recents`）。
-- ✅ 主菜单（ORB）：`src/start_menu.rs`，品牌点唤出；**应用列表 + Places（计算机/文档/下载/图片/设置）+ 电源（注销/重启/关机，默认"否"确认）**。
+- ✅ 主菜单（ORB）：`src/start_menu.rs`，**应用列表 + Places（计算机/文档/下载/图片/设置）+ 电源（注销/重启/关机，默认"否"确认）**。
+  **入口已从 UI 退役**（2026-10-14，任务栏上不再有那个点），功能仍可用配置键
+  `taskbar.menu = true` / env `MINICON_START_MENU=1` 唤回。
 - ⬜ 菜单内"最近使用"专区、拖拽整理分类。
 
 ## 运行对话框
@@ -74,6 +76,9 @@
   （`EnumWindows` 找 `Shell_TrayWnd`/`Shell_SecondaryTrayWnd`/`Progman` → `WM_CLOSE` → 超时 `TerminateProcess`）；
   归还时按 exe 旁 `shell-backup.txt` 恢复注册表并**脱附**重启 `explorer.exe`。
   仅作用于当前会话桌面，**无备份记录时拒绝归还**。细节与不变量见 [`prd_3_1.md`](prd_3_1.md) §1b、[`prd_2_1.md`](prd_2_1.md) §5.10–12。
+- ✅ **外壳身份保护**：`src/shell_launch.rs` —— 唯一的"打开"出口。`explorer.exe` **不带参数** = 当外壳（夺权），
+  **带参数** = 文件浏览器；故 quick-launch 钉 / 开始菜单 Places / Run 对话框 / launcher 全部经 `plan()` 改写后再启动。
+  `shell_swap::check_foreign_shell()` 在心跳里**只检测**（跳变时记一条日志）不自动夺回。见 [`prd_2_1.md`](prd_2_1.md) §5.13–15。
 
 ---
 

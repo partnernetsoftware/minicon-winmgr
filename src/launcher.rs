@@ -168,12 +168,15 @@ pub fn launch(path: &str) -> std::io::Result<()> {
     crate::recents::record(path);
     #[cfg(windows)]
     {
-        // `start "" <path>` opens the file with its default handler; the empty
-        // string is the (otherwise path-consuming) window-title argument.
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", path])
-            .spawn()?;
-        Ok(())
+        // Routed through `shell_launch` so a pinned bare `explorer.exe` cannot
+        // quietly take the shell back from us (see that module's header).
+        if crate::shell_launch::open(path) {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "shell refused to open {path}"
+            )))
+        }
     }
     #[cfg(not(windows))]
     {

@@ -16,6 +16,16 @@
 //! `NOTIFYICONDATAW` (64-bit) field offsets relative to the blob's offset 4:
 //!   0 cbSize, 8 hWnd, 16 uID, 20 uFlags, 24 uCallbackMessage, 32 hIcon,
 //!   40 szTip[128] (256 bytes).
+//!
+//! Click forwarding: for each registered icon we remember the owner triple
+//! `(hWnd, uCallbackMessage, uID)`. When a click lands on one of our strip
+//! cells we post the matching mouse message back to `hWnd` with
+//! `wParam = uID` and `lParam = <mouse message>` (the documented notify-icon
+//! callback shape), so the owning app reacts as if the real tray was clicked.
+//! The coordinate → icon and icon+event → message mappings are pure functions
+//! (see [`StripLayout::hit_test`] and [`forward_target`]) so they stay testable
+//! without touching a live window; the only effectful step is the guarded
+//! `PostMessageW` in [`forward_at`].
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -23,7 +33,7 @@ use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, HWND_BROADCAST, PostMessageW, RegisterClassW,
+    CreateWindowExW, DefWindowProcW, HWND_BROADCAST, IsWindow, PostMessageW, RegisterClassW,
     RegisterWindowMessageW, WM_COPYDATA, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::PCWSTR;
@@ -43,6 +53,32 @@ const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 
 // Number of UTF-16 units in `NOTIFYICONDATAW::szTip`.
 const TIP_CHARS: usize = 128;
+
+// Mouse messages posted back in the notify-icon callback's `lParam`. Defined
+// locally so we never need a new `windows` feature for them.
+//
+// `allow(dead_code)`: the whole click-forwarding surface below is the wiring
+// API the taskbar calls once it routes strip clicks here; until then it has no
+// in-crate caller.
+#[allow(dead_code)]
+const WM_MOUSEMOVE: u32 = 0x0200;
+#[allow(dead_code)]
+const WM_LBUTTONDOWN: u32 = 0x0201;
+#[allow(dead_code)]
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
+#[allow(dead_code)]
+const WM_RBUTTONDOWN: u32 = 0x0204;
+
+// Cell geometry defaults for [`StripLayout`], matching `tray_bar`.
+//
+// `allow(dead_code)`: `StripLayout::new` is the entry point the taskbar will
+// call once the strip is painted from the *hosted* icons; until that display
+// wiring lands nothing in the crate builds a layout, so the defaults read as
+// unused. See `docs/prd_1_1.md` (tray click forwarding).
+#[allow(dead_code)]
+const HIT_CELL: i32 = 18;
+#[allow(dead_code)]
+const HIT_GAP: i32 = 2;
 
 /// One hosted tray icon.
 pub struct TrayIconHandle {
@@ -137,6 +173,259 @@ pub fn icons() -> Vec<TrayIconHandle> {
             hicon: i.hicon,
         })
         .collect()
+}
+
+/// One cell of a horizontal icon strip, in client/logical pixels.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl CellRect {
+    /// Half-open containment: `right`/`bottom` edges are exclusive.
+    fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+}
+
+/// Geometry of the tray strip: `cell`-px squares, `gap` px apart, vertically
+/// centred in `top..top + height`, right-aligned so the last cell ends flush at
+/// `right_x` (index 0 is leftmost). Mirrors what the taskbar paints.
+///
+/// Pure value type — no Win32 state — so both the layout maths and the hit test
+/// can be unit-tested directly.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StripLayout {
+    pub top: i32,
+    pub right_x: i32,
+    pub height: i32,
+    pub cell: i32,
+    pub gap: i32,
+}
+
+impl StripLayout {
+    /// A layout using the standard square/gap sizes, matching the painted strip.
+    #[allow(dead_code)]
+    pub const fn new(top: i32, right_x: i32, height: i32) -> Self {
+        Self {
+            top,
+            right_x,
+            height,
+            cell: HIT_CELL,
+            gap: HIT_GAP,
+        }
+    }
+
+    /// Width the strip occupies for `count` icons (0 when empty or degenerate).
+    ///
+    /// Saturating against overflow: returns 0 instead of wrapping.
+    pub fn strip_width(&self, count: usize) -> i32 {
+        if count == 0 || self.cell <= 0 {
+            return 0;
+        }
+        let n = count as i64;
+        let cell = self.cell as i64;
+        let gap = self.gap.max(0) as i64;
+        to_i32(n * cell + (n - 1) * gap).unwrap_or(0)
+    }
+
+    /// Rectangle of the cell at `index`, or `None` for an out-of-range index or
+    /// a degenerate layout. Arithmetic is done in `i64` and range-checked so a
+    /// pathological strip can never overflow/panic.
+    pub fn cell_rect(&self, index: usize, count: usize) -> Option<CellRect> {
+        if count == 0 || self.cell <= 0 || index >= count {
+            return None;
+        }
+        let cell = self.cell as i64;
+        let gap = self.gap.max(0) as i64;
+        let width = self.strip_width(count) as i64;
+        let left = self.right_x as i64 - width + index as i64 * (cell + gap);
+        let top = self.top as i64 + (self.height as i64 - cell) / 2;
+        Some(CellRect {
+            left: to_i32(left)?,
+            top: to_i32(top)?,
+            right: to_i32(left + cell)?,
+            bottom: to_i32(top + cell)?,
+        })
+    }
+
+    /// Index of the cell containing `(x, y)`, or `None` when the point falls in
+    /// a gap, outside the strip, or the strip is empty.
+    ///
+    /// Pure: the coordinate → icon-index mapping, unit-testable on its own.
+    pub fn hit_test(&self, count: usize, x: i32, y: i32) -> Option<usize> {
+        (0..count).find(|&i| self.cell_rect(i, count).is_some_and(|r| r.contains(x, y)))
+    }
+}
+
+/// Narrows an `i64` to `i32`, or `None` when it would not fit.
+#[allow(dead_code)]
+fn to_i32(v: i64) -> Option<i32> {
+    i32::try_from(v).ok()
+}
+
+/// A mouse action to forward to a hosted icon's owner.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseEvent {
+    Move,
+    LeftDown,
+    LeftDoubleClick,
+    RightDown,
+}
+
+impl MouseEvent {
+    /// The `WM_*` mouse message the owner expects in the callback's `lParam`.
+    pub const fn lparam(self) -> u32 {
+        match self {
+            MouseEvent::Move => WM_MOUSEMOVE,
+            MouseEvent::LeftDown => WM_LBUTTONDOWN,
+            MouseEvent::LeftDoubleClick => WM_LBUTTONDBLCLK,
+            MouseEvent::RightDown => WM_RBUTTONDOWN,
+        }
+    }
+}
+
+/// The four-tuple posted back to the icon's owning window.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForwardTarget {
+    pub hwnd: isize,
+    pub msg: u32,
+    pub wparam: usize,
+    pub lparam: isize,
+}
+
+/// Pure mapping: an icon + mouse event → the message to post
+/// (`None` when the icon lacks a usable `hWnd`/callback message, meaning the
+/// caller should skip it).
+#[allow(dead_code)]
+pub fn forward_target(icon: &TrayIconHandle, event: MouseEvent) -> Option<ForwardTarget> {
+    if icon.hwnd == 0 || icon.callback_msg == 0 {
+        return None;
+    }
+    Some(ForwardTarget {
+        hwnd: icon.hwnd,
+        msg: icon.callback_msg,
+        wparam: icon.uid as usize,
+        lparam: event.lparam() as isize,
+    })
+}
+
+/// Snapshot of an icon's forwarding triple, captured under the store lock so we
+/// never hold the lock across an `IsWindow`/`PostMessageW` call.
+#[allow(dead_code)]
+fn forward_snapshot() -> Vec<TrayIconHandle> {
+    let guard = match icons_store().lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::warn!("tray icon table lock poisoned; forwarding from recovered snapshot");
+            poisoned.into_inner()
+        }
+    };
+    guard
+        .iter()
+        .map(|i| TrayIconHandle {
+            uid: i.uid,
+            hwnd: i.hwnd,
+            callback_msg: i.callback_msg,
+            tooltip: String::new(),
+            hicon: 0,
+        })
+        .collect()
+}
+
+/// Posts `event` for `snapshot[index]`. `true` iff a message was delivered.
+/// Validates the owner window first; never panics.
+#[allow(dead_code)]
+fn forward_from(snapshot: &[TrayIconHandle], event: MouseEvent, index: usize) -> bool {
+    let Some(icon) = snapshot.get(index) else {
+        tracing::debug!(index, "tray click outside the hosted icon range; ignoring");
+        return false;
+    };
+    let Some(target) = forward_target(icon, event) else {
+        tracing::debug!(
+            uid = icon.uid,
+            "hosted icon has no hWnd/callback message; skipping forward"
+        );
+        return false;
+    };
+    post_target(target, event)
+}
+
+/// The effectful step: verify `target.hwnd` is a live window and post the
+/// callback. Any invalid handle or post failure is logged and skipped.
+#[allow(dead_code)]
+fn post_target(target: ForwardTarget, event: MouseEvent) -> bool {
+    // SAFETY: `HWND` is a plain handle wrapper; a stale handle is exactly what
+    // `IsWindow` is designed to reject.
+    let hwnd = HWND(target.hwnd as *mut core::ffi::c_void);
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        tracing::debug!(
+            hwnd = target.hwnd,
+            "hosted icon owner window is gone; dropping forward"
+        );
+        return false;
+    }
+    // SAFETY: `hwnd` was just confirmed live; the message/wparams are plain
+    // values. `PostMessageW` is asynchronous and never blocks the message pump.
+    match unsafe {
+        PostMessageW(
+            Some(hwnd),
+            target.msg,
+            WPARAM(target.wparam),
+            LPARAM(target.lparam),
+        )
+    } {
+        Ok(()) => {
+            tracing::debug!(
+                hwnd = target.hwnd,
+                msg = target.msg,
+                uid = target.wparam,
+                lparam = target.lparam,
+                event = ?event,
+                "forwarded tray input to icon owner"
+            );
+            true
+        }
+        Err(err) => {
+            tracing::debug!(
+                hwnd = target.hwnd,
+                msg = target.msg,
+                error = %err,
+                "PostMessageW to icon owner failed; dropping forward"
+            );
+            false
+        }
+    }
+}
+
+/// Hit-tests `(x, y)` against `layout` and forwards the matching mouse event to
+/// the icon's owner. Returns `true` iff a message was posted.
+///
+/// Best-effort: the index is resolved against the registration order of hosted
+/// icons, so a strip that paints them in a different order (or with different
+/// geometry) may mis-target. Every miss is a logged no-op, never a panic.
+#[allow(dead_code)]
+pub fn forward_at(event: MouseEvent, layout: StripLayout, x: i32, y: i32) -> bool {
+    let snapshot = forward_snapshot();
+    match layout.hit_test(snapshot.len(), x, y) {
+        Some(index) => forward_from(&snapshot, event, index),
+        None => false,
+    }
+}
+
+/// Forwards `event` directly to the icon at `index` (callers that already did
+/// their own hit test). Returns `true` iff a message was posted.
+#[allow(dead_code)]
+pub fn forward_to(event: MouseEvent, index: usize) -> bool {
+    let snapshot = forward_snapshot();
+    forward_from(&snapshot, event, index)
 }
 
 /// Whether we should host the tray:
@@ -444,5 +733,114 @@ mod tests {
     fn icons_are_empty_when_not_installed() {
         // No install happened in this test process, so the table stays empty.
         assert!(icons().is_empty());
+    }
+
+    // --- click-forwarding pure logic -------------------------------------
+
+    fn icon(uid: u32, hwnd: isize, cb: u32) -> TrayIconHandle {
+        TrayIconHandle {
+            uid,
+            hwnd,
+            callback_msg: cb,
+            tooltip: String::new(),
+            hicon: 0,
+        }
+    }
+
+    #[test]
+    fn mouse_event_maps_to_the_documented_lparam() {
+        assert_eq!(MouseEvent::Move.lparam(), WM_MOUSEMOVE);
+        assert_eq!(MouseEvent::LeftDown.lparam(), WM_LBUTTONDOWN);
+        assert_eq!(MouseEvent::LeftDoubleClick.lparam(), WM_LBUTTONDBLCLK);
+        assert_eq!(MouseEvent::RightDown.lparam(), WM_RBUTTONDOWN);
+    }
+
+    #[test]
+    fn forward_target_packs_the_triple() {
+        let ic = icon(7, 0x1234, 0x0400);
+        let t = forward_target(&ic, MouseEvent::LeftDown).expect("valid triple");
+        assert_eq!(t.hwnd, 0x1234);
+        assert_eq!(t.msg, 0x0400);
+        assert_eq!(t.wparam, 7);
+        assert_eq!(t.lparam, WM_LBUTTONDOWN as isize);
+
+        // Event only changes lParam, never the owner triple.
+        let dbl = forward_target(&ic, MouseEvent::LeftDoubleClick).unwrap();
+        assert_eq!(dbl.hwnd, t.hwnd);
+        assert_eq!(dbl.msg, t.msg);
+        assert_eq!(dbl.wparam, t.wparam);
+        assert_eq!(dbl.lparam, WM_LBUTTONDBLCLK as isize);
+    }
+
+    #[test]
+    fn forward_target_skips_icons_without_owner_data() {
+        // Missing hWnd, missing callback message, or both => no forward.
+        assert!(forward_target(&icon(1, 0, 0x0400), MouseEvent::LeftDown).is_none());
+        assert!(forward_target(&icon(1, 0x99, 0), MouseEvent::RightDown).is_none());
+        assert!(forward_target(&icon(1, 0, 0), MouseEvent::Move).is_none());
+    }
+
+    #[test]
+    fn strip_width_matches_the_painted_strip() {
+        let l = StripLayout::new(0, 100, 36);
+        assert_eq!(l.strip_width(0), 0);
+        assert_eq!(l.strip_width(1), HIT_CELL);
+        assert_eq!(l.strip_width(3), 3 * HIT_CELL + 2 * HIT_GAP);
+    }
+
+    #[test]
+    fn hit_test_is_right_aligned_and_skips_gaps() {
+        // 3 cells of 18 + 2 gaps of 2 = 58 wide, ending flush at x=100.
+        let l = StripLayout::new(0, 100, 36);
+        // Cell centres: index 0 -> ~[42,60), 1 -> [62,80), 2 -> [82,100).
+        assert_eq!(l.hit_test(3, 50, 18), Some(0));
+        assert_eq!(l.hit_test(3, 70, 18), Some(1));
+        assert_eq!(l.hit_test(3, 90, 18), Some(2));
+        // A gap column (between 60 and 62) hits nothing.
+        assert_eq!(l.hit_test(3, 61, 18), None);
+        // Left of the strip.
+        assert_eq!(l.hit_test(3, 41, 18), None);
+        // Right edge is exclusive.
+        assert_eq!(l.hit_test(3, 100, 18), None);
+    }
+
+    #[test]
+    fn hit_test_respects_the_vertical_band() {
+        let l = StripLayout::new(4, 100, 36);
+        // cell 18 centred in 36 -> rows [13, 31).
+        assert_eq!(l.hit_test(1, 90, 12), None);
+        assert_eq!(l.hit_test(1, 90, 13), Some(0));
+        assert_eq!(l.hit_test(1, 90, 30), Some(0));
+        assert_eq!(l.hit_test(1, 90, 31), None);
+    }
+
+    #[test]
+    fn hit_test_edge_cases_never_match() {
+        let l = StripLayout::new(0, 100, 36);
+        assert_eq!(l.hit_test(0, 50, 18), None); // empty strip
+        let degenerate = StripLayout {
+            cell: 0,
+            ..StripLayout::new(0, 100, 36)
+        };
+        assert_eq!(degenerate.hit_test(3, 50, 18), None); // zero cell
+    }
+
+    #[test]
+    fn cell_rect_rejects_out_of_range_and_handles_overflow() {
+        let l = StripLayout::new(0, 100, 36);
+        assert!(l.cell_rect(3, 3).is_none());
+        // A strip anchored at i32::MIN underflows the left edge for 2 cells;
+        // the i64 maths + range check must yield None, not a panic.
+        let under = StripLayout::new(0, i32::MIN, 36);
+        assert!(under.cell_rect(0, 2).is_none());
+    }
+
+    #[test]
+    fn forward_to_skips_invalid_owner_and_out_of_range() {
+        // No icons registered, and index 0 is out of range => false, no panic.
+        assert!(!forward_to(MouseEvent::LeftDown, 0));
+        // A layout hit can never turn into a post while the table is empty.
+        let l = StripLayout::new(0, 100, 36);
+        assert!(!forward_at(MouseEvent::LeftDown, l, 50, 18));
     }
 }

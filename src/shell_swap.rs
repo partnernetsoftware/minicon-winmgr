@@ -33,6 +33,9 @@ use crate::shell_registry;
 /// How long we let the shell exit on its own after `WM_CLOSE`, before forcing.
 const SHELL_STOP_GRACE_MS: u32 = 1500;
 
+/// Last observed foreign-shell state, for transition-only logging.
+static FOREIGN_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Window classes owned by the interactive shell of a session.
 fn is_shell_class(class: &str) -> bool {
     matches!(
@@ -44,8 +47,8 @@ fn is_shell_class(class: &str) -> bool {
 /// Shell windows and their owning processes, gathered in one enumeration.
 #[derive(Default)]
 struct ShellHits {
-    windows: Vec<HWND>,
-    pids: Vec<u32>,
+    /// `(window, owning pid)` for every shell-class top-level window.
+    entries: Vec<(HWND, u32)>,
 }
 
 unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -60,13 +63,10 @@ unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
     }
     let class = String::from_utf16_lossy(&buf[..len as usize]);
     if is_shell_class(&class) {
-        hits.windows.push(hwnd);
         let mut pid = 0u32;
         // SAFETY: same as above.
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-        if pid != 0 && !hits.pids.contains(&pid) {
-            hits.pids.push(pid);
-        }
+        hits.entries.push((hwnd, pid));
     }
     BOOL(1)
 }
@@ -83,30 +83,90 @@ fn shell_hits() -> ShellHits {
 
 /// Whether an interactive shell is running in this session right now.
 pub fn shell_running() -> bool {
-    !shell_hits().windows.is_empty()
+    !shell_hits().entries.is_empty()
+}
+
+/// Whether **this process** owns a shell window in the current session, i.e. we
+/// are already the interactive shell.
+///
+/// This is not the same as [`shell_running`]: when we host the notification
+/// area our tray host owns a `Shell_TrayWnd`, so a naive "is a shell running?"
+/// says yes while the only shell is us. Any handover must use *this* check, not
+/// that one — stopping our own shell stops us.
+pub fn self_is_shell() -> bool {
+    let me = std::process::id();
+    shell_hits().entries.iter().any(|(_, pid)| *pid == me)
+}
+
+/// Whether a shell **other than us** owns this session.
+///
+/// A `Shell_TrayWnd` we do not own means Explorer (or another shell) has taken
+/// the session back — most often because something started `explorer.exe`
+/// without arguments. Detecting it is cheap and safe; acting on it is a
+/// product decision, so this only reports.
+pub fn foreign_shell_running() -> bool {
+    let me = std::process::id();
+    shell_hits()
+        .entries
+        .iter()
+        .any(|(_, pid)| *pid != me && *pid != 0)
+}
+
+/// Logs foreign-shell transitions only (the heartbeat runs every 30s and must
+/// not repeat the same warning forever).
+pub fn check_foreign_shell() {
+    let present = foreign_shell_running();
+    let seen = FOREIGN_SEEN.swap(present, std::sync::atomic::Ordering::Relaxed);
+    match (seen, present) {
+        (false, true) => tracing::warn!(
+            "a foreign shell window appeared — Explorer may have taken the session \
+             (a bare `explorer.exe` start does this); reclaim with --shell-takeover"
+        ),
+        (true, false) => tracing::info!("foreign shell window is gone; we own the session again"),
+        _ => {}
+    }
+}
+
+/// The shell windows/pids a handover may stop: every shell-class window except
+/// this process's own, and except windows whose owner cannot be resolved.
+///
+/// Pure, so the "never target ourselves" rule is unit-tested. It matters
+/// because when we host the notification area our tray host owns a
+/// `Shell_TrayWnd`: without this filter a takeover would force-terminate our
+/// own process, taking the user's bar down with it.
+fn stoppable(hits: &ShellHits, me: u32) -> Vec<(HWND, u32)> {
+    hits.entries
+        .iter()
+        .copied()
+        .filter(|(_, pid)| *pid != 0 && *pid != me)
+        .collect()
 }
 
 /// Stops this session's shell process(es): a graceful `WM_CLOSE` first (what
 /// Explorer treats as "shut the shell down"), then a forced termination if it
 /// is still alive after [`SHELL_STOP_GRACE_MS`].
 ///
-/// Returns how many processes were stopped; `0` means no shell was running in
-/// this session, which is a success, not an error.
+/// Only **foreign** shells are ever targeted (see [`stoppable`]); our own shell
+/// window is skipped, so this can never stop the caller.
+///
+/// Returns how many processes were stopped; `0` means no foreign shell was
+/// running in this session, which is a success, not an error.
 pub fn stop_shell() -> Result<usize, Box<dyn Error>> {
-    let hits = shell_hits();
-    if hits.pids.is_empty() {
+    let targets = stoppable(&shell_hits(), std::process::id());
+    if targets.is_empty() {
         return Ok(0);
     }
     // Ask nicely first: Explorer shuts the shell down on WM_CLOSE.
-    for window in &hits.windows {
-        // SAFETY: `window` is a live shell window on our desktop.
+    for (window, _) in &targets {
+        // SAFETY: `window` is a live shell window on our desktop owned by
+        // another process.
         unsafe {
             let _ = PostMessageW(Some(*window), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
     }
 
     let mut stopped = 0;
-    for pid in hits.pids {
+    for (_, pid) in targets {
         // SAFETY: plain process handles; every handle is closed before returning.
         unsafe {
             let Ok(handle) = OpenProcess(
@@ -244,7 +304,14 @@ pub struct Takeover {
 }
 
 /// Replaces the shell with this executable **and** takes over immediately.
+///
+/// Refuses when we already are the shell: there is nothing to hand over, and
+/// stopping the session's shell would stop *us* (we own the tray host's
+/// `Shell_TrayWnd`).
 pub fn take_over() -> Result<Takeover, Box<dyn Error>> {
+    if self_is_shell() {
+        return Err("本程序已经在充当桌面外壳，无需接管".into());
+    }
     let exe = std::env::current_exe()?.display().to_string();
 
     // 1. Record the current value once (empty file = "was not set"), so a later
@@ -306,7 +373,36 @@ pub fn give_back() -> Result<GiveBack, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpret_backup, is_shell_class};
+    use super::{ShellHits, interpret_backup, is_shell_class, stoppable};
+
+    fn hwnd(id: usize) -> windows::Win32::Foundation::HWND {
+        windows::Win32::Foundation::HWND(id as *mut core::ffi::c_void)
+    }
+
+    #[test]
+    fn a_handover_never_targets_our_own_shell() {
+        let me = 4242;
+        let hits = ShellHits {
+            entries: vec![
+                (hwnd(1), me),  // our tray-host Shell_TrayWnd
+                (hwnd(2), 100), // explorer's shell
+                (hwnd(3), 0),   // unknown owner: not attributable, skipped
+                (hwnd(4), 100), // explorer's secondary tray (same pid)
+            ],
+        };
+        let pids: Vec<u32> = stoppable(&hits, me).into_iter().map(|(_, p)| p).collect();
+        assert_eq!(pids, vec![100, 100]);
+        assert!(stoppable(&hits, me).iter().all(|(_, p)| *p != me));
+    }
+
+    #[test]
+    fn nothing_is_stoppable_when_only_we_are_the_shell() {
+        let me = 7;
+        let hits = ShellHits {
+            entries: vec![(hwnd(1), me)],
+        };
+        assert!(stoppable(&hits, me).is_empty());
+    }
 
     #[test]
     fn shell_classes_are_recognised() {

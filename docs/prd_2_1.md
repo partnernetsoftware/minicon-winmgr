@@ -77,6 +77,19 @@
     备份**只写一次、永不覆盖**，以免重复接管把"原值"冲成自己。
 12. **`Shell` 写 `None` = 删除该值**，不是写空 `REG_SZ`：`shell_registry::write_string(None)` 走
     `RegDeleteValueW`（`ERROR_FILE_NOT_FOUND` 视为成功）。写空字符串会让 Winlogon 找不到有效外壳。
+13. **外壳身份不可让渡（除"归还桌面"这一个显式动作外）**：`explorer.exe` 有双重身份——**带参数**启动是文件浏览器，
+    **不带参数**启动会判定"没有 shell"并创建 `Shell_TrayWnd` + 桌面，从而**把会话夺回去**。
+    → **所有我们发起的"打开"动作必须走 `src/shell_launch.rs`**（quick-launch 钉、开始菜单 Places、
+    Run 对话框、launcher），由 `plan()` 把危险的"裸 explorer"改写成带参数的形式；
+    `shell:` moniker 也一并转成真实路径/CLSID。禁止各处自行 `ShellExecuteW` / `cmd /C start`。
+    （真实事故：quick-launch 钉了 `C:\Windows\explorer.exe`，点击后 explorer 夺权。）
+14. **设置窗口是进程内复用的一次性资源，关闭 = 隐藏**：`WM_CLOSE` 只 `ShowWindow(SW_HIDE)`，
+    绝不 `DestroyWindow`。曾发生：窗口被销毁后 `SETTINGS` 置 0，任务栏设置按钮**整场会话再点都没反应**
+    （日志 `settings show ignored: window not installed`）。
+    兜底：`window()` 用 `IsWindow` 校验陈旧句柄，`toggle()` 发现窗口缺失就**懒重建**（`install` 记住 `HINSTANCE`）。
+15. **外来外壳只检测、不擅自处置**：心跳（30s）调用 `shell_swap::check_foreign_shell()`，
+    在"出现/消失"**状态跳变时**各记一条日志，不做自动夺回（夺回会连带关掉用户的文件窗口，属用户决策）；
+    恢复手段是显式的 `--shell-takeover`。
 
 ## 6. 待加固
 - 长跑观察 ≥ 数小时（成功度量之一）。

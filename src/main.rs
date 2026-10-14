@@ -6,6 +6,7 @@
 mod bar_tip;
 mod config;
 mod dwm;
+mod folder_stack;
 mod grouping;
 mod hotkeys;
 mod hover_preview;
@@ -19,6 +20,7 @@ mod recents;
 mod run_dialog;
 mod session;
 mod settings_ui;
+mod shell_launch;
 mod shell_registry;
 mod shell_swap;
 mod single_instance;

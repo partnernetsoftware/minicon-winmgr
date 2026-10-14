@@ -3,6 +3,57 @@
 所有值得记录的变更记在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/)，
 版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## 0.1.2 — 2026-10-14
+
+### 变更
+
+- **任务栏左侧的两个冗余入口一并退役**（`src/taskbar.rs`、`src/settings_ui.rs`、`src/config.rs`）。
+  「设置」右边原来依次是**开始菜单入口点**与**窗口列表按钮**，业主认为两者都没有价值（指示，2026-10-14）：
+  - **开始菜单入口**：删除绘制与点击分支，并**取消常驻的 12px 占位**——新增 `grip_w()`，只在功能开启时
+    返回槽位宽度，关闭时为 0。设置面板里的「显示开始菜单（默认关闭，立即生效）」复选行一并撤掉
+    （连同 `SettingAction::ToggleStartMenu` 与 `config::set_start_menu`），避免留下一个"能把冗余入口召回"的死开关。
+    功能本体（Places / 文件夹堆栈 / 搜索 / 最近使用）**不删**，配置键 `taskbar.menu = true` 或
+    env `MINICON_START_MENU=1` 仍可唤回；开启后入口槽位与那个点会回来。真机验证：开启后点入口
+    → 日志 `start menu shown`（`places=5 recent=2 power=3`）。
+  - **窗口列表按钮**（≡ hamburger，原 `list_rect`）：删除布局、绘制与点击分支。`task_list` 模块**保留**——
+    `»` 溢出按钮与分组按钮仍用它弹窗。设置按钮右侧不再有任何按钮，直接接快速启动/任务区，
+    并保留 4px 标准间距（`after_settings_for`，否则两个同色按钮会糊成一块）。
+
+### 修复
+
+- **外壳身份不再被 explorer 夺走**（新增 `src/shell_launch.rs`）。`explorer.exe` 不带参数启动会判定"没有外壳"
+  并自建任务栏，从而把会话抢回去（真实事故：quick-launch 钉了 `C:\Windows\explorer.exe`，一点就夺权）。
+  现在所有"打开"动作统一走 `shell_launch`：`plan()` 把裸 explorer 改写成带"此电脑"CLSID 的形式，
+  `shell:` moniker 转成真实路径；接入 quick-launch、开始菜单 Places、Run 对话框、launcher。
+- **设置按钮不再会永久失效**（`src/settings_ui.rs`）。原来关闭设置窗走 `DestroyWindow`，
+  句柄归零后任务栏设置按钮整场会话都点不开（日志 `settings show ignored: window not installed`）。
+  现在 `WM_CLOSE` 只隐藏；`window()` 用 `IsWindow` 校验陈旧句柄，`toggle()` 缺窗则懒重建。
+- **「接管桌面」不再自杀**（`src/shell_swap.rs`）。`shell_running()` 会把**本进程自己**（我们是外壳，
+  自己拥有 `Shell_TrayWnd`/`Progman`）也算成"会话里已有外壳"，于是 `stop_shell()` 停掉自己——
+  表现为点一下接管，任务栏就消失。现在：`take_over()` 检测到"已经是当前外壳"直接拒绝，
+  `stop_shell()` 只处理**其他**进程持有的外壳窗口。
+- **任务栏按钮左键改为「激活 / 最小化」切换**（`src/taskbar.rs::toggle_or_activate`）。原来点任务按钮
+  只做「调到前台」，永远无法最小化。现在与系统外壳一致：目标窗口已在前台 → `SW_MINIMIZE`；
+  否则（含已最小化）→ `SW_RESTORE` + 置前台。列表/溢出的显式选择（`task_list::popup`）仍只激活不切换。
+- **任务栏本体补上 `WS_EX_NOACTIVATE`**（同上）。根因：鼠标按下会把任务栏自己变成前台窗口，
+  于是点击处理里的 `GetForegroundWindow()` 永远返回「我们自己」，切换逻辑读不到真实状态（`is_fg` 恒为 false）；
+  副作用是点任务栏会打断用户当前应用的焦点，与系统外壳行为不符。`src/bar_tip.rs` 早就用了这个样式，本体漏了。
+  键盘导航不受影响——那是 `Alt+`` 召唤后显式 `SetForegroundWindow`/`SetFocus` 激活的（实测召唤后数字跳转仍生效），
+  右键菜单、hover 高亮、快速启动也照常。
+
+### 新增
+
+- **外来外壳检测**：心跳里调用 `shell_swap::check_foreign_shell()`，仅在"出现/消失"跳变时记日志，
+  不做自动夺回（夺回会连坐关掉用户的文件窗口）。恢复手段是显式的 `--shell-takeover`。
+- **文件夹堆栈**（`src/folder_stack.rs` + `config.folders`）：把常用文件夹钉成开始菜单行，
+  双击展开其子项（`MAX_STACK_ITEMS = 15` 条，原生弹出菜单不滚动所以不取全量；首行「打开此文件夹」去看全部）。
+  每个条目都经 `shell_launch` 打开，不会再让 explorer 夺权。
+- **开始菜单搜索框 + 「最近使用」区**（`src/start_menu.rs`，见 P0-2）。
+- **「显示开始菜单」开关**（配置键 `taskbar.menu`，**默认 `false`**；env `MINICON_START_MENU`）。
+  本外壳由任务栏驱动，弹出菜单改为可选：关闭时任务栏不绘制菜单点、该区域不响应。
+- **设置项依赖置灰**（`src/settings_ui.rs`）：关掉「显示任务栏」后，只在任务栏可见时才有意义的项
+  （合并策略/依据、通知条、开始菜单、悬停预览）置灰并标注「（需先显示任务栏）」，点击不生效。
+
 ## 0.1.1 — 2026-10-13
 
 首个打 tag 的版本。包含此前未发布的全部工作（任务栏二期、立即接管/归还、PRD 文档体系）。

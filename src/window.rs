@@ -226,6 +226,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 tracing::debug!(timer_id = wparam.0, "heartbeat: message pump alive");
                 window_snapshot::log_snapshot();
                 crate::taskbar::refresh();
+                crate::shell_swap::check_foreign_shell();
                 crate::metrics::log_sample();
             }
             LRESULT(0)
