@@ -7,13 +7,10 @@
 //! companion mode (another shell owns the tray) it stays inert so we never
 //! hijack the real notification area.
 //!
-//! Wire format (Win10/11 64-bit): apps call `Shell_NotifyIconW`, which posts a
-//! `WM_COPYDATA` (`dwData == 1`) carrying a `SHELLTRAYDATA` blob:
-//!   offset 0 : `DWORD dwMessage`  (NIM_ADD=0 / NIM_MODIFY=1 / NIM_DELETE=2)
-//!   offset 4 : `NOTIFYICONDATAW nid`
-//! `NOTIFYICONDATAW` (64-bit) field offsets relative to the blob's offset 4:
-//!   0 cbSize, 8 hWnd, 16 uID, 20 uFlags, 24 uCallbackMessage, 32 hIcon,
-//!   40 szTip[128] (256 bytes).
+//! Observed Windows wire format (including callers using the native x64 API):
+//! `WM_COPYDATA(dwData=1)` carries magic `0x34753423`, operation, then a
+//! 32-bit marshalled NOTIFYICONDATAW. HWND/HICON on this wire are DWORDs,
+//! not native pointers. See the real Shell_NotifyIcon probe in the 0.1.5 plan.
 //!
 //! This module answers exactly one question — *which icons exist* — and hands
 //! them to [`crate::tray`] as [`TrayIconHandle`]s. Geometry, painting and click
@@ -21,13 +18,14 @@
 //! same cell arithmetic existing in three places (0.1.3 plan §2.4).
 
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use windows::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, HWND_BROADCAST, PostMessageW, RegisterClassW,
-    RegisterWindowMessageW, WM_COPYDATA, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    CopyImage, CreateWindowExW, DefWindowProcW, DestroyIcon, FindWindowW, HICON, HWND_BROADCAST,
+    IMAGE_ICON, IsWindow, LR_DEFAULTCOLOR, PostMessageW, RegisterClassW, RegisterWindowMessageW,
+    SetTimer, WM_COPYDATA, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -37,9 +35,12 @@ use crate::win_util::{ERROR_CLASS_ALREADY_EXISTS, guard_abi, lock_or_recover, wi
 const NIM_ADD: u32 = 0;
 const NIM_MODIFY: u32 = 1;
 const NIM_DELETE: u32 = 2;
+const NIM_SETFOCUS: u32 = 3;
+const NIM_SETVERSION: u32 = 4;
 
 // `WM_COPYDATA.dwData` marker used by the notification-area protocol.
 const SHELLTRAYDATA_MARKER: usize = 1;
+const SHELLTRAYDATA_MAGIC: u32 = 0x3475_3423;
 
 // Number of UTF-16 units in `NOTIFYICONDATAW::szTip`.
 const TIP_CHARS: usize = 128;
@@ -57,6 +58,28 @@ pub(crate) struct TrayIconHandle {
     pub(crate) tooltip: String,
     /// Icon handle (as isize). Owned by the **registering process**.
     pub(crate) hicon: isize,
+    pub(crate) version: u32,
+    pub(crate) hidden: bool,
+    pub(crate) guid: Option<[u8; 16]>,
+    pub(crate) image: Option<Arc<IconImage>>,
+    owner_pid: u32,
+}
+
+/// Snapshot references keep a copied icon alive after registration updates/deletes.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct IconImage(pub(crate) isize);
+impl Drop for IconImage {
+    fn drop(&mut self) {
+        let _ = unsafe { DestroyIcon(HICON(self.0 as *mut _)) };
+    }
+}
+fn copy_icon(raw: isize) -> Option<Arc<IconImage>> {
+    if raw == 0 {
+        return None;
+    }
+    let copy =
+        unsafe { CopyImage(HANDLE(raw as *mut _), IMAGE_ICON, 0, 0, LR_DEFAULTCOLOR) }.ok()?;
+    (!copy.is_invalid()).then(|| Arc::new(IconImage(copy.0 as isize)))
 }
 
 /// Fields decoded from one `WM_COPYDATA` notification-area payload.
@@ -68,6 +91,11 @@ struct ParsedIcon {
     callback_msg: u32,
     hicon: isize,
     tooltip: String,
+    flags: u32,
+    state: u32,
+    state_mask: u32,
+    version: u32,
+    guid: Option<[u8; 16]>,
 }
 
 /// The in-process table of hosted icons, keyed by (uid, hwnd).
@@ -102,6 +130,12 @@ pub(crate) fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Er
         );
         return Ok(());
     }
+    // Even the diagnostic opt-in must not introduce a second notification
+    // host alongside Explorer (or another shell) and redirect its clients.
+    if unsafe { FindWindowW(PCWSTR(wide("Shell_TrayWnd").as_ptr()), PCWSTR::null()) }.is_ok() {
+        tracing::info!("existing notification host retained; companion mode");
+        return Ok(());
+    }
 
     // SAFETY: standard Win32 window setup. All `wide` buffers are kept in locals
     // that outlive the calls they feed, and `tray_wndproc` is a valid
@@ -113,6 +147,7 @@ pub(crate) fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Er
     };
 
     TRAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+    let _ = unsafe { SetTimer(Some(hwnd), 1, 1000, None) };
     tracing::info!(hwnd = ?hwnd, "tray host sink window created");
 
     // Tell already-running apps (and ones that start later) to re-register their
@@ -221,25 +256,34 @@ unsafe fn register_class(hinstance: HINSTANCE, class_name: PCWSTR, label: &str) 
     }
 }
 
-/// Splits a `SHELLTRAYDATA` blob into its `(dwMessage, NOTIFYICONDATAW)` parts.
-///
-/// Pure: no Win32 calls, no allocation beyond the decoded tooltip — safe to unit
-/// test with synthetic buffers. Returns `None` when the blob is too short to
-/// even hold `dwMessage`. Missing trailing fields decode to zero/empty so that
-/// the shorter `NIM_DELETE` payloads are still handled.
+/// Validates the wire envelope and decodes only the declared marshalled payload.
 fn parse_shell_tray_data(raw: &[u8]) -> Option<ParsedIcon> {
-    if raw.len() < 4 {
+    if raw.len() < 8 + 12 || read_u32(raw, 0)? != SHELLTRAYDATA_MAGIC {
         return None;
     }
-    let dw_message = read_u32(raw, 0)?;
-    let nid = &raw[4..];
+    let dw_message = read_u32(raw, 4)?;
+    let nid = &raw[8..];
+    let size = read_u32(nid, 0)? as usize;
+    if size < 12 || nid.len() < size {
+        return None;
+    }
+    let nid = &nid[..size];
     Some(ParsedIcon {
         dw_message,
-        hwnd: read_i64(nid, 8),
-        uid: read_u32(nid, 16).unwrap_or(0),
-        callback_msg: read_u32(nid, 24).unwrap_or(0),
-        hicon: read_i64(nid, 32),
-        tooltip: read_tooltip(nid, 40),
+        hwnd: read_u32(nid, 4)? as isize,
+        uid: read_u32(nid, 8)?,
+        flags: read_u32(nid, 12).unwrap_or(0),
+        callback_msg: read_u32(nid, 16).unwrap_or(0),
+        hicon: read_u32(nid, 20).unwrap_or(0) as isize,
+        tooltip: read_tooltip(nid, 24),
+        state: read_u32(nid, 280).unwrap_or(0),
+        state_mask: read_u32(nid, 284).unwrap_or(0),
+        version: read_u32(nid, 800).unwrap_or(0),
+        guid: if read_u32(nid, 12).unwrap_or(0) & 0x20 != 0 {
+            Some(nid.get(936..952)?.try_into().ok()?)
+        } else {
+            None
+        },
     })
 }
 
@@ -247,18 +291,6 @@ fn parse_shell_tray_data(raw: &[u8]) -> Option<ParsedIcon> {
 fn read_u32(buf: &[u8], off: usize) -> Option<u32> {
     let bytes = buf.get(off..off + 4)?;
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-/// Reads a little-endian `i64` at `off` as `isize`, defaulting to 0 when absent.
-fn read_i64(buf: &[u8], off: usize) -> isize {
-    match buf.get(off..off + 8) {
-        Some(b) => {
-            let mut a = [0u8; 8];
-            a.copy_from_slice(b);
-            i64::from_le_bytes(a) as isize
-        }
-        None => 0,
-    }
 }
 
 /// Decodes the NUL-terminated UTF-16 `szTip` at `off` (up to [`TIP_CHARS`]).
@@ -282,17 +314,23 @@ fn read_tooltip(buf: &[u8], off: usize) -> String {
 /// Any change re-arms the taskbar's debounced refresh, so an icon that appears
 /// (or disappears) shows up on the strip within the debounce window instead of
 /// waiting for the 30 s heartbeat.
-fn apply(parsed: ParsedIcon) {
+fn apply(parsed: ParsedIcon) -> bool {
+    let same = |icon: &TrayIconHandle| match parsed.guid {
+        Some(guid) => icon.guid == Some(guid),
+        None => icon.uid == parsed.uid && icon.hwnd == parsed.hwnd,
+    };
+    let mut accepted = true;
     let changed = {
         let mut guard = lock_or_recover(icons_store());
         match parsed.dw_message {
             NIM_DELETE => {
                 let before = guard.len();
-                guard.retain(|i| !(i.uid == parsed.uid && i.hwnd == parsed.hwnd));
+                guard.retain(|i| !same(i));
                 let removed = before - guard.len();
                 if removed > 0 {
                     tracing::info!(removed, uid = parsed.uid, "tray icon unregistered");
                 }
+                accepted = removed > 0;
                 removed > 0
             }
             NIM_ADD | NIM_MODIFY => {
@@ -302,12 +340,47 @@ fn apply(parsed: ParsedIcon) {
                     callback_msg: parsed.callback_msg,
                     tooltip: parsed.tooltip,
                     hicon: parsed.hicon,
+                    version: 0,
+                    hidden: parsed.flags & 8 != 0 && parsed.state_mask & parsed.state & 1 != 0,
+                    guid: parsed.guid,
+                    image: if parsed.flags & 2 != 0 {
+                        copy_icon(parsed.hicon)
+                    } else {
+                        None
+                    },
+                    owner_pid: unsafe { crate::win_util::window_pid(HWND(parsed.hwnd as *mut _)) },
                 };
-                let changed = match guard
-                    .iter_mut()
-                    .find(|i| i.uid == handle.uid && i.hwnd == handle.hwnd)
-                {
+                let changed = match guard.iter_mut().find(|i| same(i)) {
                     Some(existing) => {
+                        let handle = TrayIconHandle {
+                            hicon: if parsed.flags & 2 != 0 {
+                                handle.hicon
+                            } else {
+                                existing.hicon
+                            },
+                            callback_msg: if parsed.flags & 1 != 0 {
+                                handle.callback_msg
+                            } else {
+                                existing.callback_msg
+                            },
+                            tooltip: if parsed.flags & 4 != 0 {
+                                handle.tooltip
+                            } else {
+                                existing.tooltip.clone()
+                            },
+                            version: existing.version,
+                            hidden: if parsed.flags & 8 != 0 && parsed.state_mask & 1 != 0 {
+                                handle.hidden
+                            } else {
+                                existing.hidden
+                            },
+                            image: if parsed.flags & 2 != 0 {
+                                handle.image
+                            } else {
+                                existing.image.clone()
+                            },
+                            ..handle
+                        };
                         let changed = *existing != handle;
                         *existing = handle;
                         changed
@@ -329,7 +402,24 @@ fn apply(parsed: ParsedIcon) {
                 }
                 changed
             }
+            NIM_SETVERSION => {
+                if let Some(icon) = guard.iter_mut().find(|i| same(i)) {
+                    accepted = parsed.version <= 4;
+                    if accepted {
+                        icon.version = parsed.version;
+                    }
+                    accepted
+                } else {
+                    accepted = false;
+                    false
+                }
+            }
+            NIM_SETFOCUS => {
+                accepted = guard.iter().any(same);
+                false
+            }
             other => {
+                accepted = false;
                 tracing::debug!(other, "ignoring unknown NIM message");
                 false
             }
@@ -338,6 +428,7 @@ fn apply(parsed: ParsedIcon) {
     if changed {
         crate::window_events::request_refresh();
     }
+    accepted
 }
 
 /// Window procedure of the hidden tray sink.
@@ -363,6 +454,24 @@ unsafe extern "system" fn tray_wndproc_inner(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_TIMER && wparam.0 == 1 {
+        let removed = {
+            let mut icons = lock_or_recover(icons_store());
+            let before = icons.len();
+            icons.retain(|icon| {
+                let owner = HWND(icon.hwnd as *mut _);
+                unsafe {
+                    IsWindow(Some(owner)).as_bool()
+                        && crate::win_util::window_pid(owner) == icon.owner_pid
+                }
+            });
+            before != icons.len()
+        };
+        if removed {
+            crate::window_events::request_refresh();
+        }
+        return LRESULT(0);
+    }
     if msg == WM_COPYDATA {
         // SAFETY: for WM_COPYDATA the OS guarantees `lparam` points to a live
         // `COPYDATASTRUCT` valid for the duration of this call.
@@ -382,7 +491,7 @@ unsafe extern "system" fn tray_wndproc_inner(
                     // ever registered", which is the exact ambiguity that ate
                     // a session during the 0.1.3 acceptance run.
                     match parse_shell_tray_data(raw) {
-                        Some(parsed) => apply(parsed),
+                        Some(parsed) => return LRESULT(apply(parsed) as isize),
                         None => {
                             tracing::warn!(cb = cds.cbData, "tray sink: unparseable tray payload");
                         }
@@ -410,38 +519,30 @@ unsafe extern "system" fn tray_wndproc_inner(
 mod tests {
     use super::*;
 
-    /// Builds a synthetic 64-bit `SHELLTRAYDATA` blob:
-    /// `dwMessage` (4 bytes) + `NOTIFYICONDATAW`.
+    /// Native x64 callers also send DWORD handles in this marshalled envelope.
     fn blob(dw_message: u32, hwnd: i64, uid: u32, cb_msg: u32, hicon: i64, tip: &str) -> Vec<u8> {
-        let mut v = vec![0u8; 4 + 40 + TIP_CHARS * 2];
-        v[0..4].copy_from_slice(&dw_message.to_le_bytes());
-        let nid = 4;
-        // cbSize at nid+0.
-        v[nid..nid + 4].copy_from_slice(&(40u32 + 256).to_le_bytes());
-        v[nid + 8..nid + 16].copy_from_slice(&hwnd.to_le_bytes());
-        v[nid + 16..nid + 20].copy_from_slice(&uid.to_le_bytes());
-        v[nid + 20..nid + 24].copy_from_slice(&0x3u32.to_le_bytes()); // uFlags
-        v[nid + 24..nid + 28].copy_from_slice(&cb_msg.to_le_bytes());
-        v[nid + 32..nid + 40].copy_from_slice(&hicon.to_le_bytes());
+        let mut v = vec![0u8; 8 + 956];
+        v[0..4].copy_from_slice(&SHELLTRAYDATA_MAGIC.to_le_bytes());
+        v[4..8].copy_from_slice(&dw_message.to_le_bytes());
+        let nid = 8;
+        v[nid..nid + 4].copy_from_slice(&956u32.to_le_bytes());
+        v[nid + 4..nid + 8].copy_from_slice(&(hwnd as u32).to_le_bytes());
+        v[nid + 8..nid + 12].copy_from_slice(&uid.to_le_bytes());
+        v[nid + 12..nid + 16].copy_from_slice(&7u32.to_le_bytes());
+        v[nid + 16..nid + 20].copy_from_slice(&cb_msg.to_le_bytes());
+        v[nid + 20..nid + 24].copy_from_slice(&(hicon as u32).to_le_bytes());
         let mut tip_bytes: Vec<u8> = tip.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         tip_bytes.truncate(TIP_CHARS * 2);
-        v[nid + 40..nid + 40 + tip_bytes.len()].copy_from_slice(&tip_bytes);
+        v[nid + 24..nid + 24 + tip_bytes.len()].copy_from_slice(&tip_bytes);
         v
     }
 
     #[test]
     fn parses_full_add_payload() {
-        let raw = blob(
-            NIM_ADD,
-            0x1122_3344_5566_7788u64 as i64,
-            7,
-            0x0400,
-            0xAA,
-            "Hello 世界",
-        );
+        let raw = blob(NIM_ADD, 0x5566_7788, 7, 0x0400, 0xAA, "Hello 世界");
         let p = parse_shell_tray_data(&raw).expect("full blob should parse");
         assert_eq!(p.dw_message, NIM_ADD);
-        assert_eq!(p.hwnd, 0x1122_3344_5566_7788u64 as i64 as isize);
+        assert_eq!(p.hwnd, 0x5566_7788);
         assert_eq!(p.uid, 7);
         assert_eq!(p.callback_msg, 0x0400);
         assert_eq!(p.hicon, 0xAA);
@@ -451,10 +552,9 @@ mod tests {
     #[test]
     fn delete_payload_without_tip_still_parses() {
         // Only up to uID is present (typical NIM_DELETE); the rest must default.
-        let mut raw = vec![0u8; 4 + 20];
-        raw[0..4].copy_from_slice(&NIM_DELETE.to_le_bytes());
-        raw[4 + 8..4 + 16].copy_from_slice(&0x1234i64.to_le_bytes());
-        raw[4 + 16..4 + 20].copy_from_slice(&9u32.to_le_bytes());
+        let mut raw = blob(NIM_DELETE, 0x1234, 9, 0, 0, "");
+        raw.truncate(8 + 12);
+        raw[8..12].copy_from_slice(&12u32.to_le_bytes());
 
         let p = parse_shell_tray_data(&raw).expect("delete blob should parse");
         assert_eq!(p.dw_message, NIM_DELETE);
@@ -470,7 +570,7 @@ mod tests {
         let mut raw = blob(NIM_ADD, 1, 1, 0, 0, "ab");
         // Plant garbage after the NUL terminator (helper leaves tip+4.. as 0),
         // so the parser must still stop at the NUL right after "ab".
-        let tip = 4 + 40;
+        let tip = 8 + 24;
         let garbage = ('Z' as u16).to_le_bytes();
         raw[tip + 6..tip + 8].copy_from_slice(&garbage);
         let p = parse_shell_tray_data(&raw).unwrap();
@@ -481,22 +581,17 @@ mod tests {
     fn too_short_blob_is_rejected() {
         assert!(parse_shell_tray_data(&[]).is_none());
         assert!(parse_shell_tray_data(&[0, 0, 0]).is_none());
-        // Exactly 4 bytes: dwMessage decodes, everything else defaults to zero.
-        let p = parse_shell_tray_data(&[2, 0, 0, 0]).expect("4-byte blob");
-        assert_eq!(p.dw_message, NIM_DELETE);
-        assert_eq!(p.uid, 0);
-        assert_eq!(p.hwnd, 0);
-        assert_eq!(p.tooltip, "");
+        assert!(parse_shell_tray_data(&[2, 0, 0, 0]).is_none());
+        let mut truncated = blob(NIM_ADD, 1, 1, 1, 1, "tip");
+        truncated.truncate(32);
+        assert!(parse_shell_tray_data(&truncated).is_none());
     }
 
     #[test]
-    fn handles_are_empty_when_not_installed() {
-        // No install happened in this test process, so nothing is hosted. Only
-        // the icon *we* register below is asserted on: the store is
-        // process-global and tests run in parallel, so a global "is empty"
-        // assertion would be inherently racy.
+    fn host_is_inactive_without_installation() {
+        // Other tests mutate the global table concurrently; only installation
+        // state is a meaningful process-wide invariant in this test binary.
         assert!(!is_installed());
-        assert!(handles().iter().all(|h| h.uid != 3 || h.hwnd != 0x5555));
     }
 
     #[test]
@@ -542,6 +637,53 @@ mod tests {
             !handles().iter().any(|h| h.uid == 5 && h.hwnd == 0x7777),
             "an unknown dwMessage must be ignored"
         );
+    }
+
+    #[test]
+    fn partial_updates_preserve_callback_icon_and_negotiated_version() {
+        let owner = 0x77119;
+        assert!(apply(
+            parse_shell_tray_data(&blob(NIM_ADD, owner, 19, 0x8111, 0x33, "before")).unwrap()
+        ));
+        let mut version = blob(NIM_SETVERSION, owner, 19, 0, 0, "");
+        version[8 + 800..8 + 804].copy_from_slice(&4u32.to_le_bytes());
+        assert!(apply(parse_shell_tray_data(&version).unwrap()));
+        let mut update = blob(NIM_MODIFY, owner, 19, 0, 0, "after");
+        update[8 + 12..8 + 16].copy_from_slice(&4u32.to_le_bytes());
+        assert!(apply(parse_shell_tray_data(&update).unwrap()));
+        let current = handles()
+            .into_iter()
+            .find(|i| i.hwnd == owner as isize && i.uid == 19)
+            .unwrap();
+        assert_eq!(
+            (current.callback_msg, current.hicon, current.version),
+            (0x8111, 0x33, 4)
+        );
+        assert_eq!(current.tooltip, "after");
+        assert!(apply(
+            parse_shell_tray_data(&blob(NIM_DELETE, owner, 19, 0, 0, "")).unwrap()
+        ));
+    }
+
+    #[test]
+    fn guid_identity_updates_hidden_state_without_duplicating_or_reordering() {
+        let guid = [0x42u8; 16];
+        let make = |operation, uid, flags: u32, state| {
+            let mut raw = blob(operation, 0x77120, uid, 0x8112, 0, "guid");
+            raw[8 + 12..8 + 16].copy_from_slice(&(flags | 0x20u32).to_le_bytes());
+            raw[8 + 280..8 + 284].copy_from_slice(&u32::to_le_bytes(state));
+            raw[8 + 284..8 + 288].copy_from_slice(&1u32.to_le_bytes());
+            raw[8 + 936..8 + 952].copy_from_slice(&guid);
+            parse_shell_tray_data(&raw).unwrap()
+        };
+        assert!(apply(make(NIM_ADD, 20, 7, 0)));
+        assert!(apply(make(NIM_MODIFY, 21, 8, 1)));
+        let entries = handles();
+        let matches: Vec<_> = entries.iter().filter(|i| i.guid == Some(guid)).collect();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].hidden);
+        assert_eq!(matches[0].callback_msg, 0x8112);
+        assert!(apply(make(NIM_DELETE, 0, 0, 0)));
     }
 
     #[test]

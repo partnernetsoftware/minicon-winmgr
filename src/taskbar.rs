@@ -47,9 +47,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, IsIconic, IsWindow, KillTimer, PostMessageW, RegisterClassW, SM_CXSCREEN,
     SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE, SetTimer,
     SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -76,7 +76,8 @@ const SETTINGS_W: i32 = 26;
 /// Horizontal space reserved on the right edge for the clock. Task buttons may
 /// never intrude into it. The notification-icon strip is reserved on top of
 /// this (see `layout`), so it never overlaps the clock.
-const RIGHT_W: i32 = CLOCK_W + PAD;
+const SYSTEM_W: i32 = 44;
+const RIGHT_W: i32 = CLOCK_W + PAD + SYSTEM_W + PAD;
 /// Button-width tiers ("density ladder"). The bar starts at [`Density::Full`]
 /// (comfortable buttons carrying a title) and drops to [`Density::Compact`]
 /// (narrower, tighter padding) and finally to [`Density::IconOnly`] (the title
@@ -491,6 +492,8 @@ struct BarEntry {
     /// Notification-strip icon under the cursor, if any. Hover shows the icon's
     /// tooltip but is deliberately **never** forwarded to its owner.
     tray_hover: Option<usize>,
+    tray_pressed: Option<crate::tray::TrayItem>,
+    tray_right_pressed: Option<crate::tray::TrayItem>,
     selected: Option<usize>,
 }
 
@@ -520,7 +523,7 @@ fn tray_icons() -> &'static Mutex<Vec<crate::tray::TrayItem>> {
 /// The single source of the strip's geometry on the message thread: the painter
 /// and every mouse handler call this, so their coordinate maths cannot diverge.
 fn tray_layout(client: RECT) -> crate::tray_bar::Layout {
-    let right = client.right - PAD - CLOCK_W - PAD;
+    let right = client.right - PAD - CLOCK_W - PAD - SYSTEM_W - PAD;
     crate::tray_bar::Layout::new(BTN_TOP, right, BAR_H - 2 * BTN_TOP)
 }
 
@@ -529,14 +532,14 @@ fn tray_layout(client: RECT) -> crate::tray_bar::Layout {
 /// Returns a clone so no lock is held while the caller talks to another
 /// process.
 fn tray_item_at(client: RECT, x: i32, y: i32) -> Option<crate::tray::TrayItem> {
-    let icons = lock_or_recover(tray_icons());
+    let (icons, _) = notification_parts(client);
     let index = tray_layout(client).hit_test(icons.len(), x, y)?;
     icons.get(index).cloned()
 }
 
 /// Index of the notification icon under `(x, y)`, without cloning it.
 fn tray_index_at(client: RECT, x: i32, y: i32) -> Option<usize> {
-    let icons = lock_or_recover(tray_icons());
+    let (icons, _) = notification_parts(client);
     tray_layout(client).hit_test(icons.len(), x, y)
 }
 
@@ -545,7 +548,7 @@ fn tray_index_at(client: RECT, x: i32, y: i32) -> Option<usize> {
 /// `None` when the strip changed under us or the icon carries no tooltip.
 fn tray_tooltip(key: isize, index: usize) -> Option<(String, RECT)> {
     let client = bar_client(key);
-    let icons = lock_or_recover(tray_icons());
+    let (icons, _) = notification_parts(client);
     let cell = tray_layout(client).cell_rect(index, icons.len())?;
     let tooltip = icons.get(index)?.tooltip.clone();
     drop(icons);
@@ -567,6 +570,82 @@ fn tray_tooltip(key: isize, index: usize) -> Option<(String, RECT)> {
             bottom: cell.bottom + wr.top,
         },
     ))
+}
+
+fn notification_parts(client: RECT) -> (Vec<crate::tray::TrayItem>, Vec<crate::tray::TrayItem>) {
+    let capacity = ((client.right - RIGHT_W - 200).max(0)
+        / (crate::tray_bar::CELL + crate::tray_bar::GAP))
+        .min(4) as usize;
+    let mut visible = Vec::new();
+    let mut hidden = Vec::new();
+    for item in lock_or_recover(tray_icons())
+        .iter()
+        .filter(|i| i.owner.is_some())
+    {
+        if !item.hidden && visible.len() < capacity {
+            visible.push(item.clone());
+        } else {
+            hidden.push(item.clone());
+        }
+    }
+    (visible, hidden)
+}
+fn notification_width(client: RECT) -> i32 {
+    let (visible, hidden) = notification_parts(client);
+    crate::tray_bar::strip_width(visible.len(), crate::tray_bar::CELL, crate::tray_bar::GAP)
+        + if hidden.is_empty() {
+            0
+        } else {
+            crate::tray_bar::CELL + crate::tray_bar::GAP
+        }
+}
+fn notification_arrow(client: RECT) -> Option<RECT> {
+    let (visible, hidden) = notification_parts(client);
+    if hidden.is_empty() {
+        return None;
+    }
+    let right = tray_layout(client).right_x
+        - crate::tray_bar::strip_width(visible.len(), crate::tray_bar::CELL, crate::tray_bar::GAP)
+        - crate::tray_bar::GAP;
+    Some(RECT {
+        left: right - crate::tray_bar::CELL,
+        top: 0,
+        right,
+        bottom: BAR_H,
+    })
+}
+fn notification_system(client: RECT) -> RECT {
+    let right = client.right - PAD - CLOCK_W - PAD;
+    RECT {
+        left: right - SYSTEM_W,
+        top: 0,
+        right,
+        bottom: BAR_H,
+    }
+}
+fn show_notifications(bar: HWND, client: RECT, hidden_only: bool) {
+    let mut anchor = if hidden_only {
+        notification_arrow(client).unwrap_or_else(|| notification_system(client))
+    } else {
+        notification_system(client)
+    };
+    let mut origin = RECT::default();
+    let _ = unsafe { GetWindowRect(bar, &mut origin) };
+    anchor.left += origin.left;
+    anchor.right += origin.left;
+    anchor.top += origin.top;
+    anchor.bottom += origin.top;
+    let (_, hidden) = notification_parts(client);
+    let items = if hidden_only {
+        hidden
+    } else {
+        lock_or_recover(tray_icons())
+            .iter()
+            .filter(|i| i.owner.is_some())
+            .cloned()
+            .collect()
+    };
+    crate::tray_popup::toggle(bar, anchor, items, !hidden_only);
 }
 
 /// Client rect of the bar with handle `key`.
@@ -1161,8 +1240,6 @@ pub fn refresh() {
     } else {
         Vec::new()
     };
-    let tray_w =
-        crate::tray_bar::strip_width(icons.len(), crate::tray_bar::CELL, crate::tray_bar::GAP);
     // Tells the log reader which shape the strip is in: all-forwardable means we
     // own the tray, none means the inert mirrored one (0.1.3 plan §2.1).
     tracing::debug!(
@@ -1171,6 +1248,18 @@ pub fn refresh() {
         "notification strip refreshed"
     );
     *lock_or_recover(tray_icons()) = icons;
+    let reference = RECT {
+        right: reference_client_width(),
+        ..Default::default()
+    };
+    let (_, hidden) = notification_parts(reference);
+    let all: Vec<_> = lock_or_recover(tray_icons())
+        .iter()
+        .filter(|i| i.owner.is_some())
+        .cloned()
+        .collect();
+    crate::tray_popup::update(&all, &hidden);
+    let tray_w = notification_width(reference);
 
     let ref_avail = reference_task_avail(tray_w);
     // Conservative fold basis: subtract the pins' width too, so the "would this
@@ -1276,7 +1365,13 @@ pub fn refresh() {
                 BAR_H,
             )
         };
-        let bl = layout(tasks_left, client.right, n, tray_w, bar.density);
+        let bl = layout(
+            tasks_left,
+            client.right,
+            n,
+            notification_width(client),
+            bar.density,
+        );
         bar.rects = bl.rects;
         bar.overflow = bl.overflow;
         bar.hidden_from = bl.hidden_from;
@@ -1540,15 +1635,31 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            if let Some(bar) = lock_or_recover(bars()).iter_mut().find(|b| b.hwnd == key) {
+                bar.tray_pressed = None;
+            }
             let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
             crate::hover_preview::hide();
             crate::bar_tip::hide();
             let x = get_x(lparam);
             let y = get_y(lparam);
+            let client = bar_client(key);
+            let contains = |r: RECT| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+            if notification_arrow(client).is_some_and(contains) {
+                show_notifications(hwnd, client, true);
+                return LRESULT(0);
+            }
+            if contains(notification_system(client)) {
+                show_notifications(hwnd, client, false);
+                return LRESULT(0);
+            }
             // Notification strip: hand the click to the app that registered the
             // icon, exactly as the stock tray would (0.1.3 plan §2.2). Inert in
             // the mirrored shape — `forward` logs and does nothing.
             if let Some(item) = tray_item_at(bar_client(key), x, y) {
+                if let Some(bar) = lock_or_recover(bars()).iter_mut().find(|b| b.hwnd == key) {
+                    bar.tray_pressed = Some(item.clone());
+                }
                 crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::LeftDown);
                 return LRESULT(0);
             }
@@ -1638,6 +1749,9 @@ unsafe extern "system" fn wndproc_inner(
             // Notification strip first: a double-click on a tray icon is the
             // "default action" gesture (open the app's window).
             if let Some(item) = tray_item_at(client, x, get_y(lparam)) {
+                if let Some(bar) = lock_or_recover(bars()).iter_mut().find(|b| b.hwnd == key) {
+                    bar.tray_pressed = Some(item.clone());
+                }
                 crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::LeftDoubleClick);
                 return LRESULT(0);
             }
@@ -1646,16 +1760,39 @@ unsafe extern "system" fn wndproc_inner(
             }
             LRESULT(0)
         }
+        WM_LBUTTONUP => {
+            let pressed = lock_or_recover(bars())
+                .iter_mut()
+                .find(|b| b.hwnd == key)
+                .and_then(|b| b.tray_pressed.take());
+            let current = tray_item_at(bar_client(key), get_x(lparam), get_y(lparam));
+            if let Some(item) =
+                pressed.filter(|old| current.as_ref().is_some_and(|item| item.owner == old.owner))
+            {
+                crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::LeftUp);
+            }
+            LRESULT(0)
+        }
         WM_RBUTTONUP => {
             // Half of the right-click pair a hosted icon may need (some apps
             // finalise on release); the mirrored shape ignores it.
             let client = bar_client(key);
-            if let Some(item) = tray_item_at(client, get_x(lparam), get_y(lparam)) {
+            let pressed = lock_or_recover(bars())
+                .iter_mut()
+                .find(|b| b.hwnd == key)
+                .and_then(|b| b.tray_right_pressed.take());
+            let current = tray_item_at(client, get_x(lparam), get_y(lparam));
+            if let Some(item) =
+                pressed.filter(|old| current.as_ref().is_some_and(|item| item.owner == old.owner))
+            {
                 crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::RightUp);
             }
             LRESULT(0)
         }
         WM_RBUTTONDOWN => {
+            if let Some(bar) = lock_or_recover(bars()).iter_mut().find(|b| b.hwnd == key) {
+                bar.tray_right_pressed = None;
+            }
             let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
             crate::hover_preview::hide();
             crate::bar_tip::hide();
@@ -1665,6 +1802,9 @@ unsafe extern "system" fn wndproc_inner(
             // right-button-down, so the event goes to the owner rather than
             // opening one of ours.
             if let Some(item) = tray_item_at(bar_client(key), x, y) {
+                if let Some(bar) = lock_or_recover(bars()).iter_mut().find(|b| b.hwnd == key) {
+                    bar.tray_right_pressed = Some(item.clone());
+                }
                 crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::RightDown);
                 return LRESULT(0);
             }
@@ -2126,12 +2266,29 @@ unsafe fn paint(hwnd: HWND) {
         }
 
         // Notification-icon strip, sitting just left of the clock.
-        let icons = lock_or_recover(tray_icons());
+        let (icons, _) = notification_parts(client);
         if !icons.is_empty() {
             let layout = tray_layout(client);
             crate::tray_bar::paint(hdc, &layout, &icons);
         }
-        drop(icons);
+        let mut label: Vec<u16> = "通知".encode_utf16().collect();
+        let mut rect = notification_system(client);
+        SetTextColor(hdc, COLORREF(theme().muted));
+        DrawTextW(
+            hdc,
+            &mut label,
+            &mut rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        if let Some(mut rect) = notification_arrow(client) {
+            let mut arrow = [b'^' as u16];
+            DrawTextW(
+                hdc,
+                &mut arrow,
+                &mut rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
 
         // Right zone: the clock (`yy-mm-dd HH:MM`), right-aligned and muted.
         SetTextColor(hdc, COLORREF(theme().muted));
@@ -2740,7 +2897,7 @@ mod tests {
     fn icon_only_tier_shows_squares_when_everything_fits() {
         // A budget in [40, 80) lands in icon-only: the title is dropped but all
         // buttons still fit, drawn as 40–48px squares.
-        let bl = layout(200, 560, 4, 0, Density::Full);
+        let bl = layout(200, 560 + super::SYSTEM_W + super::PAD, 4, 0, Density::Full);
         assert_eq!(bl.density, Density::IconOnly);
         assert!(bl.overflow.is_none(), "all four should fit as squares");
         assert_eq!(bl.rects.len(), 4);
@@ -2892,7 +3049,7 @@ mod tests {
         let layout = super::tray_layout(client);
         assert_eq!(
             layout.right_x,
-            client.right - super::PAD - super::CLOCK_W - super::PAD
+            client.right - super::PAD - super::CLOCK_W - super::PAD - super::SYSTEM_W - super::PAD
         );
         assert_eq!(
             layout.strip_width(3),

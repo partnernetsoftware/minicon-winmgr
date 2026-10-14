@@ -12,18 +12,18 @@
 
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{FillRect, HDC};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CopyImage, DI_NORMAL, DestroyIcon, DrawIconEx, HICON, IMAGE_ICON, IsWindow, LR_DEFAULTCOLOR,
-    PostMessageW,
+    AllowSetForegroundWindow, CopyImage, DI_NORMAL, DestroyIcon, DrawIconEx, GetCursorPos,
+    GetWindowThreadProcessId, HICON, IMAGE_ICON, IsWindow, LR_DEFAULTCOLOR, PostMessageW,
 };
 
 use crate::tray::TrayItem;
 use crate::win_util::{self, Brush};
 
 /// Square cell edge, in logical pixels.
-pub(crate) const CELL: i32 = 18;
+pub(crate) const CELL: i32 = 28;
 /// Gap between adjacent cells, in logical pixels.
 pub(crate) const GAP: i32 = 2;
 
@@ -115,9 +115,12 @@ impl Layout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MouseEvent {
     LeftDown,
+    LeftUp,
     LeftDoubleClick,
     RightDown,
     RightUp,
+    KeyboardSelect,
+    KeyboardMenu,
 }
 
 impl MouseEvent {
@@ -127,10 +130,13 @@ impl MouseEvent {
         // notify-icon protocol and pinning them keeps a transposed constant
         // from silently sending the wrong button.
         match self {
-            MouseEvent::LeftDown => 0x0201,        // WM_LBUTTONDOWN
+            MouseEvent::LeftDown => 0x0201, // WM_LBUTTONDOWN
+            MouseEvent::LeftUp => 0x0202,
             MouseEvent::LeftDoubleClick => 0x0203, // WM_LBUTTONDBLCLK
             MouseEvent::RightDown => 0x0204,       // WM_RBUTTONDOWN
             MouseEvent::RightUp => 0x0205,         // WM_RBUTTONUP
+            MouseEvent::KeyboardSelect => 0x0401,
+            MouseEvent::KeyboardMenu => 0x007b,
         }
     }
 }
@@ -158,8 +164,16 @@ pub(crate) unsafe fn paint(hdc: HDC, layout: &Layout, items: &[TrayItem]) -> i32
             let Some(rect) = layout.cell_rect(index, count) else {
                 continue;
             };
-            draw_real_icon(hdc, rect, item.hicon, index).unwrap_or_else(|| {
-                fill_placeholder(hdc, rect, item.pid);
+            let inset = ((rect.right - rect.left - 20) / 2).max(0);
+            let image_rect = RECT {
+                left: rect.left + inset,
+                top: rect.top + inset,
+                right: rect.right - inset,
+                bottom: rect.bottom - inset,
+            };
+            let icon = item.image.as_ref().map_or(item.hicon, |image| image.0);
+            draw_real_icon(hdc, image_rect, icon, index).unwrap_or_else(|| {
+                fill_placeholder(hdc, image_rect, item.pid);
             });
         }
     }
@@ -284,10 +298,23 @@ fn placeholder_color(pid: u32) -> COLORREF {
 /// mirrored shape) and owners whose window has gone away are logged no-ops —
 /// never a panic, never a modal error.
 pub(crate) fn forward(item: &TrayItem, event: MouseEvent) -> bool {
+    let mut point = POINT::default();
+    let _ = unsafe { GetCursorPos(&mut point) };
+    forward_at(item, event, point)
+}
+
+pub(crate) fn forward_at(item: &TrayItem, event: MouseEvent, point: POINT) -> bool {
     let Some(owner) = item.owner else {
         tracing::debug!("tray strip is in its inert shape; click not forwarded");
         return false;
     };
+    // Pre-NOTIFYICON_VERSION clients expect the legacy right-button pair for
+    // keyboard activation/menu requests, rather than NIN_KEYSELECT/CONTEXTMENU.
+    if owner.version < 3 && matches!(event, MouseEvent::KeyboardSelect | MouseEvent::KeyboardMenu) {
+        let down = forward_at(item, MouseEvent::RightDown, point);
+        let up = forward_at(item, MouseEvent::RightUp, point);
+        return down && up;
+    }
 
     // SAFETY: `HWND` is a plain handle wrapper, and a stale handle is exactly
     // what `IsWindow` exists to reject.
@@ -300,14 +327,27 @@ pub(crate) fn forward(item: &TrayItem, event: MouseEvent) -> bool {
         return false;
     }
 
+    let mut pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    if pid != item.pid {
+        return false;
+    }
+    // The user explicitly selected this app's notification icon. Permit its
+    // posted callback to activate a menu without forcing focus back to us.
+    let _ = unsafe { AllowSetForegroundWindow(pid) };
+    let Some((wparam, lparam)) = callback(owner.uid, owner.version, event, point.x, point.y) else {
+        return true;
+    };
     // SAFETY: `hwnd` was just confirmed live; message/wparams are plain values.
     // `PostMessageW` is asynchronous, so a hung owner cannot stall our bar.
     match unsafe {
         PostMessageW(
             Some(hwnd),
             owner.callback_msg,
-            WPARAM(owner.uid as usize),
-            LPARAM(event.lparam() as isize),
+            WPARAM(wparam),
+            LPARAM(lparam),
         )
     } {
         Ok(()) => {
@@ -332,6 +372,23 @@ pub(crate) fn forward(item: &TrayItem, event: MouseEvent) -> bool {
     }
 }
 
+fn callback(uid: u32, version: u32, event: MouseEvent, x: i32, y: i32) -> Option<(usize, isize)> {
+    if version >= 4 {
+        let notification = match event {
+            MouseEvent::LeftDown | MouseEvent::RightDown => return None,
+            MouseEvent::LeftUp => 0x0400,
+            MouseEvent::RightUp | MouseEvent::KeyboardMenu => 0x007b,
+            other => other.lparam(),
+        };
+        Some((
+            ((x as u16 as u32) | ((y as u16 as u32) << 16)) as usize,
+            (notification | ((uid & 0xffff) << 16)) as isize,
+        ))
+    } else {
+        Some((uid as usize, event.lparam() as isize))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,12 +400,28 @@ mod tests {
             pid: 0,
             hicon: 0,
             owner,
+            hidden: false,
+            image: None,
         }
     }
 
     #[test]
     fn empty_is_zero() {
         assert_eq!(strip_width(0, 18, 2), 0);
+    }
+
+    #[test]
+    fn version_four_callbacks_pack_identity_and_signed_screen_coordinates() {
+        let (point, event) = callback(0x1234, 4, MouseEvent::RightUp, -120, -30).unwrap();
+        assert_eq!(point as u16 as i16, -120);
+        assert_eq!((point >> 16) as u16 as i16, -30);
+        assert_eq!(event as u32, 0x1234_007b);
+        assert_eq!(callback(7, 4, MouseEvent::LeftDown, 0, 0), None);
+        assert_eq!(
+            callback(7, 4, MouseEvent::LeftUp, 0, 0),
+            Some((0, 0x0007_0400))
+        );
+        assert_eq!(callback(7, 0, MouseEvent::LeftUp, 0, 0), Some((7, 0x0202)));
     }
 
     #[test]
@@ -377,23 +450,23 @@ mod tests {
 
     #[test]
     fn three_cells_are_right_aligned_and_evenly_spaced() {
-        // count=3, cell=18, gap=2 -> width 58; last cell ends flush at right_x.
+        // Three 28px hit cells with 2px gaps, flush at right_x.
         let l = Layout::new(0, 100, 36);
         let r0 = l.cell_rect(0, 3).unwrap();
         let r1 = l.cell_rect(1, 3).unwrap();
         let r2 = l.cell_rect(2, 3).unwrap();
-        assert_eq!((r0.left, r0.right), (42, 60));
-        assert_eq!((r1.left, r1.right), (62, 80));
-        assert_eq!((r2.left, r2.right), (82, 100));
-        assert_eq!(l.strip_width(3), 58);
+        assert_eq!((r0.left, r0.right), (12, 40));
+        assert_eq!((r1.left, r1.right), (42, 70));
+        assert_eq!((r2.left, r2.right), (72, 100));
+        assert_eq!(l.strip_width(3), 88);
     }
 
     #[test]
     fn cells_are_vertically_centred() {
-        // height 36, cell 18 -> 9px above and below.
+        // Height 36, cell 28: 4px above and below.
         let l = Layout::new(4, 100, 36);
         let r = l.cell_rect(0, 1).unwrap();
-        assert_eq!((r.top, r.bottom), (4 + 9, 4 + 9 + 18));
+        assert_eq!((r.top, r.bottom), (8, 36));
     }
 
     #[test]
@@ -408,15 +481,15 @@ mod tests {
 
     #[test]
     fn hit_test_is_right_aligned_and_skips_gaps() {
-        // 3 cells of 18 + 2 gaps of 2 = 58 wide, ending flush at x=100.
+        // Three 28px cells ending flush at x=100.
         let l = Layout::new(0, 100, 36);
-        assert_eq!(l.hit_test(3, 50, 18), Some(0));
-        assert_eq!(l.hit_test(3, 70, 18), Some(1));
+        assert_eq!(l.hit_test(3, 20, 18), Some(0));
+        assert_eq!(l.hit_test(3, 50, 18), Some(1));
         assert_eq!(l.hit_test(3, 90, 18), Some(2));
-        // A gap column (between 60 and 62) hits nothing.
-        assert_eq!(l.hit_test(3, 61, 18), None);
-        // Left of the strip.
+        // A gap column between the first and second cells.
         assert_eq!(l.hit_test(3, 41, 18), None);
+        // Left of the strip.
+        assert_eq!(l.hit_test(3, 11, 18), None);
         // Right edge is exclusive.
         assert_eq!(l.hit_test(3, 100, 18), None);
     }
@@ -424,11 +497,11 @@ mod tests {
     #[test]
     fn hit_test_respects_the_vertical_band() {
         let l = Layout::new(4, 100, 36);
-        // cell 18 centred in 36 -> rows [13, 31).
-        assert_eq!(l.hit_test(1, 90, 12), None);
-        assert_eq!(l.hit_test(1, 90, 13), Some(0));
-        assert_eq!(l.hit_test(1, 90, 30), Some(0));
-        assert_eq!(l.hit_test(1, 90, 31), None);
+        // Cell 28 centred in 36 with origin 4: rows [8, 36).
+        assert_eq!(l.hit_test(1, 90, 7), None);
+        assert_eq!(l.hit_test(1, 90, 8), Some(0));
+        assert_eq!(l.hit_test(1, 90, 35), Some(0));
+        assert_eq!(l.hit_test(1, 90, 36), None);
     }
 
     #[test]
@@ -526,6 +599,7 @@ mod tests {
             hwnd: 0x1234,
             uid: 7,
             callback_msg: 0x0400,
+            version: 0,
         }));
         assert!(!forward(&stale, MouseEvent::LeftDown));
     }

@@ -66,6 +66,7 @@ pub(crate) struct TrayOwner {
     pub(crate) uid: u32,
     /// Callback message the owner expects for tray events.
     pub(crate) callback_msg: u32,
+    pub(crate) version: u32,
 }
 
 /// One icon in the notification area.
@@ -82,6 +83,8 @@ pub(crate) struct TrayItem {
     /// Present iff a click on this icon can reach the app that registered it.
     /// Always `None` on the mirror path.
     pub(crate) owner: Option<TrayOwner>,
+    pub(crate) hidden: bool,
+    pub(crate) image: Option<std::sync::Arc<crate::tray_host::IconImage>>,
 }
 
 impl TrayItem {
@@ -114,6 +117,7 @@ fn from_handle(handle: crate::tray_host::TrayIconHandle) -> TrayItem {
         hwnd: handle.hwnd,
         uid: handle.uid,
         callback_msg: handle.callback_msg,
+        version: handle.version,
     });
     let pid = if handle.hwnd == 0 {
         0
@@ -127,6 +131,8 @@ fn from_handle(handle: crate::tray_host::TrayIconHandle) -> TrayItem {
         pid,
         hicon: handle.hicon,
         owner,
+        hidden: handle.hidden,
+        image: handle.image,
     }
 }
 
@@ -338,6 +344,8 @@ unsafe fn read_buttons(
             pid: 0,
             hicon: 0,
             owner: None,
+            hidden: false,
+            image: None,
         });
     }
     icons
@@ -457,12 +465,15 @@ mod tests {
             pid: 0,
             hicon: 0,
             owner: None,
+            hidden: false,
+            image: None,
         };
         assert!(!item.is_forwardable());
         item.owner = Some(TrayOwner {
             hwnd: 0x1234,
             uid: 1,
             callback_msg: 0x0400,
+            version: 0,
         });
         assert!(item.is_forwardable());
     }

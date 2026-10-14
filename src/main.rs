@@ -33,6 +33,7 @@ mod taskbar;
 mod tray;
 mod tray_bar;
 mod tray_host;
+mod tray_popup;
 mod win_util;
 mod window;
 mod window_events;
@@ -212,6 +213,7 @@ fn run_companion() {
 
     let result = window::run();
     crate::run_dialog::shutdown();
+    crate::tray_popup::shutdown();
     // The message loop only closes the message-only window, so the taskbar
     // windows never see WM_DESTROY and would not restore the reserved work
     // area. Tear them down explicitly.

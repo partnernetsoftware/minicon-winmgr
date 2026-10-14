@@ -129,6 +129,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(err) = crate::tray_host::install(hinstance) {
             tracing::error!(%err, "tray host install failed; continuing without it");
         }
+        if let Err(err) = crate::tray_popup::install(hinstance) {
+            tracing::error!(%err, "notification panel install failed");
+        }
 
         // Window-management hotkeys (Win+Left/Right/Up).
         if let Err(err) = crate::hotkeys::install(hinstance) {
