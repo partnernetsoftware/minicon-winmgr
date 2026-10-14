@@ -266,12 +266,17 @@ fn reserve_workarea(area: (i32, i32, i32, i32)) {
             right: x + w,
             bottom: y + h - BAR_H,
         };
-        let _ = SystemParametersInfoW(
+        if let Err(err) = SystemParametersInfoW(
             SPI_SETWORKAREA,
             0,
             Some(&mut target as *mut RECT as *mut core::ffi::c_void),
             SPIF_SENDCHANGE,
-        );
+        ) {
+            tracing::warn!(
+                %err,
+                "reserve_workarea: SPI_SETWORKAREA refused; the bar may overlap maximised windows"
+            );
+        }
         if let Some(orig) = *guard {
             save_workarea_state(&orig, &target);
         }
@@ -286,12 +291,17 @@ fn restore_workarea() {
         let mut r = orig;
         // SAFETY: `r` outlives the call.
         unsafe {
-            let _ = SystemParametersInfoW(
+            if let Err(err) = SystemParametersInfoW(
                 SPI_SETWORKAREA,
                 0,
                 Some(&mut r as *mut RECT as *mut core::ffi::c_void),
                 SPIF_SENDCHANGE,
-            );
+            ) {
+                tracing::warn!(
+                    %err,
+                    "restore_workarea: SPI_SETWORKAREA refused; the reserved strip may stay"
+                );
+            }
         }
         tracing::info!("work area restored on teardown");
     }
@@ -345,8 +355,11 @@ fn save_workarea_state(orig: &RECT, mine: &RECT) {
 }
 
 fn clear_workarea_state() {
-    if let Some(path) = workarea_state_path() {
-        let _ = std::fs::remove_file(path);
+    let Some(path) = workarea_state_path() else {
+        return;
+    };
+    if let Err(err) = std::fs::remove_file(path) {
+        tracing::warn!(%err, "clear_workarea_state: could not delete the state file");
     }
 }
 
@@ -815,9 +828,19 @@ fn set_appbar_pos(hwnd: HWND, area: (i32, i32, i32, i32)) {
             },
             ..Default::default()
         };
-        let _ = SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+        if SHAppBarMessage(ABM_QUERYPOS, &mut abd) == 0 {
+            tracing::warn!(
+                ?hwnd,
+                "AppBar: ABM_QUERYPOS refused; using the full screen rect"
+            );
+        }
         abd.rc.top = abd.rc.bottom - BAR_H;
-        let _ = SHAppBarMessage(ABM_SETPOS, &mut abd);
+        if SHAppBarMessage(ABM_SETPOS, &mut abd) == 0 {
+            tracing::warn!(
+                ?hwnd,
+                "AppBar: ABM_SETPOS refused; maximised windows will not stop above the bar"
+            );
+        }
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),

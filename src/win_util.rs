@@ -116,7 +116,14 @@ pub unsafe fn force_foreground(hwnd: HWND) -> bool {
         // 3) Last resort: a minimize/restore cycle activates the window.
         let _ = ShowWindow(hwnd, SW_MINIMIZE);
         let _ = ShowWindow(hwnd, SW_RESTORE);
-        GetForegroundWindow() == hwnd
+        let activated = GetForegroundWindow() == hwnd;
+        if !activated {
+            tracing::warn!(
+                ?hwnd,
+                "force_foreground: every strategy was refused; the click will look like nothing happened"
+            );
+        }
+        activated
     }
 }
 

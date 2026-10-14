@@ -191,7 +191,13 @@ pub fn stop_shell() -> Result<usize, Box<dyn Error>> {
             if alive {
                 // Graceful close did not take; force it so the handover is real.
                 if let Ok(force) = OpenProcess(PROCESS_TERMINATE, false, pid) {
-                    let _ = TerminateProcess(force, 0);
+                    if let Err(err) = TerminateProcess(force, 0) {
+                        tracing::warn!(
+                            pid,
+                            %err,
+                            "could not terminate the old shell; it may still hold the desktop"
+                        );
+                    }
                     let _ = CloseHandle(force);
                     alive = WaitForSingleObject(handle, SHELL_STOP_GRACE_MS) != WAIT_OBJECT_0;
                 }

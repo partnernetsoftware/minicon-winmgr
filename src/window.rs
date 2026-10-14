@@ -269,7 +269,9 @@ unsafe extern "system" fn console_ctrl_handler_inner(ctrl_type: u32) -> BOOL {
     if raw != 0 {
         tracing::info!(ctrl_type, "console control event; posting WM_CLOSE");
         let hwnd = HWND(raw as *mut core::ffi::c_void);
-        let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        if let Err(err) = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) } {
+            tracing::warn!(%err, "console control: could not post WM_CLOSE; shutdown may stall");
+        }
     }
     // Report handled so the default handler does not terminate immediately,
     // giving the message thread a chance to unwind gracefully.
