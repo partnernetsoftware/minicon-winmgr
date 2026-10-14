@@ -1,0 +1,44 @@
+name: Release
+
+# A git tag alone does not show up on the Releases page — GitHub needs an
+# explicit release object. Create one automatically for every `v*` tag, with
+# the release binary attached.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Windows runner: the crate calls Win32 APIs (DWM, WTS, registry).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/minicon-winmgr.exe \
+             "dist/minicon-winmgr-${GITHUB_REF_NAME}-x86_64-windows.exe"
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Skip if the release already exists (e.g. created by hand).
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; uploading assets only"
+            gh release upload "$GITHUB_REF_NAME" dist/*.exe --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.exe \
+              --title "$GITHUB_REF_NAME" --generate-notes --latest
+          fi
