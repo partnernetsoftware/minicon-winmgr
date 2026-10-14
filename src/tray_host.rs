@@ -291,7 +291,7 @@ fn apply(parsed: ParsedIcon) {
                 guard.retain(|i| !(i.uid == parsed.uid && i.hwnd == parsed.hwnd));
                 let removed = before - guard.len();
                 if removed > 0 {
-                    tracing::debug!(removed, uid = parsed.uid, "NIM_DELETE");
+                    tracing::info!(removed, uid = parsed.uid, "tray icon unregistered");
                 }
                 removed > 0
             }
@@ -318,7 +318,10 @@ fn apply(parsed: ParsedIcon) {
                     }
                 };
                 if changed {
-                    tracing::debug!(
+                    // INFO, not DEBUG: this is the one line that answers "did
+                    // an app actually hand us an icon?" — the question that
+                    // otherwise costs a log dive through the whole strip.
+                    tracing::info!(
                         uid = parsed.uid,
                         total = guard.len(),
                         "tray icon registered"

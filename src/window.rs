@@ -157,15 +157,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         // icons; after this the heartbeat re-samples (never the repaint path).
         crate::tray::sample_mirror();
         let tray = crate::tray::items();
-        tracing::info!(count = tray.len(), "notification area mirrored");
+        // Say which source answered. In replace mode the sample above is a
+        // deliberate no-op, so an unqualified "mirrored count=0" read like a
+        // broken mirror and sent the reader chasing the wrong module.
+        if crate::tray_host::is_installed() {
+            tracing::info!(
+                count = tray.len(),
+                "notification area hosted; strip fed by registered icons"
+            );
+        } else {
+            tracing::info!(count = tray.len(), "notification area mirrored");
+        }
         for icon in &tray {
             tracing::debug!(pid = icon.pid, tooltip = %icon.tooltip, "tray icon");
         }
 
-        let hosted = crate::tray_host::handles();
-        if !hosted.is_empty() {
-            tracing::info!(count = hosted.len(), "tray icons hosted");
-        }
         window_snapshot::log_snapshot();
         loop {
             let ret = GetMessageW(&mut msg, None, 0, 0);

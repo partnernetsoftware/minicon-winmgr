@@ -360,8 +360,14 @@ fn clear_workarea_state() {
     let Some(path) = workarea_state_path() else {
         return;
     };
-    if let Err(err) = std::fs::remove_file(path) {
-        tracing::warn!(%err, "clear_workarea_state: could not delete the state file");
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        // The goal is "the file is gone", which is already true when it was
+        // never written — or was consumed by the restore just before this.
+        // Warning there lit up every normal teardown, and a WARN on the happy
+        // path is how real warnings start getting ignored.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => tracing::warn!(%err, "clear_workarea_state: could not delete the state file"),
     }
 }
 
