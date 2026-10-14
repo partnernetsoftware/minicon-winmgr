@@ -268,17 +268,25 @@
 
 ---
 
-### P2 收尾（文档 / 可见性，低风险）
+### P2 收尾（文档 / 可见性，低风险） ✅ 已完成 `348a9c6` `c1f9f5e`
 
-- **`pub` → `pub(crate)` 降级（收窄版）**：只覆盖**本版动过的托盘链条**（`tray` / `tray_bar` /
-  `tray_host`）与**新增的 `win_util` 项**。全仓 150+ 项降级并入 0.2.0（§5 决策 D3）。
-- **`INTERFACE FROZEN` 标记清理**：**16 个文件**带该注释，但多数已是完整实现（`start_menu.rs` 1435 行、
-  `settings_ui.rs` 1286 行）。**只保留真正是 stub 的**，删掉"edit only this file"这类与事实矛盾的措辞。
-- **注释与 v0.1.2 现状对齐**：`config.rs:137-141` / `settings_ui.rs:155-159` 的叙述需要点明
-  「退役的是**开始菜单行**，而 `task_list` 的窗口列表**按钮**是另一件事、已于 v0.1.2 一并退役」；
-  `show_tray` 的文档要按 **§2.1 矩阵**重写（不再是"experimental / off-meaning"）。
-- **设置界面文案**：`settings_ui.rs:150` 的「显示通知图标条（实验性）」→ 按 §2.1 改写，
-  说清"仅在作为桌面外壳运行时显示真图标；以外跟随系统托盘时为降级占位、不可点击"。
+- ✅ **`pub` → `pub(crate)` 降级（收窄版）**：`tray` / `tray_bar` / `tray_host` 与 `win_util` 全部转 `pub(crate)`。
+  `win_util` 是**整文件**转的（不是只转本版新增项）——半转的文件比两端都更不诚实，且该文件本版确实动过。
+  依据：模块都从 `main.rs` 声明、lib target 是个空的 `src/lib.rs`，所以 `pub` 本来就不可达 crate 之外。
+  全仓 150+ 项降级并入 0.2.0（§5 决策 D3）。
+- ✅ **`INTERFACE FROZEN` 标记清理**：实测 **13 个文件**（本节原写 16，是估的），逐个核对**全是完整实现**
+  （最短 `task_list.rs` 98 行、最长 `start_menu.rs` 1408 行），**没有一个是 stub** → 标记全部删除。
+- ✅ **注释与 v0.1.2 现状对齐**：`config.rs`（`start_menu`）与 `settings_ui.rs`（`build_rows`）原本都写
+  "窗口列表按钮已覆盖找窗口"——**与事实相反**（v0.1.2 把两个入口一起退役了），已改正；`task_list.rs`
+  的模块文档也不再自称那个已退役的按钮。`show_tray` 文档按 **§2.1 矩阵**重写（W5 已做，不再是
+  "experimental / off-meaning"）。
+- ✅ **设置界面文案**：`显示通知图标条（实验性）` → **`显示通知区域（仅作外壳时可点）`**。行文字有宽度预算
+  （`body_font` 13px、可用宽约 390px，且置灰时还会追加「（需先显示任务栏）」），所以标签只写"条件 + 可点性"，
+  完整两形态语义放在 §2.1 矩阵与本行源码注释里。新增单测 `the_tray_row_states_the_shape_dependent_clickability`
+  把文案钉在 §2.1 上（V10）。
+- ✅ **文档回写**：`prd_1_1.md` 通知区一节按 §2.1–§2.3 重写（两形态矩阵 + 事件矩阵 + 性能约束）；
+  `prd_6_1.md` / `prd_4_1.md` / `prd_2_1.md` / `prd.md` / `README.md` 中已变成假话的行同步修正。
+  `CHANGELOG.md` 的旧条目**不动**（那是历史记录），发版时新增 0.1.3 段。
 
 ---
 
@@ -286,23 +294,37 @@
 
 沿用 [`prd_5_1.md`](prd_5_1.md) §11：**大改动拆并行 subagent，每个只改唯一文件**；接线由主代理单点做。
 
+> **进度（2026-10-14，W7 开工前）**：W1–W6 全部落地。`cargo test` 起点 224 → **231 passed**；
+> `cargo fmt --check` 通过；`cargo clippy --all-targets -- -D warnings` 干净。
+> 切片提交：`a771d60`（本计划 v2）、`927c118`（W2）、`0fddbf5`（W3）、`41033c5`（W4）、`021e533`（W5）、
+> `348a9c6` + `c1f9f5e`（W6）。**剩余：W7**——§6 的 V1–V11 验收 + 热切换目视 + 发版。
+>
+> **规模实测**：`src/` **36 个文件 / 14,861 行**（起点 33 / 14,282）。三巨头 `taskbar.rs` **2,995**
+> （起点 2,873）、`start_menu.rs` 1,406、`settings_ui.rs` 1,321；新增叶子模块 `hub.rs` 81 + `model.rs` 18。
+>
+> ⚠️ **§7 门控要如实说明**：门控说"做完 P1 收敛后 `taskbar.rs` 应显著变薄"。**没有兑现**——
+> 它净 **+122 行**，因为 W3 的托盘接线（4 个鼠标事件的命中→转发、`tray_layout` 与命中共用、
+> hover tooltip 分支）落在这一个文件里，收益被抵掉了。同时测试只 +7（224→231），够不上门控要的
+> "显著增长"。**结论：按门控顺延 0.2.0 拆分**，与 §2.5 非目标一致——本版不拆 `taskbar.rs`，
+> 只把它"该去哪去哪"的部分（几何/命中/转发）搬到 `tray_bar`，留下了"接线"这一层，这本就是它的职责。
+
 | 波次 | 切片 | 唯一负责文件 | 状态 |
 |------|------|--------------|------|
 | W1 | 锁恢复工具 + 单测 | `src/win_util.rs` | ✅ `8dfa54b` |
 | W1 | 托盘宿主：补右键 + 摘 `dead_code` | `src/tray_host.rs` | ✅ `7c11ba5` |
 | W1 | FFI 回调护栏 ×19 | 全仓 | ✅ `d31f22e` |
 | W1 | 静默失败补日志 | 全仓 | ✅ `31e0c07` |
-| **W2** | `win_util` 扩容器：`rect_contains` / `popup_menu` / `centered_origin` / `anchored_card` / `Brush` / `ERROR_CLASS_ALREADY_EXISTS` / `wide` 兜底 | `src/win_util.rs` | ▶ 本波 |
-| **W3** | **通知区重构**：模型 + `items()` + 镜像缓存（250ms/心跳） | `src/tray.rs` | |
-| **W3** | **通知区重构**：`Layout`/`paint`/`forward`（迁入 `StripLayout`） | `src/tray_bar.rs` | |
-| **W3** | 宿主瘦身：删几何/命中/转发，只留协议 | `src/tray_host.rs` | |
-| **W3** | **接线**（绘制 + 命中共用布局 + hover tooltip） | `src/taskbar.rs`（主代理单点） | **风险中高** |
-| **W4** | 调用点收敛：菜单 5 处 / 命中 6 处 / 居中 2 处 / 锚点 2 处 / 主题 3 处 / 画刷 7 处 / 前台 8 处 | 各调用文件 | 机械替换 |
-| **W5** | 解 `taskbar ↔ settings_ui` 环 | `src/window.rs` + 两侧 | 主代理 |
-| **W5** | 解 `launcher ↔ recents` 环（新增 `src/model.rs`） | `src/model.rs`、`src/launcher.rs`、`src/recents.rs` | |
-| **W5** | `config` key 常量单一来源 + 一致性单测（决策 D4） | `src/config.rs` | |
-| **W6** | FROZEN 清理 + 注释对齐 + 文档回写 | 全仓注释 | |
-| **W7** | 关卡 + 热切换 + **代理驱动验收** + 发版 | 无（运维） | 见 §6 |
+| W2 | `win_util` 扩容器：`rect_contains` / `popup_menu` / `centered_origin` / `anchored_card` / `Brush` / `ERROR_CLASS_ALREADY_EXISTS` / `wide` 兜底 | `src/win_util.rs` | ✅ `927c118` |
+| W3 | **通知区重构**：模型 + `items()` + 镜像缓存（250ms/心跳） | `src/tray.rs` | ✅ `0fddbf5` |
+| W3 | **通知区重构**：`Layout`/`paint`/`forward`（迁入 `StripLayout`） | `src/tray_bar.rs` | ✅ `0fddbf5` |
+| W3 | 宿主瘦身：删几何/命中/转发，只留协议 | `src/tray_host.rs` | ✅ `0fddbf5` |
+| W3 | **接线**（绘制 + 命中共用布局 + hover tooltip） | `src/taskbar.rs`（主代理单点） | ✅ `0fddbf5` |
+| W4 | 调用点收敛：菜单 5 处 / 命中 6 处 / 居中 2 处 / 锚点 2 处 / 主题 3 处 / 画刷 7 处 / 前台 8 处 | 各调用文件 | ✅ `41033c5` |
+| W5 | 解 `taskbar ↔ settings_ui` 环（新增叶子模块 `src/hub.rs`） | `src/window.rs` + 两侧 | ✅ `021e533` |
+| W5 | 解 `launcher ↔ recents` 环（新增 `src/model.rs`） | `src/model.rs`、`src/launcher.rs`、`src/recents.rs` | ✅ `021e533` |
+| W5 | `config` key 常量单一来源 + 一致性单测（决策 D4） | `src/config.rs` | ✅ `021e533` |
+| W6 | FROZEN 清理（13 个文件全部是完整实现，标记全删）+ 注释对齐 + 文档回写 | 全仓注释 + `docs/` | ✅ `348a9c6` `c1f9f5e` |
+| **W7** | 关卡 + 热切换 + **代理驱动验收** + 发版 | 无（运维） | ▶ 本波 |
 
 **subagent 通用禁令**（照抄 PRD）：禁改 `Cargo.toml`、禁 `cargo add`、禁 `cargo fmt`、禁起 GUI；
 可跑 `cargo check`；**纯逻辑必须带单测**；每个 subagent **只改一个文件**，改前先重读（有并发编辑史）。
