@@ -59,34 +59,34 @@ const TOOLTIP_CHARS: usize = 512;
 
 /// The owner triple a forwarded click has to be posted back to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TrayOwner {
+pub(crate) struct TrayOwner {
     /// Owner window handle, as `isize` (belongs to *another* process).
-    pub hwnd: isize,
+    pub(crate) hwnd: isize,
     /// Icon uid as registered by the owning app (`NOTIFYICONDATA.uID`).
-    pub uid: u32,
+    pub(crate) uid: u32,
     /// Callback message the owner expects for tray events.
-    pub callback_msg: u32,
+    pub(crate) callback_msg: u32,
 }
 
 /// One icon in the notification area.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrayItem {
+pub(crate) struct TrayItem {
     /// Tooltip text (`szTip`); may be empty.
-    pub tooltip: String,
+    pub(crate) tooltip: String,
     /// Owning process id when known (0 = unknown). Only used to pick the
     /// placeholder colour on the degraded path.
-    pub pid: u32,
+    pub(crate) pid: u32,
     /// Icon handle **owned by another process** (0 = none). Never destroyed
     /// here: the painter copies it into this process first.
-    pub hicon: isize,
+    pub(crate) hicon: isize,
     /// Present iff a click on this icon can reach the app that registered it.
     /// Always `None` on the mirror path.
-    pub owner: Option<TrayOwner>,
+    pub(crate) owner: Option<TrayOwner>,
 }
 
 impl TrayItem {
     /// Whether a click on this icon can be forwarded to its owner.
-    pub const fn is_forwardable(&self) -> bool {
+    pub(crate) const fn is_forwardable(&self) -> bool {
         self.owner.is_some()
     }
 }
@@ -96,7 +96,7 @@ impl TrayItem {
 /// Hosted icons are read on demand because the host pushes them asynchronously;
 /// mirror icons come from the cache [`sample_mirror`] fills. Cheap either way —
 /// no cross-process work happens here.
-pub fn items() -> Vec<TrayItem> {
+pub(crate) fn items() -> Vec<TrayItem> {
     if crate::tray_host::is_installed() {
         return crate::tray_host::handles()
             .into_iter()
@@ -141,7 +141,7 @@ fn mirror_cache() -> &'static Mutex<Vec<TrayItem>> {
 /// Call this from the heartbeat, never from a repaint. In replacement mode it
 /// is a no-op: we own the tray, so the mirror could only ever show the
 /// neighbour's icons (there is no neighbour) and the read would be pure cost.
-pub fn sample_mirror() {
+pub(crate) fn sample_mirror() {
     if crate::tray_host::is_installed() {
         return;
     }

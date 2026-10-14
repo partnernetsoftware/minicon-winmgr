@@ -1,9 +1,11 @@
-//! Window-list button: a popup listing every taskbar group.
+//! Overflow / group popup: a menu listing every taskbar group.
 //!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
+//! Opened from the taskbar's `»` overflow button and from a grouped task
+//! button. Shows a `TrackPopupMenu` with one item per group and returns the
+//! chosen window handle (None if dismissed).
 //!
-//! Opened from the taskbar's list button. Shows a `TrackPopupMenu` with one
-//! item per group and returns the chosen window handle (None if dismissed).
+//! The old dedicated "window-list" button (≡) was retired in v0.1.2; this
+//! module survived it because the two entry points above still need a list.
 
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;

@@ -1,7 +1,5 @@
 //! Settings dialog.
 //!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
-//!
 //! Opened from the taskbar's settings button (left of the menu button).
 //! Self-contained: owns its window class and a single reused window.
 //!
@@ -146,17 +144,25 @@ pub fn build_rows(cfg: &config::Config) -> Vec<Row> {
             enabled: row_enabled(SettingAction::ToggleShowTaskbar, show),
             action: SettingAction::ToggleShowTaskbar,
         },
+        // The strip is no longer "experimental": in replace mode it carries the
+        // icons apps registered with us (real icons, clicks forwarded back), and
+        // in companion mode it is a faded, inert placeholder strip. The label
+        // states the one thing a user can act on — clickability — because the
+        // rest (icon fidelity) is visible at a glance. See 0.1.3 plan §2.1.
         Row::Toggle {
-            text: "显示通知图标条（实验性）",
+            text: "显示通知区域（仅作外壳时可点）",
             on: cfg.show_tray,
             enabled: row_enabled(SettingAction::ToggleShowTray, show),
             action: SettingAction::ToggleShowTray,
         },
-        // No row for the start menu: its taskbar entry was retired (the
-        // window-list button already covers "find any window"), so there is
-        // nothing left to toggle. The feature is still reachable by hand —
-        // config key `taskbar.menu` / env `MINICON_START_MENU` — and re-enabling
-        // it there brings the entry slot back.
+        // No row for the start menu. Both controls that used to sit right of
+        // "设置" — this entry dot and the window-list button — were retired
+        // together in v0.1.2 (owner's call, 2026-10-14), so neither has a row
+        // and **neither is "covered" by the other**. The feature behind the dot
+        // (Places / folder stacks / search / recents) still ships and stays
+        // reachable by hand via config key `taskbar.menu` / env
+        // `MINICON_START_MENU`, which brings the entry slot back — but a slot is
+        // not a setting, so there is nothing for a checkbox here to toggle.
         Row::Heading("窗口合并"),
         Row::Radio {
             text: MergeStrategy::Never.label(),
@@ -1040,6 +1046,39 @@ mod tests {
             .iter()
             .find(|r| matches!(r, Row::Radio { text, .. } if *text == "按应用（可执行文件）"));
         assert!(matches!(exe, Some(Row::Radio { enabled: false, .. })));
+    }
+
+    #[test]
+    fn the_tray_row_states_the_shape_dependent_clickability() {
+        // Plan V10: the copy for `show_tray` must stay in step with the §2.1
+        // matrix. The strip is real work in replace mode and an inert
+        // placeholder in companion mode, so the label has to name that
+        // condition. It used to read "（实验性）" — wrong (the feature works)
+        // *and* useless (it said nothing about whether clicking does anything).
+        let rows = build_rows(&Config::default());
+        let label = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Toggle {
+                    text,
+                    action: SettingAction::ToggleShowTray,
+                    ..
+                } => Some(*text),
+                _ => None,
+            })
+            .expect("the tray toggle must have a row");
+        assert!(
+            !label.contains("实验性"),
+            "the strip is not experimental any more: {label}"
+        );
+        assert!(
+            label.contains("外壳"),
+            "the label must name the shape that decides the behaviour: {label}"
+        );
+        assert!(
+            label.contains("可点"),
+            "clickability is the one actionable difference between the shapes: {label}"
+        );
     }
 
     #[test]

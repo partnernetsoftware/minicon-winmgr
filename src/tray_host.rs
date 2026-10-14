@@ -46,17 +46,17 @@ const TIP_CHARS: usize = 128;
 
 /// One hosted tray icon: everything a click needs to be forwarded back.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrayIconHandle {
+pub(crate) struct TrayIconHandle {
     /// Icon uid as registered by the owning app (NOTIFYICONDATA.uID).
-    pub uid: u32,
+    pub(crate) uid: u32,
     /// Owner window handle (as isize).
-    pub hwnd: isize,
+    pub(crate) hwnd: isize,
     /// Callback message the owner expects for tray events.
-    pub callback_msg: u32,
+    pub(crate) callback_msg: u32,
     /// Tooltip text (may be empty).
-    pub tooltip: String,
+    pub(crate) tooltip: String,
     /// Icon handle (as isize). Owned by the **registering process**.
-    pub hicon: isize,
+    pub(crate) hicon: isize,
 }
 
 /// Fields decoded from one `WM_COPYDATA` notification-area payload.
@@ -84,7 +84,7 @@ static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 /// This is what decides the strip's whole behaviour: hosting means real icons
 /// and forwardable clicks; not hosting means the inert mirrored shape
 /// (0.1.3 plan §2.1).
-pub fn is_installed() -> bool {
+pub(crate) fn is_installed() -> bool {
     TRAY_HWND.load(Ordering::SeqCst) != 0
 }
 
@@ -95,7 +95,7 @@ pub fn is_installed() -> bool {
 /// private `TinyShellTraySink` class if the former cannot be created) so that
 /// other processes' `Shell_NotifyIcon` calls reach [`tray_wndproc`]. Every
 /// failure path logs and returns gracefully — this never panics.
-pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
     if !host_requested() {
         tracing::debug!(
             "tray host disabled (not the shell and MINICON_TRAY_HOST unset); staying inert"
@@ -130,7 +130,7 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Current hosted icons (empty when the host is not installed).
-pub fn handles() -> Vec<TrayIconHandle> {
+pub(crate) fn handles() -> Vec<TrayIconHandle> {
     lock_or_recover(icons_store()).clone()
 }
 

@@ -1,7 +1,5 @@
 //! Hover preview: a thumbnail popup shown above a hovered task button.
 //!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
-//!
 //! Design constraints (from review):
 //! - The taskbar must **not** call `capture` from `WM_MOUSEMOVE`; the caller
 //!   throttles with a `WM_TIMER` and only then calls [`show`].

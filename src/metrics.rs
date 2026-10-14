@@ -1,6 +1,4 @@
 //! Stability observability: periodic process / runtime metrics.
-//!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
 
 use std::sync::OnceLock;
 use std::time::Instant;

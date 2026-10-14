@@ -1,7 +1,5 @@
 //! Launch recency / frequency stats for ranking the launcher.
 //!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
-//!
 //! Persistence is a plain-text file, one `path<TAB>count` record per line.
 //! All IO is best-effort: failures are logged at `debug` and otherwise ignored.
 

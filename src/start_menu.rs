@@ -1,7 +1,5 @@
 //! Start menu / ORB — a categorized application menu popup.
 //!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
-//!
 //! Self-contained: owns its window class and wndproc, reuses `crate::launcher`
 //! for discovery/launch. `toggle()` is called by the taskbar's brand-dot click.
 //!

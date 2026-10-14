@@ -9,8 +9,6 @@
 //!
 //! Environment variables sit on top of both (`env > settings > conf > default`)
 //! so debug/compat entry points such as `MINICON_GROUP_TASKS` keep working.
-//!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -162,8 +160,10 @@ pub struct Config {
     pub hover_preview: bool,
     /// Whether the start menu (its taskbar entry dot) is available
     /// (`taskbar.menu`). **Off by default, and no longer offered in the UI**:
-    /// the entry was retired because the window-list button already covers
-    /// "find any window" (product decision, 2026-10-14). Retained as a
+    /// the entry was retired in v0.1.2, in the same change that retired the
+    /// window-list button — the owner judged both redundant (indication,
+    /// 2026-10-14). **Neither** has a settings row now, so nothing here should
+    /// be read as "the other control still covers it". Retained as a
     /// config-file / env escape hatch so the feature (Places, folder stacks,
     /// search, recents) stays reachable without shipping a menu row.
     pub start_menu: bool,

@@ -1,6 +1,4 @@
 //! Task grouping: collect task windows into per-application groups.
-//!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
 
 use std::collections::HashMap;
 

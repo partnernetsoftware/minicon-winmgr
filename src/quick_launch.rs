@@ -1,8 +1,5 @@
 //! Quick-launch buttons for the left of the taskbar.
 //!
-//! INTERFACE FROZEN — the signatures below are relied on by the taskbar; do not
-//! change them, and do not edit other files to accommodate this module.
-//!
 //! Pins are a **user-curated** list: the taskbar's per-window right-click menu
 //! adds an entry via [`add`] (or drops it via [`remove`]). The list persists
 //! next to the executable as `label<TAB>path` lines (env override

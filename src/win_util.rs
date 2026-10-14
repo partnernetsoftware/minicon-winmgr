@@ -26,7 +26,7 @@ use windows::core::{PCWSTR, PWSTR};
 /// `ERROR_CLASS_ALREADY_EXISTS`: `RegisterClassW` failing with this is the
 /// normal "another instance already registered the class" case, not a real
 /// error. Every window module used to define its own copy of the literal.
-pub const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+pub(crate) const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 
 /// Locks `m`, recovering instead of panicking if the mutex has been poisoned.
 ///
@@ -40,7 +40,7 @@ pub const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 /// better than losing the shell.
 ///
 /// Use this everywhere instead of `.lock().unwrap()`.
-pub fn lock_or_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock_or_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -57,7 +57,11 @@ pub fn lock_or_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// silently, because a panic still means a real bug that has to be found.
 ///
 /// `what` names the callback (e.g. `"taskbar::wndproc"`).
-pub fn guard_abi<R>(what: &str, body: impl FnOnce() -> R, fallback: impl FnOnce() -> R) -> R {
+pub(crate) fn guard_abi<R>(
+    what: &str,
+    body: impl FnOnce() -> R,
+    fallback: impl FnOnce() -> R,
+) -> R {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(value) => value,
         Err(_) => {
@@ -73,7 +77,7 @@ pub fn guard_abi<R>(what: &str, body: impl FnOnce() -> R, fallback: impl FnOnce(
 /// Encodes `s` as a null-terminated UTF-16 buffer for Win32 `PCWSTR` arguments.
 ///
 /// The returned buffer must outlive any `PCWSTR` built from it.
-pub fn wide(s: &str) -> Vec<u16> {
+pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
@@ -81,7 +85,7 @@ pub fn wide(s: &str) -> Vec<u16> {
 ///
 /// Six modules hand-rolled this predicate; keeping one copy means a hit test can
 /// never drift from the rectangle it is testing.
-pub const fn rect_contains(r: RECT, x: i32, y: i32) -> bool {
+pub(crate) const fn rect_contains(r: RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
@@ -96,7 +100,12 @@ const fn centered_x(screen: i32, win: i32) -> i32 {
 ///
 /// Shared by the settings window and any future centred dialog: hand-rolling
 /// this per module is how two popups end up at slightly different places.
-pub const fn centered_origin(screen_w: i32, screen_h: i32, win_w: i32, win_h: i32) -> (i32, i32) {
+pub(crate) const fn centered_origin(
+    screen_w: i32,
+    screen_h: i32,
+    win_w: i32,
+    win_h: i32,
+) -> (i32, i32) {
     (centered_x(screen_w, win_w), centered_x(screen_h, win_h))
 }
 
@@ -105,7 +114,7 @@ pub const fn centered_origin(screen_w: i32, screen_h: i32, win_w: i32, win_h: i3
 ///
 /// The launcher and the Run dialog use this deliberately: sitting high leaves
 /// the result list room to grow downwards.
-pub const fn centered_upper_quarter(screen_w: i32, screen_h: i32, win_w: i32) -> (i32, i32) {
+pub(crate) const fn centered_upper_quarter(screen_w: i32, screen_h: i32, win_w: i32) -> (i32, i32) {
     let y = screen_h / 4;
     (centered_x(screen_w, win_w), if y < 0 { 0 } else { y })
 }
@@ -117,7 +126,7 @@ pub const fn centered_upper_quarter(screen_w: i32, screen_h: i32, win_w: i32) ->
 /// work area (right/bottom edges first, so the card keeps its size whenever the
 /// work area is bigger than it). Pure, so both callers are unit-testable —
 /// this replaced two byte-identical copies (hover preview + bar tip).
-pub fn anchored_card(anchor: RECT, work: RECT, w: i32, h: i32, gap: i32) -> RECT {
+pub(crate) fn anchored_card(anchor: RECT, work: RECT, w: i32, h: i32, gap: i32) -> RECT {
     let center_x = (anchor.left + anchor.right) / 2;
     let mut left = center_x - w / 2;
 
@@ -154,7 +163,7 @@ pub fn anchored_card(anchor: RECT, work: RECT, w: i32, h: i32, gap: i32) -> RECT
 /// Labels are `String` rather than `&str` because several call sites format
 /// them (`format!("打开 {label}")`); the helper widens them just before use.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MenuRow {
+pub(crate) enum MenuRow {
     /// A horizontal separator line.
     Separator,
     /// A selectable command carrying `id`.
@@ -170,7 +179,7 @@ pub enum MenuRow {
 
 impl MenuRow {
     /// A selectable command.
-    pub fn command(id: usize, label: impl Into<String>) -> Self {
+    pub(crate) fn command(id: usize, label: impl Into<String>) -> Self {
         MenuRow::Command {
             id,
             label: label.into(),
@@ -180,7 +189,7 @@ impl MenuRow {
     }
 
     /// A greyed-out command (shown, not selectable).
-    pub fn disabled(id: usize, label: impl Into<String>) -> Self {
+    pub(crate) fn disabled(id: usize, label: impl Into<String>) -> Self {
         MenuRow::Command {
             id,
             label: label.into(),
@@ -190,7 +199,7 @@ impl MenuRow {
     }
 
     /// A selectable command that begins a new column.
-    pub fn first_in_column(id: usize, label: impl Into<String>) -> Self {
+    pub(crate) fn first_in_column(id: usize, label: impl Into<String>) -> Self {
         MenuRow::Command {
             id,
             label: label.into(),
@@ -215,7 +224,7 @@ const POPUP_FLAGS: u32 = TPM_RETURNCMD.0 | TPM_RIGHTBUTTON.0 | TPM_LEFTALIGN.0;
 ///
 /// # Safety
 /// `owner` must be a live window owned by this process.
-pub unsafe fn popup_menu(owner: HWND, rows: &[MenuRow], x: i32, y: i32) -> Option<usize> {
+pub(crate) unsafe fn popup_menu(owner: HWND, rows: &[MenuRow], x: i32, y: i32) -> Option<usize> {
     // SAFETY: the menu is created and destroyed entirely within this call; each
     // `wide` buffer outlives the `AppendMenuW` that copies it; `owner` is the
     // caller's live window.
@@ -277,7 +286,7 @@ pub unsafe fn popup_menu(owner: HWND, rows: &[MenuRow], x: i32, y: i32) -> Optio
 ///
 /// # Safety
 /// Pure `GetCursorPos` query.
-pub unsafe fn cursor_pos_or(fallback: Option<RECT>) -> (i32, i32) {
+pub(crate) unsafe fn cursor_pos_or(fallback: Option<RECT>) -> (i32, i32) {
     let mut pt = POINT::default();
     // SAFETY: `pt` is a valid out-pointer for the duration of the call.
     if unsafe { GetCursorPos(&mut pt) }.is_ok() {
@@ -299,21 +308,21 @@ pub unsafe fn cursor_pos_or(fallback: Option<RECT>) -> (i32, i32) {
 /// **Not** for long-lived brushes: the taskbar's per-theme brushes and the
 /// settings window class brush are created once and must outlive the call, so
 /// they stay raw handles on purpose.
-pub struct Brush(HBRUSH);
+pub(crate) struct Brush(HBRUSH);
 
 impl Brush {
     /// Creates a solid brush, or `None` if GDI refuses.
     ///
     /// # Safety
     /// The returned brush is owned by the caller and freed on drop.
-    pub unsafe fn solid(color: COLORREF) -> Option<Self> {
+    pub(crate) unsafe fn solid(color: COLORREF) -> Option<Self> {
         // SAFETY: `CreateSolidBrush` takes a plain colour value.
         let brush = unsafe { CreateSolidBrush(color) };
         (!brush.0.is_null()).then_some(Brush(brush))
     }
 
     /// The raw handle, for `FillRect` / `FrameRect` / DC selection.
-    pub const fn handle(&self) -> HBRUSH {
+    pub(crate) const fn handle(&self) -> HBRUSH {
         self.0
     }
 }
@@ -343,7 +352,7 @@ impl Drop for Brush {
 ///
 /// # Safety
 /// `hwnd` must be a valid window handle; call on the message thread.
-pub unsafe fn force_foreground(hwnd: HWND) -> bool {
+pub(crate) unsafe fn force_foreground(hwnd: HWND) -> bool {
     // SAFETY: pure window/thread queries plus the documented foreground
     // workarounds; all handles come from Win32.
     unsafe {
@@ -406,7 +415,7 @@ const MAX_IMAGE_PATH: usize = 1024;
 ///
 /// # Safety
 /// `hwnd` must be a valid window handle.
-pub unsafe fn window_exe_path(hwnd: HWND) -> Option<String> {
+pub(crate) unsafe fn window_exe_path(hwnd: HWND) -> Option<String> {
     // SAFETY: all handles are released before returning; the buffer outlives
     // the calls that write into it.
     unsafe {
@@ -449,7 +458,7 @@ pub unsafe fn window_exe_path(hwnd: HWND) -> Option<String> {
 ///
 /// # Safety
 /// `hwnd` must be a valid window handle.
-pub unsafe fn window_pid(hwnd: HWND) -> u32 {
+pub(crate) unsafe fn window_pid(hwnd: HWND) -> u32 {
     let mut pid = 0u32;
     // SAFETY: `pid` is a valid out-pointer for the duration of the call.
     unsafe {

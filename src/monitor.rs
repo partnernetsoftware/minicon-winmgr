@@ -1,6 +1,4 @@
 //! Monitor enumeration (work areas) for multi-monitor support.
-//!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
 
 use windows::Win32::Foundation::{LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{

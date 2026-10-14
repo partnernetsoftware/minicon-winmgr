@@ -1,7 +1,5 @@
 //! Run dialog (Win+R style): a small popup with a single command field.
 //!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
-//!
 //! Trigger: `Win+R`. A borderless top-most popup holding one `EDIT` and OK /
 //! Cancel buttons. `Enter` or OK runs the typed command via `ShellExecuteW`;
 //! `Esc` or Cancel dismisses. Mirrors the structure of `crate::launcher_ui`

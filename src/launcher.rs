@@ -1,6 +1,4 @@
 //! Start-menu application discovery and fuzzy search (launcher seed).
-//!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
 
 use std::path::Path;
 

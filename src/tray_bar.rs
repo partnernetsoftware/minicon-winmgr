@@ -23,16 +23,16 @@ use crate::tray::TrayItem;
 use crate::win_util::{self, Brush};
 
 /// Square cell edge, in logical pixels.
-pub const CELL: i32 = 18;
+pub(crate) const CELL: i32 = 18;
 /// Gap between adjacent cells, in logical pixels.
-pub const GAP: i32 = 2;
+pub(crate) const GAP: i32 = 2;
 
 /// Width the strip occupies for `count` icons (0 when empty).
 ///
 /// Pure and saturating: never negative, and a negative `gap` is treated as 0 so
 /// the width can never disagree with where [`Layout::cell_rect`] puts the cells
 /// (a negative gap would otherwise shrink the strip while cells still abut).
-pub fn strip_width(count: usize, cell: i32, gap: i32) -> i32 {
+pub(crate) fn strip_width(count: usize, cell: i32, gap: i32) -> i32 {
     if count == 0 || cell <= 0 {
         return 0;
     }
@@ -48,17 +48,17 @@ pub fn strip_width(count: usize, cell: i32, gap: i32) -> i32 {
 /// Pure value type — no Win32 state — so both the layout maths and the hit test
 /// are unit-testable directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Layout {
-    pub top: i32,
-    pub right_x: i32,
-    pub height: i32,
-    pub cell: i32,
-    pub gap: i32,
+pub(crate) struct Layout {
+    pub(crate) top: i32,
+    pub(crate) right_x: i32,
+    pub(crate) height: i32,
+    pub(crate) cell: i32,
+    pub(crate) gap: i32,
 }
 
 impl Layout {
     /// A layout using the standard square/gap sizes, matching the painted strip.
-    pub const fn new(top: i32, right_x: i32, height: i32) -> Self {
+    pub(crate) const fn new(top: i32, right_x: i32, height: i32) -> Self {
         Self {
             top,
             right_x,
@@ -69,14 +69,14 @@ impl Layout {
     }
 
     /// Width the strip occupies for `count` icons (0 when empty or degenerate).
-    pub fn strip_width(&self, count: usize) -> i32 {
+    pub(crate) fn strip_width(&self, count: usize) -> i32 {
         strip_width(count, self.cell, self.gap)
     }
 
     /// Rectangle of the cell at `index`, or `None` for an out-of-range index or
     /// a degenerate layout. Arithmetic is done in `i64` and range-checked so a
     /// pathological strip can never overflow/panic.
-    pub fn cell_rect(&self, index: usize, count: usize) -> Option<RECT> {
+    pub(crate) fn cell_rect(&self, index: usize, count: usize) -> Option<RECT> {
         if count == 0 || self.cell <= 0 || index >= count {
             return None;
         }
@@ -97,7 +97,7 @@ impl Layout {
     /// a gap, outside the strip, or the strip is empty.
     ///
     /// Pure: the coordinate → icon-index mapping, unit-testable on its own.
-    pub fn hit_test(&self, count: usize, x: i32, y: i32) -> Option<usize> {
+    pub(crate) fn hit_test(&self, count: usize, x: i32, y: i32) -> Option<usize> {
         (0..count).find(|&i| {
             self.cell_rect(i, count)
                 .is_some_and(|r| win_util::rect_contains(r, x, y))
@@ -113,7 +113,7 @@ impl Layout {
 /// `WM_MOUSEMOVE` would only confuse it). Right-button down and up are kept
 /// apart because some apps open their menu on down, others finalise on up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MouseEvent {
+pub(crate) enum MouseEvent {
     LeftDown,
     LeftDoubleClick,
     RightDown,
@@ -122,7 +122,7 @@ pub enum MouseEvent {
 
 impl MouseEvent {
     /// The `WM_*` mouse message the owner expects in its callback's `lParam`.
-    pub const fn lparam(self) -> u32 {
+    pub(crate) const fn lparam(self) -> u32 {
         // Literals rather than the `windows` tokens: the values are part of the
         // notify-icon protocol and pinning them keeps a transposed constant
         // from silently sending the wrong button.
@@ -143,7 +143,7 @@ impl MouseEvent {
 ///
 /// # Safety
 /// `hdc` must be a valid device context for the duration of the call.
-pub unsafe fn paint(hdc: HDC, layout: &Layout, items: &[TrayItem]) -> i32 {
+pub(crate) unsafe fn paint(hdc: HDC, layout: &Layout, items: &[TrayItem]) -> i32 {
     let count = items.len();
     if count == 0 {
         return 0;
@@ -283,7 +283,7 @@ fn placeholder_color(pid: u32) -> COLORREF {
 /// Returns whether a message was delivered. Items without an owner (the
 /// mirrored shape) and owners whose window has gone away are logged no-ops —
 /// never a panic, never a modal error.
-pub fn forward(item: &TrayItem, event: MouseEvent) -> bool {
+pub(crate) fn forward(item: &TrayItem, event: MouseEvent) -> bool {
     let Some(owner) = item.owner else {
         tracing::debug!("tray strip is in its inert shape; click not forwarded");
         return false;
@@ -478,8 +478,8 @@ mod tests {
 
     #[test]
     fn a_negative_gap_is_treated_as_zero() {
-        // `gap` comes from a constant today, but the layout is public: a negative
-        // value must not make cells overlap (or the hit test ambiguous).
+        // `gap` comes from a constant today, but a negative value must not make
+        // cells overlap (or the hit test ambiguous).
         let l = Layout {
             gap: -4,
             ..Layout::new(0, 100, 36)

@@ -1,7 +1,5 @@
 //! Launcher UI: a hotkey-summoned popup with a search field and result list.
 //!
-//! INTERFACE FROZEN — implement the signatures below; edit only this file.
-//!
 //! Self-contained: this module owns its window class, controls, and hotkey
 //! (Alt+Space). It reuses `crate::launcher` for discovery/search/launch.
 //!
