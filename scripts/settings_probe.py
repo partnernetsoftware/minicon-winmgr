@@ -167,7 +167,7 @@ def start(environment, args=()):
     subprocess.Popen([str(LIVE), *args], cwd=LIVE.parent, env=environment, creationflags=flags, close_fds=True)
     wait(message); wait(panel); time.sleep(.4)
 
-def main():
+def main(*, include_run_regression=True):
     u.OpenInputDesktop.argtypes = [w.DWORD, w.BOOL, w.DWORD]
     u.OpenInputDesktop.restype = w.HANDLE
     u.CloseDesktop.argtypes = [w.HANDLE]
@@ -287,7 +287,7 @@ def main():
         stop(); start(environment, ['--settings']); show()
         # Keep the established Run acceptance in its isolated LOCALAPPDATA.
         existing_regression = ROOT / '.workbuddy/acceptance.py'
-        if existing_regression.exists():
+        if include_run_regression and existing_regression.exists():
             u.SendMessageW(panel(), 16, 0, 0)
             result = subprocess.run([sys.executable, str(existing_regression)], cwd=ROOT, env=environment, capture_output=True, timeout=60)
             details = json.loads((ROOT / '.workbuddy/acceptance-results.json').read_text(encoding='utf-8'))
@@ -327,14 +327,21 @@ $items = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[Syste
 $result = foreach ($item in $items) { $v = $item.Current; if ($v.AutomationId -in @('6101','6103','6106','6114')) { $patterns = @($item.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName }); [pscustomobject]@{ id=$v.AutomationId; name=$v.Name; role=$v.ControlType.ProgrammaticName; enabled=$v.IsEnabled; patterns=$patterns } } }
 ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
 '''.replace('HANDLE', str(panel()))
-        result = subprocess.run(['powershell', '-NoProfile', '-Command', '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ' + automation], capture_output=True, timeout=20)
-        report['uia_controls'] = json.loads(result.stdout.decode('utf-8-sig'))
-        accessible = {item['id']: item for item in report['uia_controls']}
-        check('uia_exposes_native_roles_names_and_patterns', result.returncode == 0 and accessible['6101']['role'] == 'ControlType.CheckBox' and 'TogglePatternIdentifiers.Pattern' in accessible['6101']['patterns'] and accessible['6103']['role'] == 'ControlType.RadioButton' and accessible['6114']['name'] == '关闭', report['uia_controls'])
+        # Win32 UIA providers may initially answer with a generic Pane just
+        # after repeated process restarts. Wait for the native provider, bounded.
+        accessible_ok = False
+        for _ in range(5):
+            result = subprocess.run(['powershell', '-NoProfile', '-Command', '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ' + automation], capture_output=True, timeout=20)
+            report['uia_controls'] = json.loads(result.stdout.decode('utf-8-sig'))
+            accessible = {item['id']: item for item in report['uia_controls']}
+            accessible_ok = result.returncode == 0 and accessible.get('6101', {}).get('role') == 'ControlType.CheckBox' and 'TogglePatternIdentifiers.Pattern' in accessible['6101']['patterns'] and accessible.get('6103', {}).get('role') == 'ControlType.RadioButton' and accessible.get('6114', {}).get('name') == '关闭'
+            if accessible_ok: break
+            time.sleep(.3)
+        check('uia_exposes_native_roles_names_and_patterns', accessible_ok, report['uia_controls'])
         try:
             from PIL import ImageGrab
             r = w.RECT(); u.GetClientRect(panel(), c.byref(r)); origin = w.POINT(); u.ClientToScreen(panel(), c.byref(origin))
-            output = ROOT / 'docs/images/settings_0_1_6.png'; output.parent.mkdir(exist_ok=True)
+            output = REPORT.parent / 'images/settings_0_1_6.png'; output.parent.mkdir(parents=True, exist_ok=True)
             ImageGrab.grab((origin.x, origin.y, origin.x + r.right, origin.y + r.bottom)).save(output)
             report['screenshot'] = 'images/settings_0_1_6.png'
         except ImportError: report['screenshot'] = 'Pillow unavailable'

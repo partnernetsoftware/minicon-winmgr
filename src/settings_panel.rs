@@ -43,6 +43,7 @@ struct Control {
     hwnd: HWND,
     height: i32,
     top: i32,
+    laid_height: i32,
     footer: bool,
 }
 struct Panel {
@@ -51,6 +52,8 @@ struct Panel {
     instance: HINSTANCE,
     controls: Vec<Control>,
     font: HFONT,
+    heading_font: HFONT,
+    title_font: HFONT,
     dpi: u32,
     scroll: i32,
     content: i32,
@@ -80,6 +83,38 @@ fn control(id: u16) -> HWND {
             .unwrap_or_default()
     })
     .unwrap_or_default()
+}
+fn scale_at(n: i32, dpi: u32) -> i32 {
+    n * dpi as i32 / 96
+}
+fn is_heading(id: u16) -> bool {
+    matches!(id, 6200 | 6201 | 6203 | 6204 | 6205)
+}
+fn control_color(wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        let dc = HDC(wp.0 as *mut _);
+        let id = GetDlgCtrlID(HWND(lp.0 as *mut _));
+        let color = if id == STATUS as i32 && crate::settings_store::status().failed > 0 {
+            COLOR_HOTLIGHT
+        } else if id == 6191 || (6301..=6307).contains(&id) || id == STATUS as i32 {
+            COLOR_GRAYTEXT
+        } else {
+            COLOR_WINDOWTEXT
+        };
+        let color = if color == COLOR_GRAYTEXT {
+            let foreground = GetSysColor(COLOR_WINDOWTEXT);
+            let background = GetSysColor(COLOR_WINDOW);
+            let blend = |shift: u32| {
+                (((foreground >> shift) & 255u32) * 3 + ((background >> shift) & 255u32) * 2) / 5
+            };
+            blend(0) | (blend(8) << 8) | (blend(16) << 16)
+        } else {
+            GetSysColor(color)
+        };
+        SetTextColor(dc, COLORREF(color));
+        SetBkColor(dc, COLORREF(GetSysColor(COLOR_WINDOW)));
+        LRESULT(GetSysColorBrush(COLOR_WINDOW).0 as isize)
+    }
 }
 fn scale(n: i32) -> i32 {
     n * with(|p| p.dpi).unwrap_or(96) as i32 / 96
@@ -122,7 +157,7 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
                 hInstance: instance,
                 lpszClassName: PCWSTR(wide(name).as_ptr()),
                 hCursor: LoadCursorW(None, IDC_ARROW)?,
-                hbrBackground: GetSysColorBrush(COLOR_BTNFACE),
+                hbrBackground: GetSysColorBrush(COLOR_WINDOW),
                 ..Default::default()
             };
             if RegisterClassW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
@@ -167,6 +202,8 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
                 instance,
                 controls: Vec::new(),
                 font: HFONT::default(),
+                heading_font: HFONT::default(),
+                title_font: HFONT::default(),
                 dpi: 0,
                 scroll: 0,
                 content: 0,
@@ -219,6 +256,7 @@ fn add(
             hwnd,
             height,
             top: 0,
+            laid_height: height,
             footer,
         })
     });
@@ -230,33 +268,36 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
     let push = WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_MULTILINE as u32);
     let note = WINDOW_STYLE(0x0080 /* SS_NOPREFIX; SS_LEFT = 0 */);
     for (id, title, height, style) in [
-        (6200, "任务栏", 30, note),
-        (SHOW, "显示任务栏（重启后生效）", 32, check | WS_GROUP),
-        (6301, "", 52, note),
-        (TRAY, "显示通知区域", 32, check | WS_GROUP),
-        (6302, "", 52, note),
-        (6201, "窗口合并", 30, note),
+        (6190, "设置", 38, note),
+        (6191, "调整任务栏、窗口与预览", 26, note),
+        (6200, "任务栏", 28, note),
+        (SHOW, "显示任务栏", 30, check | WS_GROUP),
+        (6301, "", 24, note),
+        (TRAY, "显示通知区域", 30, check | WS_GROUP),
+        (6302, "", 24, note),
+        (6201, "窗口合并", 28, note),
         (
             NEVER,
             MergeStrategy::Never.label(),
-            32,
+            30,
             radio | WS_GROUP | WS_TABSTOP,
         ),
-        (FULL, MergeStrategy::WhenFull.label(), 32, radio),
-        (ALWAYS, MergeStrategy::Always.label(), 32, radio),
-        (6303, "", 40, note),
-        (6202, "合并依据", 30, note),
-        (EXE, GroupBy::Exe.label(), 32, radio | WS_GROUP | WS_TABSTOP),
-        (PID, GroupBy::Pid.label(), 32, radio),
-        (6304, "", 40, note),
-        (6203, "行为", 30, note),
-        (PREVIEW, "悬停显示缩略图预览", 32, check | WS_GROUP),
-        (6305, "", 40, note),
-        (6204, "外观 / 快捷键 / 关于", 30, note),
-        (6306, "", 70, note),
-        (6205, "桌面管理（单独确认）", 30, note),
-        (REPLACE, "接管桌面（立即生效）", 36, push | WS_GROUP),
-        (ROLLBACK, "还原系统桌面（立即生效）", 36, push),
+        (FULL, "放不下时合并", 30, radio),
+        (ALWAYS, MergeStrategy::Always.label(), 30, radio),
+        (6303, "", 22, note),
+        (6202, "合并依据", 26, note),
+        (EXE, GroupBy::Exe.label(), 30, radio | WS_GROUP | WS_TABSTOP),
+        (PID, GroupBy::Pid.label(), 30, radio),
+        (6304, "", 22, note),
+        (6203, "预览", 28, note),
+        (PREVIEW, "悬停显示窗口缩略图", 30, check | WS_GROUP),
+        (6305, "", 22, note),
+        (6205, "桌面管理", 28, note),
+        (6307, "更改 Windows 桌面外壳，操作前会再次确认。", 26, note),
+        (REPLACE, "接管桌面…", 34, push | WS_GROUP),
+        (ROLLBACK, "还原系统桌面…", 34, push),
+        (6204, "关于", 28, note),
+        (6306, "", 56, note),
     ] {
         add(id, title, height, style, false)?;
     }
@@ -391,7 +432,7 @@ fn refresh() {
     label(
         control(6301),
         &format!(
-            "当前：{}；下次启动：{}\n{}",
+            "重启后生效 · 当前{} / 下次{} · {}",
             if actual {
                 "显示"
             } else {
@@ -461,11 +502,24 @@ fn refresh() {
     } else if status.saved {
         "已生效并保存。".into()
     } else {
-        "更改自动保存；标注的项目重启后生效。".into()
+        "更改会自动保存".into()
     };
     label(control(STATUS), &message);
     enabled(RETRY, status.failed > 0);
     enabled(DETAIL, status.failed > 0);
+    let visibility_changed =
+        unsafe { IsWindowVisible(control(RETRY)).as_bool() } != (status.failed > 0);
+    for id in [RETRY, DETAIL] {
+        unsafe {
+            let _ = ShowWindow(
+                control(id),
+                if status.failed > 0 { SW_SHOW } else { SW_HIDE },
+            );
+        }
+    }
+    if visibility_changed {
+        layout();
+    }
     if !previous_focus.is_invalid()
         && unsafe { IsChild(handle(), previous_focus).as_bool() }
         && !unsafe { IsWindowEnabled(previous_focus).as_bool() }
@@ -601,8 +655,8 @@ fn fit(center: bool) {
         })
     }
     .max(96);
-    let width = (540 * dpi as i32 / 96).min(work.right - work.left).max(1);
-    let height = (760 * dpi as i32 / 96).min(work.bottom - work.top).max(1);
+    let width = (660 * dpi as i32 / 96).min(work.right - work.left).max(1);
+    let height = (900 * dpi as i32 / 96).min(work.bottom - work.top).max(1);
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -640,8 +694,8 @@ struct Geometry {
 }
 fn geometry(width: i32, height: i32, dpi: u32) -> Geometry {
     let scale = |n: i32| n * dpi as i32 / 96;
-    let margin = scale(12).min(width.max(1) / 8);
-    let footer = scale(104).min((height - 1).max(0));
+    let margin = scale(28).min(width.max(1) / 8);
+    let footer = scale(76).min((height - 1).max(0));
     Geometry {
         margin,
         width: (width - 2 * margin).max(1),
@@ -676,20 +730,40 @@ fn layout() {
                 0,
                 dpi,
             );
+            metrics.lfMessageFont.lfHeight = -scale_at(14, dpi);
+            let face = wide("Microsoft YaHei UI");
+            metrics.lfMessageFont.lfFaceName = [0; 32];
+            metrics.lfMessageFont.lfFaceName[..face.len()].copy_from_slice(&face);
             let font = CreateFontIndirectW(&metrics.lfMessageFont);
+            metrics.lfMessageFont.lfWeight = 600;
+            metrics.lfMessageFont.lfHeight = -scale_at(16, dpi);
+            let heading = CreateFontIndirectW(&metrics.lfMessageFont);
+            metrics.lfMessageFont.lfHeight = -scale_at(25, dpi);
+            let title = CreateFontIndirectW(&metrics.lfMessageFont);
             let old = with(|p| {
-                let old = p.font;
+                let old = [p.font, p.heading_font, p.title_font];
                 p.font = font;
+                p.heading_font = heading;
+                p.title_font = title;
                 p.dpi = dpi;
                 old
             })
             .unwrap();
             let controls = with(|p| p.controls.clone()).unwrap();
             for c in controls {
-                send(c.hwnd, WM_SETFONT, font.0 as usize, 1);
+                let selected = if c.id == 6190 {
+                    title
+                } else if is_heading(c.id) {
+                    heading
+                } else {
+                    font
+                };
+                send(c.hwnd, WM_SETFONT, selected.0 as usize, 1);
             }
-            if !old.is_invalid() {
-                let _ = DeleteObject(old.into());
+            for old in old {
+                if !old.is_invalid() {
+                    let _ = DeleteObject(old.into());
+                }
             }
             font
         } else {
@@ -697,15 +771,60 @@ fn layout() {
         };
         let mut client = RECT::default();
         let _ = GetClientRect(hwnd, &mut client);
-        let g = geometry(client.right, client.bottom, dpi);
+        let mut g = geometry(client.right, client.bottom, dpi);
+        let failed = crate::settings_store::status().failed > 0;
+        if failed {
+            g.footer = (g.footer + scale(if g.width < scale(420) { 64 } else { 40 }))
+                .min((client.bottom - 1).max(0));
+            g.viewport = (client.bottom - g.footer).max(1);
+        }
         let (controls, view) = with(|p| (p.controls.clone(), p.view)).unwrap();
         let dc = GetDC(Some(hwnd));
         let old = SelectObject(dc, font.into());
-        let mut top = scale(8);
+        let mut top = scale(18);
         let mut positions = Vec::new();
+        let mut row_top = top;
+        let horizontal = g.width >= scale(420);
         for c in controls.iter().filter(|c| !c.footer) {
+            let row = match c.id {
+                NEVER | FULL | ALWAYS if horizontal => Some((
+                    NEVER,
+                    [NEVER, FULL, ALWAYS]
+                        .iter()
+                        .position(|id| *id == c.id)
+                        .unwrap(),
+                    3,
+                )),
+                EXE | PID if horizontal => Some((EXE, usize::from(c.id == PID), 2)),
+                REPLACE | ROLLBACK if horizontal => {
+                    Some((REPLACE, usize::from(c.id == ROLLBACK), 2))
+                }
+                _ => None,
+            };
+            if is_heading(c.id) {
+                top += scale(if c.id == 6200 { 10 } else { 18 });
+            }
+            let (x, width) = if let Some((first, index, count)) = row {
+                if c.id == first {
+                    row_top = top;
+                } else {
+                    top = row_top;
+                }
+                let width = (g.width - scale(12) * (count - 1)) / count;
+                (index as i32 * (width + scale(12)), width)
+            } else {
+                (0, g.width)
+            };
+            let selected = if c.id == 6190 {
+                with(|p| p.title_font).unwrap()
+            } else if is_heading(c.id) {
+                with(|p| p.heading_font).unwrap()
+            } else {
+                font
+            };
+            SelectObject(dc, selected.into());
             let mut measured = RECT {
-                right: (g.width - scale(24)).max(1),
+                right: (width - scale(24)).max(1),
                 ..Default::default()
             };
             let mut value: Vec<u16> = text(c.hwnd).encode_utf16().collect();
@@ -717,10 +836,13 @@ fn layout() {
                     DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
                 );
             }
-            let height = scale(c.height).max(measured.bottom + scale(8));
-            positions.push((c.id, top, height));
-            top += height + scale(2);
+            // Preferred height is immutable: a narrow intermediate layout must
+            // never become the minimum height of all future layouts.
+            let height = scale(c.height).max(measured.bottom + scale(4));
+            positions.push((c.id, x, top, width, height));
+            top += height;
         }
+        top += scale(20);
         SelectObject(dc, old);
         let _ = ReleaseDC(Some(hwnd), dc);
         let scroll = with(|p| {
@@ -731,33 +853,51 @@ fn layout() {
         })
         .unwrap();
         let _ = MoveWindow(view, g.margin, 0, g.width, g.viewport, true);
-        for (id, top, height) in positions {
-            let _ = MoveWindow(control(id), 0, top - scroll, g.width, height, true);
+        for (id, x, top, width, height) in positions {
+            let _ = MoveWindow(control(id), x, top - scroll, width, height, true);
             with(|p| {
                 if let Some(c) = p.controls.iter_mut().find(|c| c.id == id) {
                     c.top = top;
-                    c.height = (height * 96 / dpi as i32).max(1);
+                    c.laid_height = height;
                 }
             });
         }
-        let y = client.bottom - g.footer + scale(4);
+        let y = client.bottom - g.footer + scale(12);
+        let bw = scale(90).min(g.width / 3);
+        let by = (client.bottom - scale(48)).max(y + 1);
         let _ = MoveWindow(
             control(STATUS),
             g.margin,
-            y,
-            g.width,
-            (g.footer - scale(46)).max(1),
+            by + scale(6),
+            (g.width - bw - scale(16)).max(1),
+            scale(34).min(client.bottom - by - scale(6)),
             true,
         );
-        let bw = ((g.width - scale(16)) / 3).max(1);
-        let by = (client.bottom - scale(38)).max(y + 1);
-        for (i, id) in [RETRY, DETAIL, CLOSE].iter().enumerate() {
+        let _ = MoveWindow(
+            control(CLOSE),
+            g.margin + g.width - bw,
+            by,
+            bw,
+            scale(32),
+            true,
+        );
+        for (i, id) in [RETRY, DETAIL].iter().enumerate() {
             let _ = MoveWindow(
                 control(*id),
                 g.margin + i as i32 * (bw + scale(8)),
                 by,
                 bw,
-                scale(30).min((client.bottom - by).max(1)),
+                scale(32),
+                true,
+            );
+        }
+        if failed {
+            let _ = MoveWindow(
+                control(STATUS),
+                g.margin,
+                y,
+                g.width,
+                (by - y - scale(6)).max(1),
                 true,
             );
         }
@@ -784,7 +924,7 @@ fn ensure_focus() {
         let Some(c) = p.controls.iter().find(|c| c.hwnd == focus && !c.footer) else {
             return false;
         };
-        let height = c.height * p.dpi as i32 / 96;
+        let height = c.laid_height;
         let next = if c.top < p.scroll {
             c.top
         } else if c.top + height > p.scroll + p.viewport {
@@ -850,8 +990,10 @@ pub(crate) fn shutdown() {
     if let Some(p) = PANEL.with(|cell| cell.borrow_mut().take()) {
         unsafe {
             let _ = DestroyWindow(p.hwnd);
-            if !p.font.is_invalid() {
-                let _ = DeleteObject(p.font.into());
+            for font in [p.font, p.heading_font, p.title_font] {
+                if !font.is_invalid() {
+                    let _ = DeleteObject(font.into());
+                }
             }
         }
     }
@@ -880,6 +1022,9 @@ unsafe extern "system" fn viewproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     guard_abi(
         "settings viewport",
         || {
+            if matches!(msg, WM_CTLCOLORSTATIC | WM_CTLCOLORBTN) {
+                return control_color(wp, lp);
+            }
             if matches!(msg, WM_COMMAND | WM_MOUSEWHEEL) {
                 return send(handle(), msg, wp.0, lp.0);
             }
@@ -892,6 +1037,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     guard_abi(
         "settings",
         || match msg {
+            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => control_color(wp, lp),
             WM_CLOSE => {
                 hide();
                 LRESULT(0)
@@ -979,6 +1125,27 @@ mod tests {
             unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }.unwrap();
         install(HINSTANCE(module.0)).unwrap();
         show();
+        let preferred: Vec<_> = with(|p| p.controls.iter().map(|c| c.height).collect()).unwrap();
+        unsafe {
+            let _ = MoveWindow(handle(), 40, 40, 660, 900, true);
+        }
+        layout();
+        let original = with(|p| p.content).unwrap();
+        for _ in 0..5 {
+            unsafe {
+                let _ = MoveWindow(handle(), 40, 40, 180, 400, true);
+            }
+            layout();
+            unsafe {
+                let _ = MoveWindow(handle(), 40, 40, 660, 900, true);
+            }
+            layout();
+            assert_eq!(with(|p| p.content).unwrap(), original);
+        }
+        assert_eq!(
+            with(|p| p.controls.iter().map(|c| c.height).collect::<Vec<_>>()).unwrap(),
+            preferred
+        );
         assert!(config::set_show_taskbar(!config::preferred_taskbar()));
         assert!(
             events
