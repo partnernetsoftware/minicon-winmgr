@@ -322,13 +322,14 @@ def main(*, include_run_regression=True):
         # Accessible names/roles are provided by genuine native controls.
         check('native_control_names_and_states', text(ctrl(6101)).startswith('显示任务栏') and text(ctrl(6114)) == '关闭')
         automation = '''[void][Reflection.Assembly]::LoadWithPartialName('UIAutomationClient')
-$root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]HANDLE)
+$condition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NativeWindowHandleProperty,[int]HANDLE)
+$root = [System.Windows.Automation.AutomationElement]::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children,$condition)
 $items = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
 $result = foreach ($item in $items) { $v = $item.Current; if ($v.AutomationId -in @('6101','6103','6106','6114')) { $patterns = @($item.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName }); [pscustomobject]@{ id=$v.AutomationId; name=$v.Name; role=$v.ControlType.ProgrammaticName; enabled=$v.IsEnabled; patterns=$patterns } } }
 ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
 '''.replace('HANDLE', str(panel()))
-        # Win32 UIA providers may initially answer with a generic Pane just
-        # after repeated process restarts. Wait for the native provider, bounded.
+        # Walk the desktop tree to resolve the Win32 control proxy. Direct
+        # FromHandle returns generic Pane children on this Windows session.
         accessible_ok = False
         for _ in range(5):
             result = subprocess.run(['powershell', '-NoProfile', '-Command', '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ' + automation], capture_output=True, timeout=20)
