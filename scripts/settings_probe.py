@@ -328,11 +328,11 @@ $items = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,[Syste
 $result = foreach ($item in $items) { $v = $item.Current; if ($v.AutomationId -in @('6101','6103','6106','6114')) { $patterns = @($item.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName }); [pscustomobject]@{ id=$v.AutomationId; name=$v.Name; role=$v.ControlType.ProgrammaticName; enabled=$v.IsEnabled; patterns=$patterns } } }
 ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
 '''.replace('HANDLE', str(panel()))
-        # Walk the desktop tree to resolve the Win32 control proxy. Direct
-        # FromHandle returns generic Pane children on this Windows session.
+        # Prefer PowerShell 7: the legacy Windows PowerShell 5 UIA bridge
+        # reports generic Pane roles on this machine. Keep provider wait bounded.
         accessible_ok = False
         for _ in range(5):
-            result = subprocess.run(['powershell', '-NoProfile', '-Command', '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ' + automation], capture_output=True, timeout=20)
+            result = subprocess.run([shutil.which('pwsh') or 'powershell', '-NoProfile', '-Command', '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ' + automation], capture_output=True, timeout=20)
             report['uia_controls'] = json.loads(result.stdout.decode('utf-8-sig'))
             accessible = {item['id']: item for item in report['uia_controls']}
             accessible_ok = result.returncode == 0 and accessible.get('6101', {}).get('role') == 'ControlType.CheckBox' and 'TogglePatternIdentifiers.Pattern' in accessible['6101']['patterns'] and accessible.get('6103', {}).get('role') == 'ControlType.RadioButton' and accessible.get('6114', {}).get('name') == '关闭'
