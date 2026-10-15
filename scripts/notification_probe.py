@@ -7,7 +7,7 @@ Run while minicon-winmgr hosts the notification area, for example:
 Click the probe icons; callbacks and actual Shell_NotifyIcon return values are
 recorded. An optional --command-file accepts a JSON command or array of commands:
   {"op":"tip", "id":41, "tip":"Updated tooltip"}
-Operations: add, tip, hide (hidden=true/false), version, delete, stop.
+Operations: add, tip, icon (icon=32512..32516), hide (hidden=true/false), version, delete, stop.
 The client re-registers after TaskbarCreated and removes its icons on normal exit.
 Killing this process deliberately tests the host's stale-owner cleanup.
 """
@@ -69,6 +69,9 @@ def main():
     user.LoadIconW.argtypes = [w.HINSTANCE, c.c_void_p]
     user.LoadIconW.restype = w.HICON
     user.DestroyWindow.argtypes = [w.HWND]
+    user.CopyIcon.argtypes = [w.HICON]
+    user.CopyIcon.restype = w.HICON
+    user.DestroyIcon.argtypes = [w.HICON]
     shell.Shell_NotifyIconW.argtypes = [w.DWORD, c.POINTER(NotifyIcon)]
     shell.Shell_NotifyIconW.restype = w.BOOL
     report = {'pid': os.getpid(), 'operations': [], 'events': [], 'restarts': 0}
@@ -83,7 +86,16 @@ def main():
             args.output.parent.mkdir(parents=True, exist_ok=True)
             temporary = args.output.with_suffix('.tmp')
             temporary.write_text(json.dumps(report, indent=2), encoding='utf-8')
-            temporary.replace(args.output)
+            # Windows readers can briefly hold the destination without delete
+            # sharing while polling this report during desktop acceptance.
+            for attempt in range(50):
+                try:
+                    temporary.replace(args.output)
+                    break
+                except PermissionError:
+                    if attempt == 49:
+                        raise
+                    time.sleep(.01)
 
     @callback_type
     def proc(window, message, wp, lp):
@@ -120,6 +132,7 @@ def main():
         data.size = c.sizeof(data)
         data.hwnd = hwnd
         data.id = ident
+        owned_icon = None
         if op == 'add':
             data.flags = 7
             data.callback = 0x8001
@@ -129,6 +142,14 @@ def main():
         elif op == 'tip':
             data.flags = 4
             data.tip = command['tip'][:127]
+            code = 1
+        elif op == 'icon':
+            resource = int(command.get('icon', 32515))
+            if resource not in range(32512, 32517):
+                raise ValueError('icon must be a standard system icon ID 32512..32516')
+            owned_icon = user.CopyIcon(user.LoadIconW(None, c.c_void_p(resource)))
+            data.flags = 2
+            data.icon = owned_icon
             code = 1
         elif op == 'hide':
             data.flags = 8
@@ -147,6 +168,8 @@ def main():
             c.memmove(c.addressof(data.guid), identity.bytes_le, 16)
             data.flags |= 0x20
         ok = bool(shell.Shell_NotifyIconW(code, c.byref(data)))
+        if owned_icon:
+            user.DestroyIcon(owned_icon)
         report['operations'].append(dict(command, ok=ok))
         if ok and remember:
             if op == 'add':

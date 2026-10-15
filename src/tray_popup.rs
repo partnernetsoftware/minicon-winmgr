@@ -6,13 +6,15 @@ use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
+    CreateFontIndirectW, DeleteObject, GetMonitorInfoW, HFONT, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MonitorFromRect,
 };
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetThreadDpiAwarenessContext,
+    SystemParametersInfoForDpi,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
@@ -22,6 +24,7 @@ use windows::core::PCWSTR;
 const CLASS: &str = "minicon_winmgr_notification_panel";
 const HOTKEY: i32 = 515;
 const FIRST: usize = 5100;
+const WM_MOUSELEAVE: u32 = 0x02a3;
 struct Panel {
     hwnd: HWND,
     instance: HINSTANCE,
@@ -31,8 +34,14 @@ struct Panel {
     buttons: Vec<HWND>,
     page: usize,
     page_size: usize,
+    columns: usize,
+    font: HFONT,
+    font_dpi: u32,
     selected: usize,
     pressed: Option<(usize, TrayItem)>,
+    right_pressed: Option<(usize, TrayItem)>,
+    mouse_releasing: bool,
+    pending: Option<(Vec<TrayItem>, Vec<TrayItem>)>,
     all: bool,
     launch: Option<Receiver<Result<(), String>>>,
 }
@@ -86,8 +95,14 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
                 buttons: vec![],
                 page: 0,
                 page_size: 16,
+                columns: 4,
+                font: HFONT::default(),
+                font_dpi: 0,
                 selected: 0,
                 pressed: None,
+                right_pressed: None,
+                mouse_releasing: false,
+                pending: None,
                 all: false,
                 launch: None,
             })
@@ -112,7 +127,24 @@ pub(crate) fn hide() {
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
-        with(|s| s.pressed = None);
+        with(|s| {
+            s.pressed = None;
+            s.right_pressed = None;
+            s.pending = None;
+        });
+        unsafe {
+            let _ = KillTimer(Some(hwnd), 3);
+        }
+        // Hidden controls no longer need an icon snapshot. Destroy controls
+        // before dropping their image owners, so closed panels do not retain
+        // icons belonging to applications that have since exited.
+        let buttons = with(|s| std::mem::take(&mut s.buttons)).unwrap_or_default();
+        for button in buttons {
+            unsafe {
+                let _ = DestroyWindow(button);
+            }
+        }
+        with(|s| s.items.clear());
         crate::bar_tip::hide();
     }
 }
@@ -122,6 +154,11 @@ pub(crate) fn shutdown() {
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), HOTKEY);
             let _ = DestroyWindow(hwnd);
+            if let Some(font) = with(|s| s.font)
+                && !font.is_invalid()
+            {
+                let _ = DeleteObject(font.into());
+            }
         }
         PANEL.with(|s| *s.borrow_mut() = None);
     }
@@ -155,8 +192,20 @@ pub(crate) fn update(items: &[TrayItem], hidden: &[TrayItem]) {
     }
     // Keep the pressed button and its identity intact until the native button
     // releases capture. The next refresh applies any pending registration change.
-    if unsafe { GetKeyState(VK_LBUTTON.0 as i32) } < 0 {
+    let capture = unsafe { GetCapture() };
+    if unsafe { GetKeyState(VK_LBUTTON.0 as i32) } < 0
+        || unsafe { GetKeyState(VK_RBUTTON.0 as i32) } < 0
+        || unsafe { IsChild(handle(), capture) }.as_bool()
+    {
+        with(|s| s.pending = Some((items.to_vec(), hidden.to_vec())));
+        unsafe {
+            SetTimer(Some(handle()), 3, 100, None);
+        }
         return;
+    }
+    with(|s| s.pending = None);
+    unsafe {
+        let _ = KillTimer(Some(handle()), 3);
     }
     let all = with(|s| s.all).unwrap_or(false);
     let next: Vec<_> = if all { items.to_vec() } else { hidden.to_vec() };
@@ -177,6 +226,41 @@ pub(crate) fn update(items: &[TrayItem], hidden: &[TrayItem]) {
         rebuild();
     }
 }
+#[derive(Debug)]
+struct Geometry {
+    width: i32,
+    height: i32,
+    columns: usize,
+    capacity: usize,
+    page: usize,
+    visible_rows: usize,
+}
+impl Geometry {
+    fn new(work: RECT, dpi: u32, count: usize, page: usize) -> Self {
+        let scale = |n: i32| n * dpi.max(96) as i32 / 96;
+        let width = scale(216).min((work.right - work.left).max(1));
+        let columns = ((width - scale(16) - 2 + scale(4)) / scale(36)).clamp(1, 4) as usize;
+        let rows = ((work.bottom - work.top - scale(102)) / scale(36)).clamp(1, 8) as usize;
+        let capacity = rows * columns;
+        let page = page.min(count.saturating_sub(1) / capacity);
+        let visible_rows = count
+            .saturating_sub(page * capacity)
+            .min(capacity)
+            .div_ceil(columns)
+            .max(1);
+        let footer = if count > capacity { 78 } else { 48 };
+        let height = scale(visible_rows as i32 * 36 + footer).min((work.bottom - work.top).max(1));
+        Self {
+            width,
+            height,
+            columns,
+            capacity,
+            page,
+            visible_rows,
+        }
+    }
+}
+
 fn rebuild() {
     let focused_id = unsafe { GetDlgCtrlID(GetFocus()) };
     let Some((hwnd, instance, anchor, old, items, page, selected)) = with(|s| {
@@ -204,15 +288,44 @@ fn rebuild() {
         };
         let _ = GetMonitorInfoW(MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST), &mut mi);
         let work = mi.rcWork;
-        let rows = ((work.bottom - work.top - scale(102)) / scale(36)).clamp(1, 8) as usize;
-        let capacity = rows * 4;
-        let page = page.min(items.len().saturating_sub(1) / capacity);
-        let count = items.len().saturating_sub(page * capacity).min(capacity);
-        let visible_rows = count.div_ceil(4).max(1);
-        let width = scale(216).min((work.right - work.left).max(1));
-        let footer = if items.len() > capacity { 78 } else { 48 };
-        let height =
-            (scale(visible_rows as i32 * 36 + footer)).min((work.bottom - work.top).max(1));
+        let Geometry {
+            width,
+            height,
+            columns,
+            capacity,
+            page,
+            visible_rows,
+        } = Geometry::new(work, dpi, items.len(), page);
+        let (old_font, font_dpi) = with(|s| (s.font, s.font_dpi)).unwrap_or_default();
+        let font = if font_dpi == dpi && !old_font.is_invalid() {
+            old_font
+        } else {
+            let mut metrics = NONCLIENTMETRICSW {
+                cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+                ..Default::default()
+            };
+            let font = if SystemParametersInfoForDpi(
+                SPI_GETNONCLIENTMETRICS.0,
+                metrics.cbSize,
+                Some(&mut metrics as *mut _ as *mut _),
+                0,
+                dpi,
+            )
+            .is_ok()
+            {
+                CreateFontIndirectW(&metrics.lfMessageFont)
+            } else {
+                HFONT::default()
+            };
+            if !old_font.is_invalid() {
+                let _ = DeleteObject(old_font.into());
+            }
+            with(|s| {
+                s.font = font;
+                s.font_dpi = dpi;
+            });
+            font
+        };
         let x = (anchor.right - width).clamp(work.left, (work.right - width).max(work.left));
         let y =
             (anchor.top - height - scale(6)).clamp(work.top, (work.bottom - height).max(work.top));
@@ -228,6 +341,7 @@ fn rebuild() {
         with(|s| {
             s.page = page;
             s.page_size = capacity;
+            s.columns = columns;
         });
         let mut buttons = vec![];
         if items.is_empty() {
@@ -243,7 +357,7 @@ fn rebuild() {
                 WS_CHILD | WS_VISIBLE,
                 scale(8),
                 scale(8),
-                scale(200),
+                (width - scale(16) - 2).max(1),
                 scale(32),
                 Some(hwnd),
                 Some(HMENU(5 as *mut _)),
@@ -270,8 +384,8 @@ fn rebuild() {
                 PCWSTR(wide("BUTTON").as_ptr()),
                 PCWSTR(wide(title).as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE((BS_ICON | BS_NOTIFY) as u32),
-                scale(8 + (local % 4) as i32 * 36),
-                scale(8 + (local / 4) as i32 * 36),
+                scale(8 + (local % columns) as i32 * 36),
+                scale(8 + (local / columns) as i32 * 36),
                 scale(32),
                 scale(32),
                 Some(hwnd),
@@ -291,11 +405,12 @@ fn rebuild() {
             buttons.push(button);
         }
         let base = scale(12 + visible_rows as i32 * 36);
-        for (id, title, bx, bw, by) in [
-            (1, "音量设置", 8, 96, base),
-            (2, "网络设置", 112, 96, base),
-            (3, "上一页", 8, 96, base + scale(30)),
-            (4, "下一页", 112, 96, base + scale(30)),
+        let bw = ((width - scale(24) - 2) / 2).max(1);
+        for (id, title, bx, by) in [
+            (1, "音量设置", scale(8), base),
+            (2, "网络设置", scale(16) + bw, base),
+            (3, "上一页", scale(8), base + scale(30)),
+            (4, "下一页", scale(16) + bw, base + scale(30)),
         ] {
             if id >= 3 && items.len() <= capacity {
                 continue;
@@ -305,9 +420,9 @@ fn rebuild() {
                 PCWSTR(wide("BUTTON").as_ptr()),
                 PCWSTR(wide(title).as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                scale(bx),
+                bx,
                 by,
-                scale(bw),
+                bw,
                 scale(26),
                 Some(hwnd),
                 Some(HMENU(id as *mut _)),
@@ -323,6 +438,14 @@ fn rebuild() {
                 let _ = EnableWindow(button, (page + 1) * capacity < items.len());
             }
             buttons.push(button);
+        }
+        for button in &buttons {
+            SendMessageW(
+                *button,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(1)),
+            );
         }
         with(|s| s.buttons = buttons);
         if IsWindowVisible(hwnd).as_bool() {
@@ -501,12 +624,15 @@ unsafe extern "system" fn child_proc(
                         return LRESULT(0);
                     }
                     if index != usize::MAX {
-                        let count = with(|s| s.items.len()).unwrap_or(0);
+                        let (count, columns) =
+                            with(|s| (s.items.len(), s.columns)).unwrap_or((0, 4));
                         let next = match vk {
                             v if v == VK_LEFT.0 => Some(index.saturating_sub(1)),
                             v if v == VK_RIGHT.0 => Some((index + 1).min(count.saturating_sub(1))),
-                            v if v == VK_UP.0 => Some(index.saturating_sub(4)),
-                            v if v == VK_DOWN.0 => Some((index + 4).min(count.saturating_sub(1))),
+                            v if v == VK_UP.0 => Some(index.saturating_sub(columns)),
+                            v if v == VK_DOWN.0 => {
+                                Some((index + columns).min(count.saturating_sub(1)))
+                            }
                             v if v == VK_HOME.0 => Some(0),
                             v if v == VK_END.0 => Some(count.saturating_sub(1)),
                             _ => None,
@@ -531,17 +657,53 @@ unsafe extern "system" fn child_proc(
                     activate(index, MouseEvent::LeftDown);
                 }
                 WM_LBUTTONDBLCLK if index != usize::MAX => {
+                    with(|s| s.pressed = s.items.get(index).cloned().map(|i| (index, i)));
                     activate(index, MouseEvent::LeftDoubleClick);
                 }
+                WM_LBUTTONUP if index != usize::MAX => {
+                    let pressed = with(|s| s.pressed.take()).flatten();
+                    let current = with(|s| s.items.get(index).and_then(|i| i.owner)).flatten();
+                    let mut rect = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rect);
+                    let x = lp.0 as u16 as i16 as i32;
+                    let y = (lp.0 >> 16) as u16 as i16 as i32;
+                    if let Some((_, item)) =
+                        pressed.filter(|(old, item)| *old == index && item.owner == current)
+                        && crate::win_util::rect_contains(rect, x, y)
+                    {
+                        tray_bar::forward(&item, MouseEvent::LeftUp);
+                    }
+                    // Native buttons do not send BN_CLICKED after every double
+                    // click. Forward mouse release ourselves and keep their
+                    // subsequent BN_CLICKED from becoming keyboard activation.
+                    with(|s| s.mouse_releasing = true);
+                    let result = DefSubclassProc(hwnd, msg, wp, lp);
+                    with(|s| s.mouse_releasing = false);
+                    return result;
+                }
                 WM_RBUTTONDOWN if index != usize::MAX => {
+                    with(|s| s.right_pressed = s.items.get(index).cloned().map(|i| (index, i)));
                     activate(index, MouseEvent::RightDown);
                     return LRESULT(0);
                 }
                 WM_RBUTTONUP if index != usize::MAX => {
-                    activate(index, MouseEvent::RightUp);
+                    let pressed = with(|s| s.right_pressed.take()).flatten();
+                    let current = with(|s| s.items.get(index).and_then(|i| i.owner)).flatten();
+                    if let Some((_, item)) =
+                        pressed.filter(|(old, item)| *old == index && item.owner == current)
+                    {
+                        tray_bar::forward(&item, MouseEvent::RightUp);
+                    }
                     return LRESULT(0);
                 }
                 WM_MOUSEMOVE if index != usize::MAX => {
+                    let mut tracking = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        ..Default::default()
+                    };
+                    let _ = TrackMouseEvent(&mut tracking);
                     if let Some(Some(item)) = with(|s| s.items.get(index).cloned()) {
                         let mut r = RECT::default();
                         let _ = GetWindowRect(hwnd, &mut r);
@@ -554,6 +716,9 @@ unsafe extern "system" fn child_proc(
                             r,
                         );
                     }
+                }
+                WM_MOUSELEAVE => {
+                    crate::bar_tip::hide();
                 }
                 _ => {}
             }
@@ -590,6 +755,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     // BS_NOTIFY also sends focus notifications. Only a genuine
                     // BN_CLICKED activates an icon; moving focus must be inert.
                     if (wp.0 >> 16) & 0xffff != BN_CLICKED as usize {
+                        return LRESULT(0);
+                    }
+                    if with(|s| s.mouse_releasing).unwrap_or(false) {
                         return LRESULT(0);
                     }
                     let id = wp.0 & 0xffff;
@@ -664,6 +832,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                     return LRESULT(0);
                 }
+                WM_TIMER if wp.0 == 3 => {
+                    let _ = KillTimer(Some(hwnd), 3);
+                    if let Some((items, hidden)) = with(|s| s.pending.take()).flatten() {
+                        update(&items, &hidden);
+                    }
+                    return LRESULT(0);
+                }
                 WM_DPICHANGED => {
                     // Rebuild after SetWindowPos/DPI notifications unwind; moving
                     // to another monitor must not recursively destroy controls.
@@ -680,4 +855,68 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         },
         || unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scaled_grid_and_footer_stay_inside_small_work_areas() {
+        for dpi in [96, 144, 192] {
+            let scale = |n: i32| n * dpi as i32 / 96;
+            for (width, height) in [(1680, 1014), (640, 480), (320, 240), (240, 240)] {
+                let work = RECT {
+                    left: -width,
+                    top: -height,
+                    right: 0,
+                    bottom: 0,
+                };
+                for count in [0, 1, 70, 256] {
+                    for requested_page in [0, 1, usize::MAX] {
+                        let g = Geometry::new(work, dpi, count, requested_page);
+                        assert!(g.width <= width && g.height <= height, "{g:?}");
+                        assert!((1..=4).contains(&g.columns));
+                        assert!(g.page * g.capacity <= count.saturating_sub(1));
+                        let displayed = count.saturating_sub(g.page * g.capacity).min(g.capacity);
+                        for index in 0..displayed {
+                            let right = scale(8 + (index % g.columns) as i32 * 36 + 32);
+                            let bottom = scale(8 + (index / g.columns) as i32 * 36 + 32);
+                            assert!(right < g.width && bottom < g.height, "{g:?}");
+                        }
+                        let bw = (g.width - scale(24) - 2) / 2;
+                        assert!(scale(16) + 2 * bw < g.width);
+                        let footer_bottom = scale(
+                            12 + g.visible_rows as i32 * 36
+                                + 26
+                                + if count > g.capacity { 30 } else { 0 },
+                        );
+                        assert!(footer_bottom < g.height, "{g:?}, dpi={dpi}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_icon_is_reachable_after_page_size_changes() {
+        for dpi in [96, 144, 192] {
+            for width in [240, 320, 640] {
+                let work = RECT {
+                    right: width,
+                    bottom: 240,
+                    ..Default::default()
+                };
+                let count = 257;
+                let capacity = Geometry::new(work, dpi, count, 0).capacity;
+                let reached: Vec<_> = (0..count.div_ceil(capacity))
+                    .flat_map(|page| {
+                        let g = Geometry::new(work, dpi, count, page);
+                        g.page * g.capacity..((g.page + 1) * g.capacity).min(count)
+                    })
+                    .collect();
+                assert_eq!(reached, (0..count).collect::<Vec<_>>());
+            }
+        }
+    }
 }

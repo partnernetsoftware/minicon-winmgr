@@ -308,6 +308,21 @@ pub(crate) fn forward_at(item: &TrayItem, event: MouseEvent, point: POINT) -> bo
         tracing::debug!("tray strip is in its inert shape; click not forwarded");
         return false;
     };
+    if crate::tray_host::is_installed()
+        && !crate::tray_host::callback_is_current(
+            owner.hwnd,
+            owner.uid,
+            owner.callback_msg,
+            owner.version,
+            item.pid,
+        )
+    {
+        tracing::debug!(
+            uid = owner.uid,
+            "notification changed during input; cancelling callback"
+        );
+        return false;
+    }
     // Pre-NOTIFYICON_VERSION clients expect the legacy right-button pair for
     // keyboard activation/menu requests, rather than NIN_KEYSELECT/CONTEXTMENU.
     if owner.version < 3 && matches!(event, MouseEvent::KeyboardSelect | MouseEvent::KeyboardMenu) {

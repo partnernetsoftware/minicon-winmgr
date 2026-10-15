@@ -19,6 +19,7 @@
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
@@ -44,6 +45,23 @@ const SHELLTRAYDATA_MAGIC: u32 = 0x3475_3423;
 
 // Number of UTF-16 units in `NOTIFYICONDATAW::szTip`.
 const TIP_CHARS: usize = 128;
+
+// Malformed senders must remain diagnosable without flooding the shell log.
+fn warn_payload(cb: u32, reason: &str) {
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    let emit = {
+        let mut last = lock_or_recover(LAST.get_or_init(|| Mutex::new(None)));
+        if last.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
+            false
+        } else {
+            *last = Some(Instant::now());
+            true
+        }
+    };
+    if emit {
+        tracing::warn!(cb, reason, "tray sink: rejected payload (rate limited)");
+    }
+}
 
 /// One hosted tray icon: everything a click needs to be forwarded back.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,6 +185,24 @@ pub(crate) fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Er
 /// Current hosted icons (empty when the host is not installed).
 pub(crate) fn handles() -> Vec<TrayIconHandle> {
     lock_or_recover(icons_store()).clone()
+}
+
+/// Cancel an in-flight input when the icon was removed, replaced or renegotiated
+/// while the user held the button. The caller releases this lock before posting.
+pub(crate) fn callback_is_current(
+    hwnd: isize,
+    uid: u32,
+    message: u32,
+    version: u32,
+    pid: u32,
+) -> bool {
+    lock_or_recover(icons_store()).iter().any(|icon| {
+        icon.hwnd == hwnd
+            && icon.uid == uid
+            && icon.callback_msg == message
+            && icon.version == version
+            && icon.owner_pid == pid
+    })
 }
 
 /// Whether we should host the tray:
@@ -394,7 +430,7 @@ fn apply(parsed: ParsedIcon) -> bool {
                     // INFO, not DEBUG: this is the one line that answers "did
                     // an app actually hand us an icon?" — the question that
                     // otherwise costs a log dive through the whole strip.
-                    tracing::info!(
+                    tracing::debug!(
                         uid = parsed.uid,
                         total = guard.len(),
                         "tray icon registered"
@@ -482,7 +518,7 @@ unsafe extern "system" fn tray_wndproc_inner(
                 if cds.dwData != SHELLTRAYDATA_MARKER {
                     tracing::debug!(marker = cds.dwData, "tray sink: unrelated WM_COPYDATA");
                 } else if cds.lpData.is_null() || cds.cbData < 4 {
-                    tracing::warn!(cb = cds.cbData, "tray sink: tray payload too small");
+                    warn_payload(cds.cbData, "tray payload too small");
                 } else {
                     let raw =
                         std::slice::from_raw_parts(cds.lpData as *const u8, cds.cbData as usize);
@@ -493,7 +529,7 @@ unsafe extern "system" fn tray_wndproc_inner(
                     match parse_shell_tray_data(raw) {
                         Some(parsed) => return LRESULT(apply(parsed) as isize),
                         None => {
-                            tracing::warn!(cb = cds.cbData, "tray sink: unparseable tray payload");
+                            warn_payload(cds.cbData, "unparseable tray payload");
                         }
                     }
                 }

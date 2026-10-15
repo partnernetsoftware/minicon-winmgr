@@ -1746,6 +1746,15 @@ unsafe extern "system" fn wndproc_inner(
             let mut client = RECT::default();
             let _ = unsafe { GetClientRect(hwnd, &mut client) };
             let x = get_x(lparam);
+            let y = get_y(lparam);
+            if notification_arrow(client).is_some_and(|r| crate::win_util::rect_contains(r, x, y)) {
+                show_notifications(hwnd, client, true);
+                return LRESULT(0);
+            }
+            if crate::win_util::rect_contains(notification_system(client), x, y) {
+                show_notifications(hwnd, client, false);
+                return LRESULT(0);
+            }
             // Notification strip first: a double-click on a tray icon is the
             // "default action" gesture (open the app's window).
             if let Some(item) = tray_item_at(client, x, get_y(lparam)) {
