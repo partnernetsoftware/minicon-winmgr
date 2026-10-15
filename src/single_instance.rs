@@ -68,3 +68,77 @@ impl Drop for InstanceGuard {
         let _ = unsafe { CloseHandle(self.handle) };
     }
 }
+
+/// Only grant foreground permission to a process with our user SID and session.
+pub(crate) fn same_user_session(pid: u32) -> bool {
+    use windows::Win32::Security::{
+        EqualSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    struct Owned(HANDLE);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+    fn user(process: HANDLE) -> Option<Vec<usize>> {
+        let mut token = HANDLE::default();
+        unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.ok()?;
+        let token = Owned(token);
+        let mut bytes = 0;
+        let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut bytes) };
+        let mut buffer = vec![0usize; (bytes as usize).div_ceil(std::mem::size_of::<usize>())];
+        unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                Some(buffer.as_mut_ptr().cast()),
+                bytes,
+                &mut bytes,
+            )
+        }
+        .ok()?;
+        Some(buffer)
+    }
+    let mut ours = 0;
+    let mut theirs = 0;
+    if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut ours) }.is_err()
+        || unsafe { ProcessIdToSessionId(pid, &mut theirs) }.is_err()
+        || ours != theirs
+    {
+        return false;
+    }
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+    else {
+        return false;
+    };
+    let process = Owned(process);
+    let (Some(our_user), Some(their_user)) =
+        (user(unsafe { GetCurrentProcess() }), user(process.0))
+    else {
+        return false;
+    };
+    // Aligned buffers own both TOKEN_USER structures and their embedded SID data.
+    unsafe {
+        EqualSid(
+            (*(our_user.as_ptr().cast::<TOKEN_USER>())).User.Sid,
+            (*(their_user.as_ptr().cast::<TOKEN_USER>())).User.Sid,
+        )
+    }
+    .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn settings_identity_accepts_self_and_rejects_invalid_process() {
+        assert!(super::same_user_session(unsafe {
+            windows::Win32::System::Threading::GetCurrentProcessId()
+        }));
+        assert!(!super::same_user_session(u32::MAX));
+    }
+}

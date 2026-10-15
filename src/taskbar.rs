@@ -2,7 +2,7 @@
 //!
 //! Design language: `docs/prd_design_language.md`. A minimal, text-first, 36px "efficiency
 //! bar": a brand dot, task buttons (hover + active states, click to focus),
-//! and a read-only right zone holding just the clock.
+//! and a right zone whose clock opens the notification panel.
 //!
 //! Multi-monitor: one bar is created per monitor, docked to that monitor's work
 //! area. The task list is shared; layout, hover, and keyboard cursor are kept
@@ -39,17 +39,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{
     ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_POSCHANGED, APPBARDATA,
-    SHAppBarMessage, ShellExecuteW,
+    SHAppBarMessage,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyWindow, DrawIconEx,
     GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW, HICON,
     HWND_TOPMOST, IsIconic, IsWindow, KillTimer, PostMessageW, RegisterClassW, SM_CXSCREEN,
-    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE, SetTimer,
-    SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SetTimer, SetWindowPos,
+    ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -76,8 +76,7 @@ const SETTINGS_W: i32 = 26;
 /// Horizontal space reserved on the right edge for the clock. Task buttons may
 /// never intrude into it. The notification-icon strip is reserved on top of
 /// this (see `layout`), so it never overlaps the clock.
-const SYSTEM_W: i32 = 44;
-const RIGHT_W: i32 = CLOCK_W + PAD + SYSTEM_W + PAD;
+const RIGHT_W: i32 = CLOCK_W + PAD;
 /// Button-width tiers ("density ladder"). The bar starts at [`Density::Full`]
 /// (comfortable buttons carrying a title) and drops to [`Density::Compact`]
 /// (narrower, tighter padding) and finally to [`Density::IconOnly`] (the title
@@ -523,7 +522,7 @@ fn tray_icons() -> &'static Mutex<Vec<crate::tray::TrayItem>> {
 /// The single source of the strip's geometry on the message thread: the painter
 /// and every mouse handler call this, so their coordinate maths cannot diverge.
 fn tray_layout(client: RECT) -> crate::tray_bar::Layout {
-    let right = client.right - PAD - CLOCK_W - PAD - SYSTEM_W - PAD;
+    let right = client.right - PAD - CLOCK_W - PAD;
     crate::tray_bar::Layout::new(BTN_TOP, right, BAR_H - 2 * BTN_TOP)
 }
 
@@ -614,10 +613,10 @@ fn notification_arrow(client: RECT) -> Option<RECT> {
         bottom: BAR_H,
     })
 }
-fn notification_system(client: RECT) -> RECT {
-    let right = client.right - PAD - CLOCK_W - PAD;
+fn clock_rect(client: RECT) -> RECT {
+    let (left, right) = clock_span(client.right);
     RECT {
-        left: right - SYSTEM_W,
+        left,
         top: 0,
         right,
         bottom: BAR_H,
@@ -625,9 +624,9 @@ fn notification_system(client: RECT) -> RECT {
 }
 fn show_notifications(bar: HWND, client: RECT, hidden_only: bool) {
     let mut anchor = if hidden_only {
-        notification_arrow(client).unwrap_or_else(|| notification_system(client))
+        notification_arrow(client).unwrap_or_else(|| clock_rect(client))
     } else {
-        notification_system(client)
+        clock_rect(client)
     };
     let mut origin = RECT::default();
     let _ = unsafe { GetWindowRect(bar, &mut origin) };
@@ -800,6 +799,20 @@ fn small_font() -> isize {
 /// `MINICON_TASKBAR=0` (env precedence is resolved inside `config`).
 pub fn enabled() -> bool {
     crate::config::current().show_taskbar
+}
+
+pub(crate) fn running() -> bool {
+    !lock_or_recover(bars()).is_empty()
+}
+
+/// Cancel pending hover work on the UI thread when settings change or open.
+pub(crate) fn cancel_hover() {
+    let handles: Vec<isize> = lock_or_recover(bars()).iter().map(|b| b.hwnd).collect();
+    for raw in handles {
+        let _ = unsafe { KillTimer(Some(hwnd_from(raw)), HOVER_TIMER_ID) };
+    }
+    crate::hover_preview::hide();
+    crate::bar_tip::hide();
 }
 
 /// The effective merge policy and grouping key, from the live configuration.
@@ -1223,6 +1236,7 @@ fn hide_pins(avail_with_pins: i32, avail_without_pins: i32, n: usize, gap: i32) 
 
 /// Re-enumerates task windows, recomputes every bar's layout, and repaints.
 pub fn refresh() {
+    crate::hover_preview::clear_invalid_target();
     // Window handles are recycled, so a cached icon may belong to a window that
     // has since been closed. Drop the cache before re-enumerating. Path icons
     // are ours, so they are freed rather than merely forgotten.
@@ -1649,7 +1663,7 @@ unsafe extern "system" fn wndproc_inner(
                 show_notifications(hwnd, client, true);
                 return LRESULT(0);
             }
-            if contains(notification_system(client)) {
+            if clock_hit(client.right, x) && contains(clock_rect(client)) {
                 show_notifications(hwnd, client, false);
                 return LRESULT(0);
             }
@@ -1665,7 +1679,7 @@ unsafe extern "system" fn wndproc_inner(
             }
             // Settings button (leftmost) opens the settings window.
             if x < PAD + SETTINGS_W {
-                crate::settings_ui::toggle();
+                crate::settings_ui::toggle_from(hwnd);
                 return LRESULT(0);
             }
             // Start-menu entry slot. Not offered in the UI any more (see
@@ -1751,8 +1765,9 @@ unsafe extern "system" fn wndproc_inner(
                 show_notifications(hwnd, client, true);
                 return LRESULT(0);
             }
-            if crate::win_util::rect_contains(notification_system(client), x, y) {
-                show_notifications(hwnd, client, false);
+            if crate::win_util::rect_contains(clock_rect(client), x, y) {
+                crate::tray_popup::hide();
+                crate::tray_popup::open_date_time_settings();
                 return LRESULT(0);
             }
             // Notification strip first: a double-click on a tray icon is the
@@ -1763,9 +1778,6 @@ unsafe extern "system" fn wndproc_inner(
                 }
                 crate::tray_bar::forward(&item, crate::tray_bar::MouseEvent::LeftDoubleClick);
                 return LRESULT(0);
-            }
-            if clock_hit(client.right, x) {
-                open_date_time_settings();
             }
             LRESULT(0)
         }
@@ -2280,15 +2292,7 @@ unsafe fn paint(hwnd: HWND) {
             let layout = tray_layout(client);
             crate::tray_bar::paint(hdc, &layout, &icons);
         }
-        let mut label: Vec<u16> = "通知".encode_utf16().collect();
-        let mut rect = notification_system(client);
         SetTextColor(hdc, COLORREF(theme().muted));
-        DrawTextW(
-            hdc,
-            &mut label,
-            &mut rect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
         if let Some(mut rect) = notification_arrow(client) {
             let mut arrow = [b'^' as u16];
             DrawTextW(
@@ -2299,7 +2303,7 @@ unsafe fn paint(hwnd: HWND) {
             );
         }
 
-        // Right zone: the clock (`yy-mm-dd HH:MM`), right-aligned and muted.
+        // Right zone: clock and notification-panel entry, right-aligned and muted.
         SetTextColor(hdc, COLORREF(theme().muted));
         let now = GetLocalTime();
         let clock = format!(
@@ -2333,40 +2337,6 @@ fn clock_span(client_w: i32) -> (i32, i32) {
 fn clock_hit(client_w: i32, x: i32) -> bool {
     let (left, right) = clock_span(client_w);
     x >= left && x < right
-}
-
-/// Opens Windows' own date/time settings — the classic "Date and Time" dialog
-/// that a double-click on the stock tray clock opens.
-///
-/// Deliberately routed through `control.exe` rather than launching
-/// `timedate.cpl` directly: a bare `.cpl` needs its file association, which is
-/// missing on stripped-down installs and fails with `SE_ERR_NOASSOC` (31) —
-/// as does the `ms-settings:dateandtime` protocol there.
-fn open_date_time_settings() {
-    let verb = wide("open");
-    let file = wide("control.exe");
-    let params = wide("timedate.cpl");
-    // SAFETY: all three wide buffers outlive the call; a null `directory` is
-    // valid for the shell `open` verb.
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR(params.as_ptr()),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    let code = result.0 as isize;
-    if code > 32 {
-        tracing::info!("tray clock: opened date/time settings");
-    } else {
-        tracing::warn!(
-            code,
-            "tray clock: ShellExecuteW(control.exe timedate.cpl) failed"
-        );
-    }
 }
 
 /// Draws `text` right-aligned within `[left, right]`.
@@ -2906,7 +2876,7 @@ mod tests {
     fn icon_only_tier_shows_squares_when_everything_fits() {
         // A budget in [40, 80) lands in icon-only: the title is dropped but all
         // buttons still fit, drawn as 40–48px squares.
-        let bl = layout(200, 560 + super::SYSTEM_W + super::PAD, 4, 0, Density::Full);
+        let bl = layout(200, 560, 4, 0, Density::Full);
         assert_eq!(bl.density, Density::IconOnly);
         assert!(bl.overflow.is_none(), "all four should fit as squares");
         assert_eq!(bl.rects.len(), 4);
@@ -3058,7 +3028,7 @@ mod tests {
         let layout = super::tray_layout(client);
         assert_eq!(
             layout.right_x,
-            client.right - super::PAD - super::CLOCK_W - super::PAD - super::SYSTEM_W - super::PAD
+            client.right - super::PAD - super::CLOCK_W - super::PAD
         );
         assert_eq!(
             layout.strip_width(3),

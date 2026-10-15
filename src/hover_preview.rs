@@ -137,6 +137,10 @@ pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("hover preview disabled (set MINICON_HOVER_PREVIEW=1 to enable)");
         return Ok(());
     }
+    prepare(hinstance)
+}
+
+pub(crate) fn prepare(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
     if preview().is_some() {
         return Ok(()); // already installed
     }
@@ -200,6 +204,17 @@ fn release_bitmap() {
             let _ = DeleteObject(HGDIOBJ(raw as *mut core::ffi::c_void));
         }
         tracing::debug!("hover preview: released captured bitmap");
+    }
+}
+
+pub(crate) fn clear_invalid_target() {
+    let raw = TARGET.load(Ordering::SeqCst);
+    if raw != 0
+        && !unsafe {
+            windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(HWND(raw as *mut _))).as_bool()
+        }
+    {
+        hide();
     }
 }
 
@@ -271,8 +286,11 @@ pub fn show(target: isize, anchor: RECT) {
     tracing::debug!(target, ?rect, "hover preview shown");
 }
 
-/// Hides the preview and keeps the captured bitmap for the next hover.
+/// Hides the preview and releases the target bitmap immediately.
 pub fn hide() {
+    release_bitmap();
+    TARGET.store(0, Ordering::SeqCst);
+    *lock_or_recover(&ANCHOR) = None;
     let Some(hwnd) = preview() else { return };
     // SAFETY: `hwnd` is our live popup window.
     unsafe {

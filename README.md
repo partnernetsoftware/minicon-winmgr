@@ -1,114 +1,44 @@
-﻿# minicon-winmgr
+# minicon-winmgr
 
-A minimal, reliability-focused Windows shell / session manager written in Rust.
+轻量 Windows 外壳与会话管理器，Rust + Win32。默认作为 companion 与 Explorer 共存；受控接管模式可替换当前用户的桌面外壳。
 
-## Motivation
+当前版本 **0.1.6**。版本事实见 [CHANGELOG](CHANGELOG.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.6 计划](docs/plan_0_1_6.md)。
 
-- The stock Windows shell (`explorer.exe`) is often unstable for long-lived company desktop sessions.
-- Third-party desktop shells improve the experience but can still freeze in our environment.
-- This project rebuilds a Windows shell in **Rust** and adds **company-oriented session management** on top of a lightweight, observable taskbar.
+## 当前能力
 
-## Direction
+- 多屏任务栏、窗口激活/最小化、按应用或进程合并、拥挤密度调整和溢出菜单、快捷启动与文件夹入口。
+- Alt+Space 启动器；Win+R 运行框（注册失败时 Ctrl+Alt+R），支持历史、路径建议、中文 IME 与启动失败反馈。
+- 替换模式的真实通知图标、版本化回调、分页隐藏图标面板与应用重注册恢复。伴随模式保留 Explorer 通知宿主，不绘制不可点击的应用占位。
+- 会话回收、日志和资源指标、工作区预留/恢复、显式接管与回滚。
 
-- Shell replacement / companion focused on reliability and session lifecycle.
-- Session management for company workstations (start, recover, isolate, audit-friendly operations).
-- Iterate as a normal git repo; **no release packaging or code signing** in early phases.
-- Requirements, thinking tree, and the milestone plan live in [`docs/prd.md`](docs/prd.md).
+任务栏左侧保留设置入口。开始菜单圆点与窗口列表按钮已于 0.1.2 退役；旧菜单仅保留隐藏开关，不列为默认主路径。声音/网络入口是设置快捷方式，电源/输入法状态图标尚未实现。设置面板使用原生控件，支持键盘导航、滚动、来源说明和保存失败重试。
 
-## Status
-
-- **M0 — observability**: tracing to rolling file + stderr, panic hook, single-instance guard.
-- **M1 — message loop**: Win32 message-only window, message pump, graceful Ctrl+C shutdown.
-- **M2 — window awareness**: `EnumWindows` snapshot with class/title/pid/visibility.
-- **M3 — taskbar host**: self-painted, text-first 36px bar (**shown by default**, `MINICON_NO_TASKBAR=1` to hide) — settings/menu/quick-launch/list buttons, one button per window, clock. Keyboard nav via **Alt+`** then ←/→ + Enter. See [`docs/prd_4_1.md`](docs/prd_4_1.md).
-- **M4 — session lifecycle**: WTS session-change notifications + `WM_QUERYENDSESSION/ENDSESSION` handling.
-- **M5 — controlled shell switch**: `--shell-status` / `--shell-list` are read-only; writes (`--shell-set` / `--shell-replace` / `--shell-takeover` / `--shell-give-back` / `--shell-rollback`) require an explicit confirmation token (`MINICON_CONFIRM_SHELL=yes`). Runs in companion mode by default and leaves the registry untouched. **Takeover / give-back are immediate**: they write the registry *and* hand the desktop over in the current session (stop the running shell / detached-launch `explorer.exe`), no sign-out needed — see [`docs/prd_3_1.md`](docs/prd_3_1.md) §1b.
-- **M6/M7 — shell surface**: task buttons (one per window by default; optional per-app grouping), one bar per monitor, notification-area mirror + (replacement-mode) tray host, start menu (apps + Places + power) and Alt+Space launcher, AppBar docking.
-- **M8 — stability + input**: periodic memory/handle/GDI metrics, launch-frequency recents feeding ranking, window-snap hotkeys, Win+R run dialog, and a mirrored tray-icon strip on the bar's right zone.
-- **M9 — taskbar enhancements**: **quick-launch pins** (user-curated, left of the bar — right-click a window button and pick *添加到快速启动*; the list persists in `quick-launch.txt` beside the exe), a window-list button (popup of every task group — removed from the UI in v0.1.2), and `Win+* → Ctrl+Alt+*` fallback for the snap hotkeys.
-- **M10 — hover preview (opt-in)**: hovering a task button for ~350ms shows a live thumbnail popup (`PrintWindow`), anchored above the bar and flipped/clamped to the monitor. **Off by default**; enable with `MINICON_HOVER_PREVIEW=1`.
-- **M11 — taskbar polish**: a **settings button** (left of the menu dot) opens a settings window with **real GDI-drawn controls** — window **merge policy** (never / when the bar is full / always), **grouping basis** (by application exe path, default, or by pid), show-taskbar / notification-strip / hover-preview toggles — persisted to `minicon-settings.txt` beside the exe (key-level upsert + `.bak`; the hand-written `minicon.conf` is never rewritten), plus **接管桌面（立即生效）** / **还原系统桌面（立即生效）** actions (takeover writes the registry *and* stops the running shell now; give-back restores the backed-up value and re-launches `explorer.exe`). Task buttons are **one per window by default** (matching Alt+Tab); `MINICON_GROUP_TASKS=1` remains as an env override (≡ `taskbar.group=always`). When the bar gets crowded it steps down a **density ladder** (full → compact, with an 8px hysteresis dead zone) before folding the tail behind a `»` overflow button — the clock zone is never covered. The bar anchors to the **full monitor bounds** so it sits flush to the physical bottom, and when AppBar docking is unavailable (no explorer broker) we **shrink the work area ourselves** (`SPI_SETWORKAREA`) so maximized windows stop above the bar. The reserved area is restored on exit **and** (because a `WM_DESTROY` never fires on the normal path) recovered on the next start from a persisted `minicon-workarea.state`, so a crash or hard kill no longer leaves a dead strip at the screen bottom. A second pass adds an **icon-only** densest tier (title dropped; a hover bubble names the button), keyboard **1..9** jump inside navigation, a **group right-click menu** (open / restore / minimize / close all, pin all), a toggleable **notification-area strip** (`taskbar.tray`) — fully live in replace mode (real icons, and clicks forwarded back to the owning app as notify-icon callbacks) and an explicit Windows-managed explanation in companion mode — **pinned folder stacks**, and a **toggleable start menu** (`taskbar.menu`, **off by default**). In **v0.1.2** both the start-menu entry dot and the window-list button were **retired from the UI** — the settings button is now the only control left of the task strip.
-
-**Release notes**: [`CHANGELOG.md`](CHANGELOG.md) — **v0.1.5** (2026-10-15): real notification icons, version-aware callbacks, a paged hidden-icons panel, and sound/network settings shortcuts. Companion mode keeps Explorer's notification host and does not paint inert application placeholders.
-Delivery, compatibility and validation limits: [`docs/plan_0_1_5.md`](docs/plan_0_1_5.md). Keyboard: **Win+B** opens the notification panel; use arrows, Home/End, Tab, Enter/Space, Shift+F10 and Esc. Power/input-method status icons are not implemented; physical mixed-DPI multi-monitor validation remains outstanding. Later roadmap: [`docs/plan_0_2_0.md`](docs/plan_0_2_0.md).
-
-### Hotkeys
-
-| Keys | Action |
-|------|--------|
-| **Alt+`** | focus the taskbar, then ←/→ + Enter to switch windows, Esc to cancel |
-| **Alt+Space** | jump-to-app launcher (ranked by launch frequency) |
-| **Ctrl+Alt+R** | run dialog (falls back here when another shell already owns **Win+R**) |
-| **Win+←/→/↑** | snap the focused window (falls back to **Ctrl+Alt+←/→/↑** when taken) |
-
-All hotkeys degrade gracefully with a log line when another shell already owns the combo.
-
-Replacement readiness gate and rollback: [`docs/prd_3_1.md`](docs/prd_3_1.md). The full PRD is [`docs/prd.md`](docs/prd.md) (with `prd_*.md` sub-documents).
-
-## Entry points
-
-Unified shell switcher (view / start / switch between the Windows default shell, an alternative shell, and minicon-winmgr):
+## 使用与配置
 
 ```powershell
-.\scripts\shellctl.ps1 status                    # current per-user Shell value
-.\scripts\shellctl.ps1 list                      # known profiles + which is current
-.\scripts\shellctl.ps1 start  -Target minicon    # launch a shell now (no registry change)
-.\scripts\shellctl.ps1 stop   -Target minicon
-.\scripts\shellctl.ps1 restart -Target alt
-.\scripts\shellctl.ps1 switch -Target minicon -Confirm   # write Shell + swap processes (guarded)
-```
-
-`scripts\shellctl.cmd` is a double-click wrapper. The `alt` profile points at whatever
-`MINICON_ALT_SHELL` names (no path is baked in).
-
-Direct binary flags:
-
-| Flag | Effect |
-|------|--------|
-| *(none)* | companion run (message loop; registry untouched) |
-| `--shell-status` | print per-user `Shell` value (read-only) |
-| `--shell-list` | list profiles + current |
-| `--shell-set <explorer\|alt\|minicon\|path>` | set `Shell` (needs `MINICON_CONFIRM_SHELL=yes`) |
-| `--shell-replace` / `--shell-rollback <value\|default>` | guarded writes (same token) |
-| `--shell-takeover` | replace the shell **and** take the desktop over now (same token) |
-| `--shell-give-back` | restore the recorded shell **and** bring the desktop back now (same token) |
-| `--launch <query>` | list ranked Start Menu matches |
-| `--launch-run <query>` | launch the best Start Menu match |
-| `--help` | usage |
-
-Env vars: full, authoritative list in [`docs/prd_1_1.md`](docs/prd_1_1.md) §环境变量 / 开关 (single source of truth; not duplicated here).
-
-Config file (`minicon.conf`, or `MINICON_CONFIG`): `key=value`, `#`/`;` comments.
-Keys and defaults: authoritative table in [`docs/prd_6_1.md`](docs/prd_6_1.md) §6 (single source of truth; not duplicated here).
-The settings window writes `minicon-settings.txt` (or `MINICON_SETTINGS`); precedence is **env > minicon-settings.txt > minicon.conf > defaults**.
-
-## Modules
-
-| Module | Role |
-|--------|------|
-| `logging` / `single_instance` | M0 observability + single-instance guard |
-| `window` / `window_snapshot` | M1 message loop, M2 window enumeration |
-| `taskbar` / `dwm` | M3 self-painted bar, AppBar docking, rounded corners + acrylic |
-| `session` | M4 WTS session lifecycle |
-| `shell_registry` / `shell_swap` | M5 controlled Shell switch; immediate in-session handover (stop / re-launch the shell) |
-| `shell_launch` | the single, shell-safe "open" exit: never lets a bare `explorer.exe` reclaim the shell |
-| `grouping` / `launcher` / `monitor` / `config` | task grouping, Start Menu search, monitors, theme/config |
-| `tray` / `launcher_ui` | M6: notification-area mirror, Alt+Space launcher popup |
-| `tray_host` / `start_menu` | M7: replacement-mode tray host, ORB start menu (its UI entry was retired 2026-10-14; still reachable via the `taskbar.menu` / `MINICON_START_MENU` escape hatch) |
-| `folder_stack` | pinned folder rows in the start menu; expands to a bounded child popup |
-| `metrics` / `hotkeys` / `recents` | M8: stability sampling, snap hotkeys, launch-frequency store |
-| `run_dialog` / `tray_bar` | M8: Win+R run dialog, tray-icon strip in the bar's right zone |
-| `quick_launch` / `task_list` | M9: user-curated quick-launch pins (persisted), window-list popup |
-| `hover_preview` | M10: hover thumbnail popup (`PrintWindow`, throttled by `WM_TIMER`) |
-| `settings_ui` | M11: settings window (real GDI-drawn controls) opened from the bar's settings button |
-
-CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, and `cargo test` on Windows.
-
-## Build
-
-```bat
 cargo build
+New-Item -ItemType Directory -Force .\target\debug\live | Out-Null
+Copy-Item .\target\debug\minicon-winmgr.exe .\target\debug\live\minicon-winmgr.exe
+.\target\debug\live\minicon-winmgr.exe
 ```
 
-If your toolchain lives outside the default location, set `RUSTUP_HOME` and `CARGO_HOME`
-to your own paths and put `%CARGO_HOME%\bin` on `PATH`.
+已有实例时运行 `minicon-winmgr.exe --settings` 可再次呼出设置；无任务栏时该入口仍可用。开发时先构建，再退出旧实例、复制到 live 运行，避免锁住构建产物。
+
+单击时间打开通知面板，面板含“时间设置”；双击时间直接打开同一系统日期/时间设置。
+
+Alt+反引号聚焦任务栏，方向键选择、Enter 激活；Win+B 打开通知面板，支持方向键、Home/End、Tab、Enter/Space、Shift+F10、Esc。窗口贴靠使用 Win+方向键，冲突时有 Ctrl+Alt+方向键回退；实际注册结果目前主要写入日志。
+
+配置优先级：环境变量 > exe 旁 `minicon-settings.txt` > `minicon.conf` > 默认值。`MINICON_CONFIG` / `MINICON_SETTINGS` 可指定路径；设置文件异步按键更新并备份，失败保留原文件、显示状态并可重试，手写配置不被重写。有效环境覆盖项在面板中只读并注明变量名。完整键表只维护在 [任务栏与配置规格 §6](docs/prd_6_1.md)。显示任务栏只修改下次启动偏好，面板同时显示当前状态；悬停预览支持运行时开关。Run 的目标和参数均展开已定义的 `%变量%`，未知变量保留；默认打开程序失效时提示指定编辑器。
+
+接管会立即关闭当前会话的桌面外壳，并修改当前用户的后续登录 Shell。先读 [接管与回滚规格](docs/prd_3_1.md)，保留回滚记录；命令行修改需显式 `MINICON_CONFIRM_SHELL=yes`，设置面板保留默认“否”的确认。普通开发无需接管桌面。
+
+## 开发与文档
+
+- [代码与文档地图](docs/code-map.md)：模块边界、已知差距和证据入口。
+- [0.1.6 计划](docs/plan_0_1_6.md)：设置日常可用与反馈闭环。
+- [后续能力清单](docs/prd_5_1.md)：未排期需求及实施前提。
+- [历史归档](docs/archive/README.md)：旧版本计划、旧路线图和整理前 README。
+
+Windows CI 执行 `cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all`。打 tag 的 release workflow 已支持构建并发布产物；代码签名尚未纳入。构建工具链如在自定义位置，设置对应 `RUSTUP_HOME` / `CARGO_HOME` 并把 Cargo bin 加入 PATH。
+
+0.1.6 的自动化与桌面证据见 [版本计划](docs/plan_0_1_6.md) 和 [验收数据](docs/acceptance_0_1_6.json)。物理混合 DPI、多屏热插拔、屏幕阅读器语音、高对比度和小时级长跑未覆盖。

@@ -17,7 +17,7 @@
 //! The mapping itself is a pure function so the rule can be unit-tested
 //! without a display.
 
-use windows::Win32::Foundation::GetLastError;
+use windows::Win32::Foundation::{CO_E_APPNOTFOUND, GetLastError};
 use windows::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW, ShellExecuteW,
 };
@@ -64,7 +64,7 @@ impl LaunchError {
     }
 }
 
-/// Expand only target variables. Unknown names deliberately remain visible.
+/// Expand known environment variables once. Unknown names remain visible.
 fn expand_target(target: &str, lookup: &impl Fn(&str) -> Option<String>) -> String {
     let mut result = String::new();
     let mut rest = target;
@@ -188,7 +188,7 @@ pub fn parse_command_with(
         };
         (
             resolve(&expand_target(target, &lookup), false)?,
-            params.to_string(),
+            expand_target(params, &lookup),
         )
     };
     if target.is_empty() {
@@ -239,6 +239,9 @@ pub fn parse_command(input: &str) -> Result<LaunchRequest, LaunchError> {
 
 pub fn error_from_code(code: i32) -> LaunchError {
     let message = match code {
+        value if value == CO_E_APPNOTFOUND.0 => {
+            "关联的应用程序不可用。请指定程序或修复系统默认打开方式。".into()
+        }
         2 => "找不到目标。请检查名称或路径后重试。".into(),
         3 => "路径不可用。请检查目录或设备连接。".into(),
         5 => "权限不足。请检查目标的访问权限。".into(),
@@ -316,10 +319,27 @@ pub fn execute(request: &LaunchRequest) -> Result<(), LaunchError> {
             let captured = system_error.code().0 as u32;
             let code = if captured & 0xffff0000 == 0x80070000 {
                 (captured & 0xffff) as i32
+            } else if captured & 0x80000000 != 0 {
+                captured as i32
             } else {
                 last_error
             };
             let mut error = error_from_code(code);
+            // An existing document can still fail with FILE_NOT_FOUND when its
+            // association points at an uninstalled editor. Do not blame its path.
+            if (matches!(code, 2 | 3) || code == CO_E_APPNOTFOUND.0)
+                && request.params.trim().is_empty()
+                && std::path::Path::new(&request.file).is_file()
+                && !std::path::Path::new(&request.file)
+                    .extension()
+                    .is_some_and(|ext| {
+                        ["exe", "com", "bat", "cmd"]
+                            .iter()
+                            .any(|name| ext.eq_ignore_ascii_case(name))
+                    })
+            {
+                error.message = "文件存在，但默认打开程序不可用。请在文件路径前指定程序（例如 notepad），或修复系统默认打开方式。".into();
+            }
             if request.file.contains('%') {
                 error.message.push_str(" 请检查未定义的环境变量。");
             }
@@ -462,6 +482,13 @@ pub fn open(target: &str) -> bool {
 mod tests {
     use super::{Launch, THIS_PC, is_bare_explorer, plan};
 
+    #[test]
+    fn missing_associated_application_hresult_has_actionable_feedback() {
+        let error = super::error_from_code(super::CO_E_APPNOTFOUND.0);
+        assert_eq!(error.code, Some(0x800401F5u32 as i32));
+        assert!(error.message.contains("默认打开方式"));
+    }
+
     fn command(input: &str) -> Result<super::LaunchRequest, super::LaunchError> {
         super::parse_command_with(
             input,
@@ -473,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn run_preserves_parameter_text_and_expands_only_target() {
+    fn run_preserves_parameter_text_and_expands_environment() {
         let got = command(r#"%ProgramFiles%\App\app.exe  --name "张 三" %UNKNOWN%"#).unwrap();
         assert_eq!(got.file, r"C:\Program Files\App\app.exe");
         assert_eq!(got.params, r#"  --name "张 三" %UNKNOWN%"#);
@@ -481,6 +508,42 @@ mod tests {
         assert_eq!(
             command(r#""%ProgramFiles%\App\app.exe" --x"#).unwrap().file,
             got.file
+        );
+    }
+
+    #[test]
+    fn userprofile_document_and_notepad_arguments_expand() {
+        let parse = |input| {
+            super::parse_command_with(
+                input,
+                Some(r"C:\Users\张 三"),
+                Some(r"C:\Windows"),
+                |key| {
+                    key.eq_ignore_ascii_case("USERPROFILE")
+                        .then(|| r"C:\Users\张 三".into())
+                },
+                |path| path == r"C:\Users\张 三\.workbuddy\models.json",
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            parse(r"%USERPROFILE%\.workbuddy\models.json").file,
+            r"C:\Users\张 三\.workbuddy\models.json"
+        );
+        let request = parse(r#"notepad  "%USERPROFILE%\.workbuddy\models.json""#);
+        assert_eq!(request.file, "notepad");
+        assert_eq!(
+            request.params,
+            r#"  "C:\Users\张 三\.workbuddy\models.json""#
+        );
+        assert_eq!(
+            parse(r"notepad  %USERPROFILE%\.workbuddy\models.json").params,
+            r"  C:\Users\张 三\.workbuddy\models.json"
+        );
+        assert_eq!(
+            super::expand_target("%UNKNOWN% %USERPROFILE%", &|key| (key == "USERPROFILE")
+                .then(|| "%NESTED%".into())),
+            "%UNKNOWN% %NESTED%"
         );
     }
 

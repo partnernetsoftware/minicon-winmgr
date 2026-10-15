@@ -31,9 +31,58 @@ const CLASS_NAME: &str = "minicon_winmgr_message_window";
 const WINDOW_TITLE: &str = "minicon-winmgr (message-only)";
 const HEARTBEAT_TIMER_ID: usize = 1;
 const DEFAULT_HEARTBEAT_SECS: u64 = 30;
+const SETTINGS_MESSAGE: u32 = 0x8000 + 141;
+
+pub(crate) fn request_settings() -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, GetWindowThreadProcessId, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
+    };
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(5) {
+        let hwnd = unsafe {
+            FindWindowExW(
+                Some(HWND_MESSAGE),
+                None,
+                PCWSTR(wide(CLASS_NAME).as_ptr()),
+                None,
+            )
+        }
+        .unwrap_or_default();
+        if !hwnd.is_invalid() {
+            let mut pid = 0;
+            unsafe {
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            }
+            if !crate::single_instance::same_user_session(pid) {
+                return Err("设置窗口不属于当前用户会话。".into());
+            }
+            unsafe {
+                let _ = AllowSetForegroundWindow(pid);
+            }
+            let mut result = 0;
+            let sent = unsafe {
+                SendMessageTimeoutW(
+                    hwnd,
+                    SETTINGS_MESSAGE,
+                    WPARAM(0),
+                    LPARAM(0),
+                    SMTO_ABORTIFHUNG,
+                    250,
+                    Some(&mut result),
+                )
+            };
+            if sent.0 != 0 && result == 1 {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err("已有实例尚未就绪或没有响应，请稍后重试 --settings。".into())
+}
 
 /// Runs the shell message loop until a quit message is received.
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(show_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: standard Win32 window setup; all buffers outlive their calls and
     // the wndproc is a valid `extern "system"` function.
     unsafe {
@@ -99,6 +148,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Assembly layer: let modules that change what the bar shows ask for a
         // rebuild without importing `taskbar` (which imports them back).
         hub::set_taskbar_refresh(crate::taskbar::refresh);
+        hub::set_taskbar_state(crate::taskbar::running, crate::taskbar::cancel_hover);
 
         // Launcher popup (Alt+Space) — self-contained window + hotkey.
         if let Err(err) = crate::launcher_ui::init(hinstance) {
@@ -176,6 +226,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         window_snapshot::log_snapshot();
+        if show_settings {
+            crate::settings_ui::show();
+        }
         loop {
             let ret = GetMessageW(&mut msg, None, 0, 0);
             match ret.0 {
@@ -186,6 +239,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 0 => break, // WM_QUIT
                 _ => {}
+            }
+            if crate::settings_ui::filter(&msg) {
+                continue;
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -215,7 +271,14 @@ unsafe extern "system" fn wndproc_inner(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        SETTINGS_MESSAGE => {
+            crate::settings_ui::show();
+            LRESULT(1)
+        }
         WM_CLOSE => {
+            if !crate::settings_ui::allow_exit() {
+                return LRESULT(0);
+            }
             tracing::info!("WM_CLOSE received; destroying window");
             let _ = unsafe { DestroyWindow(hwnd) };
             LRESULT(0)

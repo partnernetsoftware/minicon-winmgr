@@ -4,4 +4,5 @@ scripts/capture.py
 scripts/hotswap.py
 scripts/*.py
 !scripts/notification_probe.py
+!scripts/settings_probe.py
 scripts/__pycache__/

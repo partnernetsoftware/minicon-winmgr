@@ -22,6 +22,8 @@ mod recents;
 mod run_dialog;
 mod run_history;
 mod session;
+mod settings_panel;
+mod settings_store;
 mod settings_ui;
 mod shell_launch;
 mod shell_registry;
@@ -50,6 +52,7 @@ const ALT_SHELL_ENV: &str = "MINICON_ALT_SHELL";
 
 enum Cli {
     RunShell,
+    Settings,
     ShellStatus,
     ShellList,
     ShellSet(Option<String>),
@@ -67,6 +70,7 @@ impl Cli {
         let mut args = args.peekable();
         match args.next().as_deref() {
             None => Cli::RunShell,
+            Some("--settings") => Cli::Settings,
             Some("--shell-status") => Cli::ShellStatus,
             Some("--shell-list") => Cli::ShellList,
             Some("--shell-set") => Cli::ShellSet(args.next()),
@@ -99,7 +103,8 @@ fn main() {
     );
 
     match Cli::parse(std::env::args().skip(1)) {
-        Cli::RunShell => run_companion(),
+        Cli::RunShell => run_companion(false),
+        Cli::Settings => run_companion(true),
         Cli::ShellStatus => cmd_shell_status(),
         Cli::ShellList => cmd_shell_list(),
         Cli::ShellSet(target) => cmd_shell_set(target),
@@ -187,7 +192,7 @@ fn cmd_launch_run(query: Option<String>) {
 }
 
 /// Normal companion run: single-instance guard, then the message loop.
-fn run_companion() {
+fn run_companion(show_settings: bool) {
     // When Windows launches us as the login shell there is no console; detach
     // any inherited console so no stray window appears. CLI subcommands return
     // before this point, so they keep their console.
@@ -199,6 +204,21 @@ fn run_companion() {
 
     let _instance = match single_instance::InstanceGuard::acquire("minicon-winmgr.singleton") {
         Ok(guard) => guard,
+        Err(single_instance::AcquireError::AlreadyRunning) if show_settings => {
+            if let Err(err) = window::request_settings() {
+                eprintln!("minicon-winmgr: {err}");
+                unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                        None,
+                        windows::core::PCWSTR(crate::win_util::wide(&err).as_ptr()),
+                        windows::core::PCWSTR(crate::win_util::wide("无法打开设置").as_ptr()),
+                        windows::Win32::UI::WindowsAndMessaging::MB_OK,
+                    );
+                }
+                std::process::exit(1);
+            }
+            return;
+        }
         Err(err) => {
             tracing::warn!(%err, "refusing to start a second instance");
             eprintln!("minicon-winmgr: {err}");
@@ -211,7 +231,8 @@ fn run_companion() {
     // could restore it (task manager / `shellctl stop`).
     crate::taskbar::recover_workarea();
 
-    let result = window::run();
+    let result = window::run(show_settings);
+    crate::settings_ui::shutdown();
     crate::run_dialog::shutdown();
     crate::tray_popup::shutdown();
     // The message loop only closes the message-only window, so the taskbar
@@ -468,6 +489,7 @@ fn print_help() {
          \n\
          Usage:\n\
            minicon-winmgr                     run the shell (companion mode)\n\
+           minicon-winmgr --settings          open settings (including when taskbar is hidden)\n\
            minicon-winmgr --shell-status      print the per-user Winlogon Shell value\n\
            minicon-winmgr --shell-list        list known shell profiles + current\n\
            minicon-winmgr --shell-set <t>     set Shell to explorer|alt|minicon|<path>\n\

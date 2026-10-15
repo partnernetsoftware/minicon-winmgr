@@ -26,6 +26,21 @@ static SHELL_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// The taskbar's rebuild entry point, installed once by `window::run`.
 static REFRESH: OnceLock<fn()> = OnceLock::new();
+static TASKBAR_RUNNING: OnceLock<fn() -> bool> = OnceLock::new();
+static CANCEL_HOVER: OnceLock<fn()> = OnceLock::new();
+
+pub(crate) fn set_taskbar_state(running: fn() -> bool, cancel: fn()) {
+    let _ = TASKBAR_RUNNING.set(running);
+    let _ = CANCEL_HOVER.set(cancel);
+}
+pub(crate) fn taskbar_running() -> bool {
+    TASKBAR_RUNNING.get().is_some_and(|f| f())
+}
+pub(crate) fn cancel_hover() {
+    if let Some(cancel) = CANCEL_HOVER.get() {
+        cancel();
+    }
+}
 
 /// Records the shell message window. Called once, from `window::run`.
 pub fn set_shell_hwnd(hwnd: HWND) {

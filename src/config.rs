@@ -408,6 +408,98 @@ pub fn current() -> Config {
     crate::win_util::lock_or_recover(runtime()).clone()
 }
 
+fn taskbar_preference() -> &'static Mutex<bool> {
+    static PREFERENCE: OnceLock<Mutex<bool>> = OnceLock::new();
+    PREFERENCE.get_or_init(|| Mutex::new(current().show_taskbar))
+}
+
+pub(crate) fn preferred_taskbar() -> bool {
+    *crate::win_util::lock_or_recover(taskbar_preference())
+}
+
+pub(crate) fn env_source_with(
+    key: &str,
+    get: impl Fn(&str) -> Option<String>,
+) -> Option<&'static str> {
+    match key {
+        keys::TASKBAR_SHOW => {
+            if get("MINICON_TASKBAR")
+                .as_deref()
+                .and_then(parse_bool)
+                .is_some()
+            {
+                Some("MINICON_TASKBAR")
+            } else {
+                get("MINICON_NO_TASKBAR").map(|_| "MINICON_NO_TASKBAR")
+            }
+        }
+        keys::TASKBAR_GROUP => get("MINICON_GROUP_TASKS")
+            .as_deref()
+            .and_then(parse_bool)
+            .map(|_| "MINICON_GROUP_TASKS"),
+        keys::TASKBAR_GROUP_BY => get("MINICON_GROUP_BY")
+            .as_deref()
+            .and_then(GroupBy::parse)
+            .map(|_| "MINICON_GROUP_BY"),
+        keys::TASKBAR_TRAY => get("MINICON_TRAY")
+            .as_deref()
+            .and_then(parse_bool)
+            .map(|_| "MINICON_TRAY"),
+        keys::HOVER_PREVIEW => get("MINICON_HOVER_PREVIEW")
+            .as_deref()
+            .and_then(parse_bool)
+            .map(|_| "MINICON_HOVER_PREVIEW"),
+        _ => None,
+    }
+}
+
+pub(crate) fn env_source(key: &str) -> Option<&'static str> {
+    env_source_with(key, |name| {
+        std::env::var_os(name).map(|s| s.to_string_lossy().into_owned())
+    })
+}
+
+pub(crate) fn source(key: &'static str) -> String {
+    if let Some(name) = env_source(key) {
+        return format!("由环境变量 {name} 控制");
+    }
+    static SOURCES: OnceLock<std::collections::BTreeMap<&'static str, &'static str>> =
+        OnceLock::new();
+    let sources = SOURCES.get_or_init(|| {
+        let mut sources = std::collections::BTreeMap::new();
+        for (path, label) in [(conf_path(), "minicon.conf"), (settings_path(), "设置文件")] {
+            if let Some(text) = path.as_deref().and_then(read_text) {
+                for raw in text.lines() {
+                    let Some((k, value)) = raw.split_once('=') else {
+                        continue;
+                    };
+                    let k = k.trim();
+                    let canonical = match k {
+                        "show_taskbar" | keys::TASKBAR_SHOW if parse_bool(value).is_some() => {
+                            keys::TASKBAR_SHOW
+                        }
+                        keys::TASKBAR_TRAY if parse_bool(value).is_some() => keys::TASKBAR_TRAY,
+                        keys::HOVER_PREVIEW if parse_bool(value).is_some() => keys::HOVER_PREVIEW,
+                        keys::TASKBAR_GROUP if MergeStrategy::parse(value).is_some() => {
+                            keys::TASKBAR_GROUP
+                        }
+                        keys::TASKBAR_GROUP_BY if GroupBy::parse(value).is_some() => {
+                            keys::TASKBAR_GROUP_BY
+                        }
+                        _ => continue,
+                    };
+                    sources.insert(canonical, label);
+                }
+            }
+        }
+        sources
+    });
+    format!(
+        "启动来源：{}",
+        sources.get(key).copied().unwrap_or("内置默认")
+    )
+}
+
 /// The active theme, cached for the process lifetime.
 ///
 /// The taskbar, the bar-tip bubble and the settings window each used to wrap
@@ -422,7 +514,10 @@ pub fn theme() -> Theme {
 ///
 /// `key`/`value` describe the one field that changed, so persistence is a
 /// key-level upsert that never touches the user's other lines.
-fn update(f: impl FnOnce(&mut Config), key: &str, value: &str) -> bool {
+fn update(f: impl FnOnce(&mut Config), key: &'static str, value: &str) -> bool {
+    if env_source(key).is_some() {
+        return false;
+    }
     let mut guard = crate::win_util::lock_or_recover(runtime());
     let before = guard.clone();
     f(&mut guard);
@@ -430,7 +525,7 @@ fn update(f: impl FnOnce(&mut Config), key: &str, value: &str) -> bool {
         return false;
     }
     drop(guard);
-    persist(key, value);
+    crate::settings_store::enqueue(key, value);
     true
 }
 
@@ -446,7 +541,12 @@ pub fn set_group_by(g: GroupBy) -> bool {
 
 /// Sets taskbar visibility (restart-effective). Returns whether it changed.
 pub fn set_show_taskbar(b: bool) -> bool {
-    update(|c| c.show_taskbar = b, keys::TASKBAR_SHOW, bool_value(b))
+    if env_source(keys::TASKBAR_SHOW).is_some() {
+        return false;
+    }
+    *crate::win_util::lock_or_recover(taskbar_preference()) = b;
+    crate::settings_store::enqueue(keys::TASKBAR_SHOW, bool_value(b));
+    true
 }
 
 /// Sets whether the notification strip is shown (effective immediately).
@@ -466,23 +566,27 @@ pub fn set_hover_preview(b: bool) -> bool {
 pub fn upsert(text: &str, key: &str, value: &str) -> String {
     let mut out = String::new();
     let mut replaced = false;
-    for raw in text.lines() {
+    for raw in text.split_inclusive('\n') {
         let is_target = raw
             .split_once('=')
-            .map(|(k, _)| k.trim() == key)
+            .map(|(k, _)| {
+                k.trim() == key || (key == keys::TASKBAR_SHOW && k.trim() == "show_taskbar")
+            })
             .unwrap_or(false);
         if is_target {
             out.push_str(key);
             out.push_str(" = ");
             out.push_str(value);
-            out.push('\n');
+            out.push_str(if raw.ends_with("\r\n") { "\r\n" } else { "\n" });
             replaced = true;
         } else {
             out.push_str(raw);
-            out.push('\n');
         }
     }
     if !replaced {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
         out.push_str(key);
         out.push_str(" = ");
         out.push_str(value);
@@ -491,31 +595,59 @@ pub fn upsert(text: &str, key: &str, value: &str) -> String {
     out
 }
 
-/// Writes one setting to the settings file, backfilling a `.bak` of the prior
-/// contents first. Best effort: failures are logged, never fatal.
-fn persist(key: &str, value: &str) {
-    let Some(path) = settings_path() else {
-        return;
-    };
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let updated = upsert(&existing, key, value);
-    if !existing.is_empty() {
-        let mut bak = path.clone().into_os_string();
-        bak.push(".bak");
-        let bak = PathBuf::from(bak);
-        if let Err(err) = std::fs::write(&bak, &existing) {
-            tracing::warn!(path = %bak.display(), %err, "settings backup write failed");
-        }
-    }
-    match std::fs::write(&path, &updated) {
-        Ok(()) => tracing::info!(path = %path.display(), key, value, "setting persisted"),
-        Err(err) => tracing::warn!(path = %path.display(), %err, "setting write failed"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_environment_sources_follow_parser_precedence() {
+        let vars = [
+            ("MINICON_NO_TASKBAR", "1"),
+            ("MINICON_TASKBAR", "true"),
+            ("MINICON_GROUP_TASKS", "false"),
+            ("MINICON_GROUP_BY", "nonsense"),
+            ("MINICON_TRAY", "invalid"),
+            ("MINICON_HOVER_PREVIEW", "yes"),
+        ];
+        let get = |name: &str| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        };
+        assert_eq!(
+            env_source_with(keys::TASKBAR_SHOW, get),
+            Some("MINICON_TASKBAR")
+        );
+        assert_eq!(
+            env_source_with(keys::TASKBAR_GROUP, get),
+            Some("MINICON_GROUP_TASKS")
+        );
+        assert_eq!(env_source_with(keys::TASKBAR_GROUP_BY, get), None);
+        assert_eq!(env_source_with(keys::TASKBAR_TRAY, get), None);
+        assert_eq!(
+            env_source_with(keys::HOVER_PREVIEW, get),
+            Some("MINICON_HOVER_PREVIEW")
+        );
+        assert_eq!(
+            env_source_with(keys::TASKBAR_SHOW, |k| (k == "MINICON_NO_TASKBAR")
+                .then(|| "".into())),
+            Some("MINICON_NO_TASKBAR")
+        );
+    }
+
+    #[test]
+    fn upsert_preserves_crlf_non_target_bytes_and_replaces_visibility_aliases() {
+        let original =
+            "# comment\r\nunknown = value\r\ntaskbar.show = true\r\nshow_taskbar = true\r\n# tail";
+        let updated = upsert(original, keys::TASKBAR_SHOW, "false");
+        assert!(updated.starts_with("# comment\r\nunknown = value\r\n"));
+        assert!(updated.ends_with("# tail"));
+        assert!(!parse(&updated).show_taskbar);
+        assert_eq!(
+            upsert("# no final newline", keys::TASKBAR_TRAY, "true"),
+            "# no final newline\ntaskbar.tray = true\n"
+        );
+    }
 
     #[test]
     fn empty_text_is_default() {

@@ -248,7 +248,7 @@ impl Geometry {
             .min(capacity)
             .div_ceil(columns)
             .max(1);
-        let footer = if count > capacity { 78 } else { 48 };
+        let footer = 78; // Settings include a second row for date/time, even without paging.
         let height = scale(visible_rows as i32 * 36 + footer).min((work.bottom - work.top).max(1));
         Self {
             width,
@@ -406,13 +406,22 @@ fn rebuild() {
         }
         let base = scale(12 + visible_rows as i32 * 36);
         let bw = ((width - scale(24) - 2) / 2).max(1);
-        for (id, title, bx, by) in [
-            (1, "音量设置", scale(8), base),
-            (2, "网络设置", scale(16) + bw, base),
-            (3, "上一页", scale(8), base + scale(30)),
-            (4, "下一页", scale(16) + bw, base + scale(30)),
+        let paging = items.len() > capacity;
+        let half = ((bw - scale(4)) / 2).max(1);
+        for (id, title, bx, by, button_width) in [
+            (1, "音量设置", scale(8), base, bw),
+            (2, "网络设置", scale(16) + bw, base, bw),
+            (
+                6,
+                "时间设置",
+                scale(8),
+                base + scale(30),
+                if paging { bw } else { width - scale(16) - 2 },
+            ),
+            (3, "上页", scale(16) + bw, base + scale(30), half),
+            (4, "下页", scale(20) + bw + half, base + scale(30), half),
         ] {
-            if id >= 3 && items.len() <= capacity {
+            if matches!(id, 3 | 4) && !paging {
                 continue;
             }
             let button = CreateWindowExW(
@@ -422,7 +431,7 @@ fn rebuild() {
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 bx,
                 by,
-                bw,
+                button_width,
                 scale(26),
                 Some(hwnd),
                 Some(HMENU(id as *mut _)),
@@ -524,6 +533,11 @@ fn activate(index: usize, event: MouseEvent) {
     }
 }
 
+/// Shared by the clock double-click and the panel's date/time button.
+pub(crate) fn open_date_time_settings() {
+    open_system(6);
+}
+
 fn open_system(id: usize) {
     if with(|s| s.launch.is_some()).unwrap_or(true) {
         return;
@@ -535,17 +549,20 @@ fn open_system(id: usize) {
             let com =
                 unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
             let request = crate::shell_launch::LaunchRequest {
-                file: if id == 1 {
-                    "ms-settings:sound"
-                } else {
-                    "ms-settings:network"
+                file: match id {
+                    1 => "ms-settings:sound",
+                    2 => "ms-settings:network",
+                    _ => "control.exe",
                 }
                 .into(),
-                params: String::new(),
+                params: if id == 6 { "timedate.cpl" } else { "" }.into(),
                 directory: None,
             };
             let result = crate::shell_launch::execute(&request)
-                .or_else(|_| {
+                .or_else(|error| {
+                    if id == 6 {
+                        return Err(error);
+                    }
                     crate::shell_launch::execute(&crate::shell_launch::LaunchRequest {
                         file: "control.exe".into(),
                         params: if id == 1 { "mmsys.cpl" } else { "ncpa.cpl" }.into(),
@@ -762,7 +779,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                     let id = wp.0 & 0xffff;
                     match id {
-                        1 | 2 => {
+                        1 | 2 | 6 => {
                             open_system(id);
                         }
                         3 | 4 => {
@@ -886,11 +903,7 @@ mod tests {
                         }
                         let bw = (g.width - scale(24) - 2) / 2;
                         assert!(scale(16) + 2 * bw < g.width);
-                        let footer_bottom = scale(
-                            12 + g.visible_rows as i32 * 36
-                                + 26
-                                + if count > g.capacity { 30 } else { 0 },
-                        );
+                        let footer_bottom = scale(12 + g.visible_rows as i32 * 36 + 26 + 30);
                         assert!(footer_bottom < g.height, "{g:?}, dpi={dpi}");
                     }
                 }

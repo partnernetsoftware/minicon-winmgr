@@ -15,9 +15,9 @@
 | `(+N)` 计数 | ✅ | `taskbar::group_label`（仅在合并档出现） |
 | 密度阶梯 D0/D1/D2 + 迟滞 | ✅ | `taskbar::{Density, budget, density_for, layout}`（8px 死区） |
 | 保底 ≥1 可见按钮且不覆盖时钟 | ✅ | `layout` 溢出分支（`k` 保底 + 溢出 rect 二次夹取） |
-| 设置面板：合并三态 / 合并依据 / 显示任务栏 / 通知条 / 悬停预览 | ✅ | `settings_ui::{build_rows, row_rects, hit_row, row_action, toggle_flag}`（GDI 自绘，纯几何可单测） |
-| 独立设置文件 + 优先级 + 写回保真 | ✅ | `config::{settings_path, upsert, persist, load}`（`env > settings > conf > 默认`，key-level upsert + `.bak`） |
-| 即时生效 | ✅ | 命中控件 → `config::set_*` → `config::persist` → `taskbar::refresh`（主题仍重启生效） |
+| 设置面板：合并三态 / 合并依据 / 显示任务栏 / 通知条 / 悬停预览 | ✅ | `settings_panel` 原生控件、对话框导航与可滚动视口 |
+| 独立设置文件 + 优先级 + 写回保真 | ✅ | `config::{settings_path, upsert, load}` + `settings_store`（`env > settings > conf > 默认`，key-level upsert + `.bak`） |
+| 即时生效 | ✅ | 原生控件 → `config::set_*` → 独立保存 worker + hub 刷新（主题仍重启生效） |
 | 组按钮点击：已前台 → 展开成员，否则切回 | ✅ | `taskbar` 的 `WM_LBUTTONDOWN`（`members.len()>1 && contains(fg)`） |
 | 分组右键批量菜单（打开组内全部/全还原/全最小化/全关闭/添加到快速启动） | ✅ | `taskbar::group_menu`（菜单 id 8..12，纯函数 `group_menu_action`）；`members.len()>1` 时替代单窗口 `window_menu` |
 | D2 icon-only（含 hover 气泡 / `never` 局部折叠） | ✅ | `taskbar::Density::IconOnly` + `src/bar_tip.rs`（纯函数 `bar_tip::tip_rect`）+ `fold_needed` → `build_grouped` |
@@ -146,7 +146,9 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 
 ## 5. 设置面板
 
-### 5.1 信息架构（`src/settings_ui.rs`）
+> 0.1.6 已实现原生设置面板；需求与状态语义见 [设置日常可用](prd_6_1_1.md)，实机覆盖及限制见 [版本计划](plan_0_1_6.md)。
+
+### 5.1 信息架构（`src/settings_panel.rs`）
 | 分组 | 设置项 | 控件 | 默认 |
 |------|--------|------|------|
 | 任务栏 | 显示任务栏 | 复选（重启后生效） | 开 |
@@ -157,20 +159,16 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 | 行为 | 悬停预览 | 复选 | 关 |
 | 外观 / 快捷键 / 关于 | 主题色 / 唤出键 / 版本 | 只读 | — |
 
-### 5.2 控件落地（只有 GDI 自绘，无现成控件）
-照搬现成"纯几何 + 命中"范式，行高 `ROW_H = 28`：
-```rust
-fn row_rects(client: RECT, n: usize) -> Vec<RECT>;        // 等行高、不重叠
-fn hit_row(rows: &[Row], rects: &[RECT], x: i32, y: i32) -> Option<usize>;
-fn row_action(rows: &[Row], i: usize) -> Option<SettingAction>;
-fn toggle_flag(v: bool) -> bool;                          // 复选取反
-```
-绘制：左侧 12px 圆点（选中 = accent 实心，未选 = accent 描边）+ 标签；复选为 16px 方框 + 勾。**选单选而非下拉**：下拉需自绘弹出层/滚轮/键盘，单选直接可见，契合"一屏一焦点"且实现最小。
+### 5.2 原生控件与反馈
+
+使用 BUTTON 复选/单选/按钮与 STATIC 说明，`IsDialogMessage` 处理键盘。内容区可滚动，焦点自动滚入可见范围；页脚固定显示保存状态、重试、详情及关闭。按窗口 DPI 测量文本并布局，字体随 DPI 替换释放。桌面管理动作仍通过 `settings_ui` 的显式确认路径执行。
 
 ### 5.3 生效与回滚
 | 设置 | 生效时机 |
 |------|---------|
-| 合并策略 / 依据 / 显示任务栏 / 通知区域条 / 悬停预览 | **即时**：命中控件 → 更新内存 Config → 写回设置文件（锁外 IO） → 重建任务栏（经 `hub::request_taskbar_refresh()`，避免 `settings_ui ↔ taskbar` 互相依赖） |
+| 合并策略 / 依据 / 通知区域条 | **即时**：更新运行 Config，经 `hub::request_taskbar_refresh()` 刷新；异步保存并显示失败与重试 |
+| 显示任务栏 | **重启**：只在启动时决定是否创建；分别显示运行状态与下次启动偏好 |
+| 悬停预览 | 即时：从关闭启动也能初始化，关闭清理计时器与位图，语义见 [§7](prd_6_1_1.md#7-悬停预览生命周期s5) |
 | 主题色 / 圆角 / 亚克力 | **重启**（`config::theme()` 走 `OnceLock` 永久缓存）——UI 上标注"重启后生效" |
 
 ## 6. 配置与持久化（配置键唯一真值表）
@@ -189,7 +187,7 @@ fn toggle_flag(v: bool) -> bool;                          // 复选取反
 
 - **文件**：手写配置 `<exe 旁>/minicon.conf`（`MINICON_CONFIG` 可覆盖）；UI 独占写 `<exe 旁>/minicon-settings.txt`（`MINICON_SETTINGS` 可覆盖）。
 - **为什么不用 `minicon.conf`**：它读侧会丢弃注释与未知键、且全项目**无写回器**；UI 一旦整文件重写，用户手写的主题注释与未来新增键全部丢失。
-- **写回保真**：key-level upsert（只替换目标行，保留其余原行）；写前备份 `minicon-settings.txt.bak`。
+- **写回基线**：key-level upsert（只替换目标行，保留其余原行）；成功写前备份 `minicon-settings.txt.bak`。读取/备份失败中止，使用同目录临时文件刷新后替换；数据完整性与失败处理见 [§6](prd_6_1_1.md#6-保存状态与数据完整性s4)。
 - **优先级**：`环境变量 > minicon-settings.txt > minicon.conf > 内置默认`。保留 `MINICON_GROUP_TASKS`（`=1` ≡ `group=always`）作为兼容与调试入口，优先于设置面板。
 - 环境变量完整清单以 [`prd_1_1.md`](prd_1_1.md)「环境变量 / 开关」为准。
 
@@ -239,11 +237,11 @@ fn toggle_flag(v: bool) -> bool;                          // 复选取反
 | A5 | `(+N)`：组内 k 窗口 → `(+{k-1})`；`never` 下恒无 | 单测 |
 | A6 | `density_for` 幂等 + 单调 + 边界 + **迟滞跳变 ≤1** | 单测 |
 | A7 | 各档位、各 `client_w` 下时钟区不被覆盖；`visible ≥ 1` | 单测 |
-| A8 | 单选/复选几何不重叠、`hit_row` 边界（gap/越界） | 单测 |
+| A8 | 原生 Tab/单选组导航、禁用项跳过、焦点滚入可见区域 | 单测 |
 | A9 | `fold_needed` / `hide_pins` / `digit_index` / `group_menu_action` / `starts_new_column` / `tip_rect` 纯函数边界 | 单测 |
 | A10 | 改设置 → `refresh`：合并/拆分即时变化，无需重启 | 手测 |
-| A11 | **以 `cargo test` 实测为准（当前 231 passed，v0.1.3 收敛后），改动后不得低于该值**；`clippy -D warnings` 干净 | `cargo test` / `cargo clippy` |
-| A12 | 无新 worker 线程；`bars()/tasks()` 仅消息线程访问 | 代码审查 |
+| A11 | **以当前提交 `cargo test` 实测为准**；历史数量不是当前验证结果；`clippy -D warnings` 干净 | `cargo test` / `cargo clippy` |
+| A12 | `bars()/tasks()` 仅消息线程访问；0.1.6 独立保存 worker 只做有界文件 IO，不访问 UI/任务栏状态 | 代码审查 |
 
 ## 12. 已决定（决策表）
 
