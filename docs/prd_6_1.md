@@ -22,7 +22,7 @@
 | 分组右键批量菜单（打开组内全部/全还原/全最小化/全关闭/添加到快速启动） | ✅ | `taskbar::group_menu`（菜单 id 8..12，纯函数 `group_menu_action`）；`members.len()>1` 时替代单窗口 `window_menu` |
 | D2 icon-only（含 hover 气泡 / `never` 局部折叠） | ✅ | `taskbar::Density::IconOnly` + `src/bar_tip.rs`（纯函数 `bar_tip::tip_rect`）+ `fold_needed` → `build_grouped` |
 | 键盘 `1..9` 直跳 | ✅ | `taskbar::digit_index`（进入导航后按 `1..9` 移动光标，`Enter` 才激活） |
-| 通知区域条开关（含条宽参与布局） | ✅ | 配置键 `taskbar.tray`（默认 `true`，env `MINICON_TRAY` 可覆盖）+ 设置复选行「显示通知区域（仅作外壳时可点）」；条宽由 `tray_bar::Layout` 唯一决定（`CELL=18`/`GAP=2`，无图标则为 0） |
+| 通知区域条开关（含条宽参与布局） | ✅ | 配置键 `taskbar.tray`（默认 `true`，env `MINICON_TRAY` 可覆盖）+ 设置复选行「显示通知区域（仅作外壳时可点）」；条宽由 `tray_bar::Layout` 唯一决定（`CELL=28`/`GAP=2`，无图标则为 0） |
 | 开始菜单开关 | ⛔ 已退役 | 配置键 `taskbar.menu`（默认 `false`，env `MINICON_START_MENU` 可覆盖）**保留为隐藏开关**；任务栏入口与设置复选行均已于 2026-10-14 撤除 |
 | 窄栏折叠 pins | ✅ | `taskbar::hide_pins`（带 pins 仍溢出、不带则不溢出 → 本轮隐藏 pins，pin 数据不删） |
 | `»` 溢出弹层分列 | ✅ | `src/task_list.rs`（`PER_COLUMN=24` + 纯函数 `starts_new_column` + `MF_MENUBARBREAK`），`popup()` 签名不变 |
@@ -253,7 +253,7 @@ fn toggle_flag(v: bool) -> bool;                          // 复选取反
 | 2 | D2 纯图标档 | **实现**（icon-only 方块 + hover 气泡 + `never` 下局部折叠） |
 | 3 | `never` × D2 的纠正方式 | **局部折叠**（`fold_needed` → `build_grouped`，带 `(+N)`），不整体回退 D1 |
 | 4 | 设置是否写回文件 | **独立 `minicon-settings.txt`** + key-level upsert + `.bak`（不改写 `minicon.conf`） |
-| 5 | 通知区域条 | **保留 + 可关**（`taskbar.tray`，默认 `true`）。0.1.3 起不再标"实验性"：替换模式给真图标 + 可点转发，伴随模式为降级占位不可点，文案与矩阵见 [`prd_1_1.md`](prd_1_1.md)「通知区 / 托盘」 |
+| 5 | 通知区域条 | **保留 + 可关**（`taskbar.tray`，默认 `true`）。0.1.3 起不再标"实验性"：替换模式给真图标 + 可点转发，伴随模式不画应用占位，由 Windows 通知区管理，文案与矩阵见 [`prd_1_1.md`](prd_1_1.md)「通知区 / 托盘」 |
 | 6 | 多显示器折叠集合 | **各栏独立**（按本屏宽度独立定档；任务列表全镜像） |
 | 7 | 折叠策略 | **尾部折叠**（`visible..n`）；**不做**「折叠最久未用」 |
 
