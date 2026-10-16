@@ -55,3 +55,18 @@
 `quality` 层另跑 `logging::tests`，用 AST 约束无插值的静态日志文案，并在独立子进程验证文件、stderr、span 及 panic 的文本保护；不需要桌面输入，不跑完整桌面套件。`unit --filter logging::tests` 可单独运行。原生数值与布尔值保留，文本、Debug/Display 和错误链在格式化前屏蔽，即使设置 trace 也不输出；显式 CLI 查询结果和用户错误对话框不属于后台日志。该组测试使用系统临时目录，不修改正常会话日志。
 
 `fault` 另覆盖 WinHTTP 原生异步请求在静默/慢速响应头、停滞/慢速正文和断流时的取消、context/读取缓冲寿命及成功重试，以及更新 worker panic 与进度队列满后的状态恢复。仅使用 loopback 和本测试文件，不替换正常外壳；公网 DNS、代理/TLS 故障及跨进程交接另行验证。完整交接仍使用 update 层，不能因组件测试通过而省略。
+
+整应用场景入口：
+
+```powershell
+python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario idle
+python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario settings
+python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario windows
+python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario soak --observe 28800 --repetitions 1
+```
+
+默认基线为原正常 exe，也可显式指定 `--baseline`；须自行确认两份产物的构建配置，工具记录二进制摘要，不从文件名推断优化级别。默认三次新进程对照，交替先后顺序；5 分钟预热、15 分钟空闲操作期、10 分钟恢复。设置默认 200 个完整循环，窗口默认 300 次、最多同时 8 个本工具窗口；这些动作期间可有不等距采样，使用实际时间，不伪造每 5 秒都有样本。`--warmup 0 --observe 1 --recovery 0 --repetitions 1` 只用于 idle 驱动短测，不满足协议前提；settings/windows 还应指定很小的 --iterations。soak 最少两小时，示例八小时每个被测进程执行一次，基线和候选合计仍需十六小时以上；长跑结束不自动等于通过。
+
+该入口会暂时正常关闭当前桌面的 winmgr，并在 finally 从原路径恢复，要求输入桌面可访问及普通用户权限，不使用全局鼠标/键盘，不修改注册或覆盖原二进制。当前真实生命周期尚待实机验证；先运行短测，再安排长观察，不能与其他桌面测试并发。控制器被强制结束时须参考本轮忽略目录内的恢复记录人工启动原实例。原始报告仅在 target；其中恢复记录有本地路径，禁止复制到公共文档。
+
+`python scripts/test_scenario_probe.py` 的 9 项模拟生命周期检查不需要桌面，也纳入 quality 和 release。模拟通过只证明驱动控制流，不能证明 native 恢复成功或应用资源稳定。曲线可用现有 memory_probe 的 `--plot-only` 从每个 run 目录生成；缺少 matplotlib 时保留数据后再生成。
