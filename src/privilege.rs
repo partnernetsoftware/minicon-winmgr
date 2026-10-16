@@ -48,14 +48,19 @@ fn fixed<T: Default>(token: HANDLE, kind: TOKEN_INFORMATION_CLASS) -> Result<T, 
             &mut bytes,
         )
     }
-    .map_err(|e| format!("读取启动令牌失败：{e}"))?;
+    .map_err(|e| {
+        crate::ui_format!(
+            "读取启动令牌失败：{e}",
+            "Cannot read the startup token: {e}"
+        )
+    })?;
     Ok(value)
 }
 fn variable(token: HANDLE, kind: TOKEN_INFORMATION_CLASS) -> Result<Vec<usize>, String> {
     let mut bytes = 0;
     let _ = unsafe { GetTokenInformation(token, kind, None, 0, &mut bytes) };
     if bytes == 0 {
-        return Err("无法读取启动令牌信息长度".into());
+        return Err(crate::i18n::text("无法读取启动令牌信息长度").into());
     }
     let mut buffer = vec![0usize; (bytes as usize).div_ceil(size_of::<usize>())];
     unsafe {
@@ -67,13 +72,22 @@ fn variable(token: HANDLE, kind: TOKEN_INFORMATION_CLASS) -> Result<Vec<usize>, 
             &mut bytes,
         )
     }
-    .map_err(|e| format!("读取启动令牌信息失败：{e}"))?;
+    .map_err(|e| {
+        crate::ui_format!(
+            "读取启动令牌信息失败：{e}",
+            "Cannot read startup token information: {e}"
+        )
+    })?;
     Ok(buffer)
 }
 fn token(process: HANDLE, access: TOKEN_ACCESS_MASK) -> Result<Owned, String> {
     let mut handle = HANDLE::default();
-    unsafe { OpenProcessToken(process, access, &mut handle) }
-        .map_err(|e| format!("无法检查进程权限：{e}"))?;
+    unsafe { OpenProcessToken(process, access, &mut handle) }.map_err(|e| {
+        crate::ui_format!(
+            "无法检查进程权限：{e}",
+            "Cannot inspect process privileges: {e}"
+        )
+    })?;
     Ok(Owned(handle))
 }
 fn snapshot(token: HANDLE) -> Result<Status, String> {
@@ -86,7 +100,7 @@ fn snapshot(token: HANDLE) -> Result<Status, String> {
     };
     let count = unsafe { *GetSidSubAuthorityCount(sid) };
     if count == 0 {
-        return Err("进程完整性级别无效".into());
+        return Err(crate::i18n::text("进程完整性级别无效").into());
     }
     let integrity = unsafe { *GetSidSubAuthority(sid, u32::from(count - 1)) };
     let groups = variable(token, TokenGroups)?;
@@ -109,11 +123,11 @@ fn snapshot(token: HANDLE) -> Result<Status, String> {
 }
 pub(crate) fn description() -> &'static str {
     static LABEL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    LABEL.get_or_init(|| match current() {
+    crate::i18n::text(LABEL.get_or_init(|| match current() {
         Ok(s) if s.ordinary() => "普通权限",
         Ok(_) => "管理员权限",
         Err(_) => "权限状态未知",
-    })
+    }))
 }
 
 pub(crate) fn current() -> Result<Status, String> {
@@ -131,7 +145,12 @@ fn medium_restricted(original: HANDLE) -> Result<Owned, String> {
             &mut restricted,
         )
     }
-    .map_err(|e| format!("无法生成普通权限令牌：{e}"))?;
+    .map_err(|e| {
+        crate::ui_format!(
+            "无法生成普通权限令牌：{e}",
+            "Cannot create a standard-user token: {e}"
+        )
+    })?;
     let restricted = Owned(restricted);
     // One aligned allocation owns both the structure and its embedded SID.
     let mut storage =
@@ -140,8 +159,12 @@ fn medium_restricted(original: HANDLE) -> Result<Owned, String> {
     let sid = PSID(unsafe { address.add(size_of::<TOKEN_MANDATORY_LABEL>()) }.cast());
     let mut length = 68;
     unsafe {
-        CreateWellKnownSid(WinMediumLabelSid, None, Some(sid), &mut length)
-            .map_err(|e| format!("无法生成普通完整性级别：{e}"))?;
+        CreateWellKnownSid(WinMediumLabelSid, None, Some(sid), &mut length).map_err(|e| {
+            crate::ui_format!(
+                "无法生成普通完整性级别：{e}",
+                "Cannot create a medium-integrity level: {e}"
+            )
+        })?;
         address
             .cast::<TOKEN_MANDATORY_LABEL>()
             .write(TOKEN_MANDATORY_LABEL {
@@ -156,10 +179,15 @@ fn medium_restricted(original: HANDLE) -> Result<Owned, String> {
             address.cast(),
             (size_of::<TOKEN_MANDATORY_LABEL>() + length as usize) as u32,
         )
-        .map_err(|e| format!("无法降低进程完整性级别：{e}"))?;
+        .map_err(|e| {
+            crate::ui_format!(
+                "无法降低进程完整性级别：{e}",
+                "Cannot lower the process integrity level: {e}"
+            )
+        })?;
     }
     if !snapshot(restricted.0)?.ordinary() {
-        return Err("系统未能生成普通权限令牌；请从普通用户会话启动。".into());
+        return Err(crate::i18n::text("系统未能生成普通权限令牌；请从普通用户会话启动。").into());
     }
     Ok(restricted)
 }
@@ -221,8 +249,9 @@ fn environment() -> Result<Vec<u16>, String> {
     }
     let block = Block(unsafe { GetEnvironmentStringsW() });
     if block.0.is_null() {
-        return Err(format!(
+        return Err(crate::ui_format!(
             "无法读取启动环境：{}",
+            "Cannot read the startup environment: {}",
             windows::core::Error::from_thread()
         ));
     }
@@ -240,12 +269,19 @@ fn wait_ready(child: &Child, pid: u32) -> Result<(), String> {
     while started.elapsed() < std::time::Duration::from_secs(15) {
         if unsafe { WaitForSingleObject(child.process.0, 0) } == WAIT_OBJECT_0 {
             let mut code = 1;
-            unsafe { GetExitCodeProcess(child.process.0, &mut code) }
-                .map_err(|e| format!("无法检查普通权限进程：{e}"))?;
+            unsafe { GetExitCodeProcess(child.process.0, &mut code) }.map_err(|e| {
+                crate::ui_format!(
+                    "无法检查普通权限进程：{e}",
+                    "Cannot inspect the standard-user process: {e}"
+                )
+            })?;
             return if code == 0 {
                 Ok(())
             } else {
-                Err(format!("普通权限进程启动失败（退出码 {code}）"))
+                Err(crate::ui_format!(
+                    "普通权限进程启动失败（退出码 {code}）",
+                    "The standard-user process failed to start (exit code {code})"
+                ))
             };
         }
         let mut after = None;
@@ -282,7 +318,7 @@ fn wait_ready(child: &Child, pid: u32) -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    Err("普通权限进程未能在 15 秒内完成启动。请从普通用户会话重试。".into())
+    Err(crate::i18n::text("普通权限进程未能在 15 秒内完成启动。请从普通用户会话重试。").into())
 }
 impl Drop for Child {
     fn drop(&mut self) {
@@ -302,7 +338,7 @@ pub(crate) fn normalize() -> Result<Option<u32>, String> {
     )?;
     let ordinary = ordinary_token(original.0)?;
     if !same_identity(original.0, ordinary.0)? {
-        return Err("普通权限令牌不属于当前用户会话".into());
+        return Err(crate::i18n::text("普通权限令牌不属于当前用户会话").into());
     }
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let executable: Vec<_> = executable
@@ -354,7 +390,7 @@ pub(crate) fn normalize() -> Result<Option<u32>, String> {
             )
         }
         .map_err(|second| {
-            format!("无法以普通权限重新启动：{first}；备用方式：{second}。请从普通用户会话启动。")
+            crate::ui_format!("无法以普通权限重新启动：{first}；备用方式：{second}。请从普通用户会话启动。","Unable to relaunch as a standard user: {first}; fallback: {second}. Start from a standard-user session.")
         })?;
     }
     let mut child = Child {
@@ -364,10 +400,12 @@ pub(crate) fn normalize() -> Result<Option<u32>, String> {
     };
     let child_token = token(child.process.0, TOKEN_QUERY)?;
     if !snapshot(child_token.0)?.ordinary() || !same_identity(original.0, child_token.0)? {
-        return Err("重新启动的权限或用户会话不符合要求，已终止该子进程。".into());
+        return Err(
+            crate::i18n::text("重新启动的权限或用户会话不符合要求，已终止该子进程。").into(),
+        );
     }
     if unsafe { ResumeThread(child.thread.0) } == u32::MAX {
-        return Err("无法继续普通权限进程，已终止该子进程。".into());
+        return Err(crate::i18n::text("无法继续普通权限进程，已终止该子进程。").into());
     }
     child.suspended = false;
     if let Err(error) = wait_ready(&child, info.dwProcessId) {

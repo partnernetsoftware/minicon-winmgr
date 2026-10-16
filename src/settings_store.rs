@@ -74,7 +74,7 @@ fn start_worker(state: &Arc<(Mutex<State>, Condvar)>) {
     spawn_worker(state, move |key, value| {
         let path = path
             .as_deref()
-            .ok_or_else(|| "无法确定设置文件路径".to_string())?;
+            .ok_or_else(|| crate::i18n::text("无法确定设置文件路径").to_string())?;
         persist(path, key, value)
     });
 }
@@ -104,7 +104,7 @@ fn spawn_worker(
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     write(key, &request.value)
                 }))
-                .unwrap_or_else(|_| Err("保存线程处理失败，请重试".into()));
+                .unwrap_or_else(|_| Err(crate::i18n::text("保存线程处理失败，请重试").into()));
                 let mut state = crate::win_util::lock_or_recover(lock);
                 finish(&mut state, key, request.generation, result);
             }
@@ -135,7 +135,7 @@ fn finish(state: &mut State, key: &'static str, generation: u64, result: Result<
 }
 
 pub(crate) fn enqueue(key: &'static str, value: &str) {
-    // Callers can only submit the five UI-owned keys: memory stays bounded even
+    // Callers can only submit the supported UI-owned keys: memory stays bounded even
     // while IO is blocked or the user repeatedly changes the same setting.
     assert!(
         [
@@ -143,7 +143,10 @@ pub(crate) fn enqueue(key: &'static str, value: &str) {
             crate::config::keys::TASKBAR_TRAY,
             crate::config::keys::TASKBAR_GROUP,
             crate::config::keys::TASKBAR_GROUP_BY,
-            crate::config::keys::HOVER_PREVIEW
+            crate::config::keys::HOVER_PREVIEW,
+            crate::config::keys::LANGUAGE,
+            crate::config::keys::THEME_MODE,
+            crate::config::keys::TASKBAR_POSITION
         ]
         .contains(&key)
     );
@@ -154,7 +157,7 @@ pub(crate) fn enqueue(key: &'static str, value: &str) {
         value: value.into(),
         generation: state.generation,
         queued: state.available,
-        error: (!state.available).then(|| "保存线程不可用".into()),
+        error: (!state.available).then(|| crate::i18n::text("保存线程不可用").into()),
     };
     state.entries.insert(key, entry);
     writer.state.1.notify_one();
@@ -240,7 +243,9 @@ fn persist_with(
             checkpoint("replace")?;
             stage = "检查外部修改并替换";
             if read_existing(path)? != original {
-                return Err(io::Error::other("文件已被外部修改，请重试"));
+                return Err(io::Error::other(crate::i18n::text(
+                    "文件已被外部修改，请重试",
+                )));
             }
             let from = crate::win_util::wide(&temporary.to_string_lossy());
             let to = crate::win_util::wide(&path.to_string_lossy());
@@ -256,7 +261,14 @@ fn persist_with(
         let _ = std::fs::remove_file(&temporary);
         result
     };
-    action().map_err(|e| format!("设置{stage}失败：{e}\n{}", path.display()))
+    action().map_err(|e| {
+        crate::ui_format!(
+            "设置{}失败：{e}\n{}",
+            "Settings {} failed: {e}\n{}",
+            crate::i18n::text(stage),
+            path.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -326,7 +338,11 @@ mod tests {
         let path = dir.0.join("s.txt");
         std::fs::write(&path, "keep").unwrap();
         std::fs::create_dir(dir.0.join("s.txt.bak")).unwrap();
-        assert!(persist(&path, "key", "value").unwrap_err().contains("备份"));
+        assert!(
+            persist(&path, "key", "value")
+                .unwrap_err()
+                .contains(crate::i18n::text("备份"))
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep");
         std::fs::remove_dir(dir.0.join("s.txt.bak")).unwrap();
         use std::os::windows::fs::OpenOptionsExt;

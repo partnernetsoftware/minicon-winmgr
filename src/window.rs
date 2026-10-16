@@ -149,7 +149,7 @@ pub fn run(show_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Assembly layer: let modules that change what the bar shows ask for a
         // rebuild without importing `taskbar` (which imports them back).
-        hub::set_taskbar_refresh(crate::taskbar::refresh);
+        hub::set_taskbar_refresh(refresh_ui);
         hub::set_taskbar_state(crate::taskbar::running, crate::taskbar::cancel_hover);
 
         // Launcher popup (Alt+Space) — self-contained window + hotkey.
@@ -231,6 +231,7 @@ pub fn run(show_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
         if show_settings {
             crate::settings_ui::show();
         }
+        crate::appearance::refresh();
         STARTUP_READY.set(true);
         loop {
             let ret = GetMessageW(&mut msg, None, 0, 0);
@@ -253,6 +254,11 @@ pub fn run(show_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("message loop exited");
         Ok(())
     }
+}
+
+fn refresh_ui() {
+    crate::appearance::refresh();
+    crate::taskbar::refresh();
 }
 
 /// Window procedure for the shell message window.

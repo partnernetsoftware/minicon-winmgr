@@ -54,7 +54,7 @@ const MAX_STACK_ROWS: usize = 6;
 ///
 /// A native popup menu cannot scroll, so a long listing runs off the screen
 /// and becomes unusable. Keep it to a scannable slice; the leading
-/// "打开此文件夹" row is the escape hatch to the full listing in Explorer.
+/// crate::i18n::text("打开此文件夹") row is the escape hatch to the full listing in Explorer.
 const MAX_STACK_ITEMS: usize = 15;
 
 const ID_LIST: u16 = 2001;
@@ -675,7 +675,7 @@ unsafe fn fill_list<'a>(list: HWND, labels: impl IntoIterator<Item = &'a str>) {
     unsafe {
         SendMessageW(list, LB_RESETCONTENT, None, None);
         for label in labels {
-            let text = wide(label);
+            let text = wide(crate::i18n::text(label));
             SendMessageW(
                 list,
                 LB_ADDSTRING,
@@ -920,7 +920,10 @@ fn show_stack_menu(entry: &crate::folder_stack::StackEntry) {
 
     // Row ids are 1-based: 1 opens the folder itself, children start at 2.
     let mut rows = Vec::with_capacity(children.len() + 2);
-    rows.push(crate::win_util::MenuRow::command(1, "打开此文件夹"));
+    rows.push(crate::win_util::MenuRow::command(
+        1,
+        crate::i18n::text("打开此文件夹"),
+    ));
     rows.push(crate::win_util::MenuRow::Separator);
     for (i, child) in children.iter().enumerate() {
         rows.push(crate::win_util::MenuRow::command(i + 2, &child.label));
@@ -961,8 +964,12 @@ fn activate_selected_place() {
 /// Defaults the message box to **No** so that a stray `Enter` cannot power the
 /// machine off. Returns `true` only on an explicit Yes.
 fn confirm_power(action: &PowerAction) -> bool {
-    let text = wide(&format!("确定要{}吗？", action.label));
-    let caption = wide("电源确认");
+    let text = wide(&crate::ui_format!(
+        "确定要{}吗？",
+        "Are you sure you want to {}?",
+        crate::i18n::text(action.label)
+    ));
+    let caption = wide(crate::i18n::text("电源确认"));
     // SAFETY: buffers outlive the call; `orb()` is our (possibly hidden) popup
     // and is a valid owner window (or `None`).
     unsafe {

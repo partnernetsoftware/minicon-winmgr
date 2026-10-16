@@ -18,6 +18,7 @@ import winreg
 
 ROOT = Path(__file__).resolve().parents[1]
 LIVE = ROOT / 'target/debug/live/minicon-winmgr.exe'
+SOURCE = ROOT / 'target/debug/minicon-winmgr.exe'
 TEST = ROOT / 'target/settings-acceptance'
 CONFIG = TEST / 'settings.txt'
 REPORT = ROOT / 'docs/acceptance_0_1_6.json'
@@ -129,8 +130,8 @@ def show():
     wait(lambda: u.IsWindowVisible(panel())); activate()
 def saved():
     time.sleep(.12)
-    wait(lambda: '正在保存' not in text(ctrl(6112)) and not u.IsWindowEnabled(ctrl(6113)))
-    assert '失败' not in text(ctrl(6112)), text(ctrl(6112))
+    wait(lambda: not any(word in text(ctrl(6112)) for word in ['正在保存','Saving']) and not u.IsWindowEnabled(ctrl(6113)))
+    assert not any(word in text(ctrl(6112)) for word in ['失败','could not']), text(ctrl(6112))
 def metrics():
     process = k.OpenProcess(0x1000, False, pid(message())); assert process
     try:
@@ -143,7 +144,8 @@ def metrics():
         return {'handles': count.value, 'gdi': u.GetGuiResources(process, 0), 'user': u.GetGuiResources(process, 1), 'working_bytes': memory.working, 'private_bytes': memory.private}
     finally: k.CloseHandle(process)
 
-def capture_settings(output):
+def capture_settings(output, hwnd=None):
+    hwnd = hwnd or panel()
     # Render only our window: desktop crops can accidentally include another
     # application if the user changes foreground while acceptance is running.
     from PIL import Image
@@ -158,21 +160,21 @@ def capture_settings(output):
     g.GetDIBits.argtypes = [w.HDC, w.HBITMAP, w.UINT, w.UINT, c.c_void_p, c.c_void_p, w.UINT]
     class HEADER(c.Structure):
         _fields_ = [('size', w.DWORD), ('width', w.LONG), ('height', w.LONG), ('planes', w.WORD), ('bits', w.WORD), ('compression', w.DWORD), ('image_size', w.DWORD), ('x', w.LONG), ('y', w.LONG), ('used', w.DWORD), ('important', w.DWORD)]
-    rect = w.RECT(); assert u.GetClientRect(panel(), c.byref(rect))
+    rect = w.RECT(); assert u.GetClientRect(hwnd, c.byref(rect))
     width, height = rect.right, rect.bottom
-    dc = u.GetDC(panel()); assert dc
+    dc = u.GetDC(hwnd); assert dc
     memory = g.CreateCompatibleDC(dc); bitmap = g.CreateCompatibleBitmap(dc, width, height)
     assert memory and bitmap
     old = g.SelectObject(memory, bitmap)
     try:
-        assert u.PrintWindow(panel(), memory, 3), 'PrintWindow settings failed'
+        assert u.PrintWindow(hwnd, memory, 3), 'PrintWindow settings failed'
         g.SelectObject(memory, old)
         header = HEADER(c.sizeof(HEADER), width, -height, 1, 32)
         buffer = c.create_string_buffer(width * height * 4)
         assert g.GetDIBits(memory, bitmap, 0, height, buffer, c.byref(header), 0) == height
         Image.frombytes('RGB', (width, height), buffer.raw, 'raw', 'BGRX').save(output)
     finally:
-        g.SelectObject(memory, old); g.DeleteObject(bitmap); g.DeleteDC(memory); u.ReleaseDC(panel(), dc)
+        g.SelectObject(memory, old); g.DeleteObject(bitmap); g.DeleteDC(memory); u.ReleaseDC(hwnd, dc)
 
 def shell_settings():
     result = {}
@@ -198,7 +200,7 @@ def start(environment, args=()):
     subprocess.Popen([str(LIVE), *args], cwd=LIVE.parent, env=environment, creationflags=flags, close_fds=True)
     wait(message); wait(panel); time.sleep(.4)
 
-def main(*, include_run_regression=True):
+def main(*, include_run_regression=True, build=True):
     u.OpenInputDesktop.argtypes = [w.DWORD, w.BOOL, w.DWORD]
     u.OpenInputDesktop.restype = w.HANDLE
     u.CloseDesktop.argtypes = [w.HANDLE]
@@ -215,22 +217,23 @@ def main(*, include_run_regression=True):
         if not condition: raise AssertionError(name)
     original_environment = os.environ.copy()
     environment = original_environment.copy()
-    for name in ['MINICON_NO_TASKBAR', 'MINICON_TASKBAR', 'MINICON_TRAY', 'MINICON_GROUP_TASKS', 'MINICON_GROUP_BY', 'MINICON_HOVER_PREVIEW']:
+    for name in ['MINICON_NO_TASKBAR', 'MINICON_TASKBAR', 'MINICON_TRAY', 'MINICON_GROUP_TASKS', 'MINICON_GROUP_BY', 'MINICON_HOVER_PREVIEW', 'MINICON_THEME_MODE', 'MINICON_TASKBAR_POSITION', 'MINICON_LANGUAGE']:
         environment.pop(name, None)
     TEST.mkdir(parents=True, exist_ok=True)
+    environment['MINICON_LANGUAGE']='zh'
     environment['MINICON_SETTINGS'] = str(CONFIG)
     environment['MINICON_CONFIG'] = str(TEST / 'empty.conf')
     environment['LOCALAPPDATA'] = str(TEST / 'profile')
     environment['RUST_LOG'] = 'info'
     CONFIG.write_text('# acceptance only\nunknown = keep\ntaskbar.group = never\nbehavior.hover_preview = false\n', encoding='utf-8')
     original_shell = shell_settings()
-    subprocess.run(['cargo', 'build'], cwd=ROOT, check=True)
+    if build: subprocess.run(['cargo', 'build'], cwd=ROOT, check=True)
     try:
         stop()
         deadline = time.monotonic() + 8
         while True:
             try:
-                shutil.copy2(ROOT / 'target/debug/minicon-winmgr.exe', LIVE)
+                shutil.copy2(SOURCE, LIVE)
                 break
             except PermissionError:
                 if time.monotonic() >= deadline: raise
@@ -241,11 +244,11 @@ def main(*, include_run_regression=True):
         check('settings_cli_reuses_same_instance', result.returncode == 0 and pid(message()) == first_pid)
         activate(); focus_id(6101)
         sequence = []
-        for _ in range(7):
+        for _ in range(9):
             key('TAB'); time.sleep(.035); sequence.append(u.GetDlgCtrlID(focus()))
-        check('native_tab_sequence_skips_disabled_radio_basis', sequence == [6102, 6103, 6108, 6120, 6205, 6114, 6101], sequence)
+        check('native_tab_sequence_skips_disabled_radio_basis', sequence == [6102, 6103, 6108, 6120, 6205, 6114, 6132, 6141, 6101], sequence)
         key('SHIFT+TAB'); time.sleep(.05)
-        check('reverse_tab', u.GetDlgCtrlID(focus()) == 6114)
+        check('reverse_tab', u.GetDlgCtrlID(focus()) == 6141)
         focus_id(6120); key('ENTER')
         info = wait(lambda: window('minicon_winmgr_settings_info'))
         wait(lambda: u.IsWindowVisible(info))

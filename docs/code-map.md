@@ -5,6 +5,7 @@
 | 用户路径 | 主要实现 | 规格/证据 |
 |---|---|---|
 | 启动、消息循环、单实例、事件分发 | `main`、`window`、`single_instance`、`hub`、`window_events` | [可靠性约束](prd_2_1.md) |
+| 主题与四边布局 | `appearance`（原生主题）、`config`（调色板/来源）、`dock`（纯几何）、`taskbar`（横纵布局） | [工业风设计](design_0_1_6_industrial.md)、[测试分层](testing.md) |
 | 枚举窗口、分组与任务切换 | `window_snapshot`、`model`、`grouping`、`taskbar`、`task_list`、`monitor` | [任务栏策略](prd_6_1.md) |
 | 设置、配置来源与持久化 | `settings_ui`（桌面管理门面）、`settings_panel`（原生窗口）、`config`（状态/来源）、`settings_store`（串行 IO） | [0.1.6 需求](prd_6_1_1.md) |
 | 启动、Run、历史、路径建议 | `launcher`、`launcher_ui`、`run_dialog`、`run_history`、`shell_launch` | [Run 规格](prd_1_1_1.md) |
@@ -29,3 +30,5 @@
 UI 消息线程拥有窗口；模块间通过 hub 请求刷新，避免设置/任务栏反向耦合。文件 IO 不持 `bars/tasks` 锁；耗时启动与 Run 历史已有有界工作线程。HICON/窗口/计时器资源需明确所有权与清理。接管/回滚不因调整设置界面改变权限、确认或备份语义。
 
 CI 与 release workflow 分别负责质量检查和产物发布。历史测试数量是版本证据，不代表此次已运行。实际物理多屏、混合 DPI、长跑覆盖必须单独记录，不能由单测替代。
+
+- `src/i18n.rs`：English/中文界面目录、默认语言和自有窗口标题/控件本地化；不转换命令或用户输入。

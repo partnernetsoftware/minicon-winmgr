@@ -96,7 +96,7 @@ pub(crate) fn show(owner: HWND, value: &str) -> Result<(), windows::core::Error>
             let created = CreateWindowExW(
                 WS_EX_CONTROLPARENT,
                 PCWSTR(wide(CLASS).as_ptr()),
-                PCWSTR(wide("配置与关于 — minicon-winmgr").as_ptr()),
+                PCWSTR(wide(crate::i18n::text("配置与关于 — minicon-winmgr")).as_ptr()),
                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 work.rcWork.left + (work.rcWork.right - work.rcWork.left - width) / 2,
                 work.rcWork.top + (work.rcWork.bottom - work.rcWork.top - height) / 2,
@@ -131,7 +131,7 @@ pub(crate) fn show(owner: HWND, value: &str) -> Result<(), windows::core::Error>
                 CreateWindowExW(
                     WINDOW_EX_STYLE(0),
                     PCWSTR(wide("BUTTON").as_ptr()),
-                    PCWSTR(wide("关闭").as_ptr()),
+                    PCWSTR(wide(crate::i18n::text("关闭")).as_ptr()),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                     0,
                     0,
@@ -154,6 +154,7 @@ pub(crate) fn show(owner: HWND, value: &str) -> Result<(), windows::core::Error>
         let edit = GetDlgItem(Some(hwnd), 1)?;
         SetWindowTextW(edit, PCWSTR(wide(&value.replace('\n', "\r\n")).as_ptr()))?;
         resize(hwnd);
+        crate::appearance::install(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOW);
         crate::win_util::force_foreground(hwnd);
         let _ = SetFocus(Some(edit));

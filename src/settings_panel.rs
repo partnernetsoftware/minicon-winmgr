@@ -1,6 +1,6 @@
 //! Native settings controls, scrolling, focus and DPI. All window ownership is
 //! confined to the shell message thread; the persistence worker never sees HWNDs.
-use crate::config::{self, GroupBy, MergeStrategy, keys};
+use crate::config::{self, GroupBy, MergeStrategy, Position, ThemeMode, keys};
 use crate::win_util::{guard_abi, wide};
 use std::cell::RefCell;
 use windows::{
@@ -37,12 +37,23 @@ const CLOSE: u16 = 6114;
 const DETAIL: u16 = 6115;
 const CONFIG_INFO: u16 = 6120;
 const ADVANCED: u16 = 6205;
+const ENGLISH: u16 = 6150;
+const CHINESE: u16 = 6151;
+const LIGHT: u16 = 6130;
+const DARK: u16 = 6131;
+const AUTO: u16 = 6132;
+const TOP: u16 = 6140;
+const BOTTOM: u16 = 6141;
+const LEFT: u16 = 6142;
+const RIGHT: u16 = 6143;
 const ENSURE_FOCUS: u32 = WM_APP + 140;
+const REFLOW: u32 = WM_APP + 143;
 const POLL: usize = 90;
 static INSTANCE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 #[derive(Clone)]
 struct Control {
     id: u16,
+    caption: String,
     hwnd: HWND,
     height: i32,
     top: i32,
@@ -102,7 +113,7 @@ fn scale_at(n: i32, dpi: u32) -> i32 {
     n * dpi as i32 / 96
 }
 fn is_heading(id: u16) -> bool {
-    matches!(id, 6200 | 6201)
+    matches!(id, 6200 | 6201 | 6210)
 }
 fn high_contrast() -> bool {
     let mut value = HIGHCONTRASTW {
@@ -122,7 +133,21 @@ fn high_contrast() -> bool {
 fn in_card(id: u16) -> bool {
     matches!(
         id,
-        SHOW | TRAY | NEVER | FULL | ALWAYS | EXE | PID | PREVIEW | 6202 | 6220 | 6301..=6305
+        SHOW | TRAY
+            | NEVER
+            | FULL
+            | ALWAYS
+            | EXE
+            | PID
+            | PREVIEW
+            | 6213
+            | ENGLISH
+            | CHINESE
+            | 6312
+            | 6202
+            | 6220
+            | 6301
+            ..=6305 | LIGHT | DARK | AUTO | TOP | BOTTOM | LEFT | RIGHT | 6211 | 6212 | 6310 | 6311
     )
 }
 fn control_color(wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -131,20 +156,20 @@ fn control_color(wp: WPARAM, lp: LPARAM) -> LRESULT {
         let id = GetDlgCtrlID(HWND(lp.0 as *mut _));
         let color = if id == STATUS as i32 && crate::settings_store::status().failed > 0 {
             COLOR_HOTLIGHT
-        } else if id == 6191 || (6301..=6307).contains(&id) || id == STATUS as i32 {
+        } else if id == 6191 || (6301..=6312).contains(&id) || id == STATUS as i32 {
             COLOR_GRAYTEXT
         } else {
             COLOR_WINDOWTEXT
         };
         let color = if color == COLOR_GRAYTEXT && !high_contrast() {
-            let foreground = GetSysColor(COLOR_WINDOWTEXT);
-            let background = GetSysColor(COLOR_WINDOW);
+            let foreground = crate::appearance::color(COLOR_WINDOWTEXT);
+            let background = crate::appearance::color(COLOR_WINDOW);
             let blend = |shift: u32| {
                 (((foreground >> shift) & 255u32) * 3 + ((background >> shift) & 255u32) * 2) / 5
             };
             blend(0) | (blend(8) << 8) | (blend(16) << 16)
         } else {
-            GetSysColor(color)
+            crate::appearance::color(color)
         };
         SetTextColor(dc, COLORREF(color));
         let surface = if in_card(id as u16) || id == STATUS as i32 || id == CLOSE as i32 {
@@ -152,8 +177,8 @@ fn control_color(wp: WPARAM, lp: LPARAM) -> LRESULT {
         } else {
             COLOR_BTNFACE
         };
-        SetBkColor(dc, COLORREF(GetSysColor(surface)));
-        LRESULT(GetSysColorBrush(surface).0 as isize)
+        SetBkColor(dc, COLORREF(crate::appearance::color(surface)));
+        LRESULT(crate::appearance::brush(dc, surface).0 as isize)
     }
 }
 fn paint_surface(hwnd: HWND, viewport: bool) -> LRESULT {
@@ -162,20 +187,20 @@ fn paint_surface(hwnd: HWND, viewport: bool) -> LRESULT {
         let dc = BeginPaint(hwnd, &mut paint);
         let mut rect = RECT::default();
         let _ = GetClientRect(hwnd, &mut rect);
-        FillRect(dc, &rect, GetSysColorBrush(COLOR_BTNFACE));
+        FillRect(dc, &rect, crate::appearance::brush(dc, COLOR_BTNFACE));
         if viewport {
             let cards = with(|p| p.cards.clone()).unwrap_or_default();
             let pen = CreatePen(
                 PS_SOLID,
                 1,
-                COLORREF(GetSysColor(if high_contrast() {
+                COLORREF(crate::appearance::color(if high_contrast() {
                     COLOR_WINDOWTEXT
                 } else {
                     COLOR_3DSHADOW
                 })),
             );
             let old_pen = SelectObject(dc, pen.into());
-            let old_brush = SelectObject(dc, GetSysColorBrush(COLOR_WINDOW).into());
+            let old_brush = SelectObject(dc, crate::appearance::brush(dc, COLOR_WINDOW).into());
             for card in cards {
                 let _ = RoundRect(
                     dc,
@@ -183,8 +208,8 @@ fn paint_surface(hwnd: HWND, viewport: bool) -> LRESULT {
                     card.top,
                     card.right,
                     card.bottom,
-                    scale(8),
-                    scale(8),
+                    scale(2),
+                    scale(2),
                 );
             }
             SelectObject(dc, old_brush);
@@ -192,7 +217,7 @@ fn paint_surface(hwnd: HWND, viewport: bool) -> LRESULT {
             let _ = DeleteObject(pen.into());
         } else {
             rect.top = with(|p| p.viewport).unwrap_or(rect.bottom);
-            FillRect(dc, &rect, GetSysColorBrush(COLOR_WINDOW));
+            FillRect(dc, &rect, crate::appearance::brush(dc, COLOR_WINDOW));
         }
         let _ = EndPaint(hwnd, &paint);
     }
@@ -200,6 +225,83 @@ fn paint_surface(hwnd: HWND, viewport: bool) -> LRESULT {
 }
 // Keep native button behavior, keyboard handling and UIA provider; draw only
 // its surface so classic Windows themes do not add heavy bevels.
+fn choice(id: u16) -> bool {
+    matches!(
+        id,
+        ENGLISH
+            | CHINESE
+            | SHOW
+            | TRAY
+            | PREVIEW
+            | NEVER
+            | FULL
+            | ALWAYS
+            | EXE
+            | PID
+            | LIGHT
+            | DARK
+            | AUTO
+            | TOP
+            | BOTTOM
+            | LEFT
+            | RIGHT
+    )
+}
+fn paint_choice(hwnd: HWND, dc: HDC) {
+    unsafe {
+        let id = GetDlgCtrlID(hwnd) as u16;
+        let radio = !matches!(id, SHOW | TRAY | PREVIEW);
+        let mut rect = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rect);
+        FillRect(dc, &rect, crate::appearance::brush(dc, COLOR_WINDOW));
+        let enabled = IsWindowEnabled(hwnd).as_bool();
+        let color = crate::appearance::color(if enabled {
+            COLOR_WINDOWTEXT
+        } else {
+            COLOR_GRAYTEXT
+        });
+        let edge = scale(13);
+        let y = (rect.bottom - edge) / 2;
+        let pen = CreatePen(PS_SOLID, scale(1).max(1), COLORREF(color));
+        let previous_pen = SelectObject(dc, pen.into());
+        let previous_brush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+        if radio {
+            let _ = Ellipse(dc, 0, y, edge, y + edge);
+        } else {
+            let _ = Rectangle(dc, 0, y, edge, y + edge);
+        }
+        if send(hwnd, BM_GETCHECK, 0, 0).0 != 0 {
+            if radio {
+                SetDCBrushColor(dc, COLORREF(crate::appearance::color(COLOR_HOTLIGHT)));
+                SelectObject(dc, GetStockObject(DC_BRUSH));
+                let inset = scale(4);
+                let _ = Ellipse(dc, inset, y + inset, edge - inset, y + edge - inset);
+            } else {
+                let _ = MoveToEx(dc, scale(3), y + scale(6), None);
+                let _ = LineTo(dc, scale(6), y + scale(9));
+                let _ = LineTo(dc, scale(11), y + scale(3));
+            }
+        }
+        SelectObject(dc, previous_brush);
+        SelectObject(dc, previous_pen);
+        let _ = DeleteObject(pen.into());
+        let old_font = SelectObject(dc, with(|p| p.font).unwrap_or_default().into());
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, COLORREF(color));
+        rect.left = edge + scale(6);
+        let mut value: Vec<u16> = text(hwnd).encode_utf16().collect();
+        DrawTextW(
+            dc,
+            &mut value,
+            &mut rect,
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        if GetFocus() == hwnd {
+            let _ = DrawFocusRect(dc, &rect);
+        }
+        SelectObject(dc, old_font);
+    }
+}
 fn paint_button(hwnd: HWND, dc: HDC) {
     unsafe {
         let id = GetDlgCtrlID(hwnd) as u16;
@@ -207,11 +309,12 @@ fn paint_button(hwnd: HWND, dc: HDC) {
         let _ = GetClientRect(hwnd, &mut rect);
         let link = matches!(id, CONFIG_INFO | ADVANCED);
         let background = if link { COLOR_BTNFACE } else { COLOR_WINDOW };
-        FillRect(dc, &rect, GetSysColorBrush(background));
+        FillRect(dc, &rect, crate::appearance::brush(dc, background));
         if !link {
             let old_brush = SelectObject(
                 dc,
-                GetSysColorBrush(
+                crate::appearance::brush(
+                    dc,
                     if send(hwnd, BM_GETSTATE, 0, 0).0 & BST_PUSHED as isize != 0 {
                         COLOR_BTNFACE
                     } else {
@@ -220,9 +323,13 @@ fn paint_button(hwnd: HWND, dc: HDC) {
                 )
                 .into(),
             );
-            let pen = CreatePen(PS_SOLID, 1, COLORREF(GetSysColor(COLOR_3DSHADOW)));
+            let pen = CreatePen(
+                PS_SOLID,
+                1,
+                COLORREF(crate::appearance::color(COLOR_3DSHADOW)),
+            );
             let old_pen = SelectObject(dc, pen.into());
-            let _ = RoundRect(dc, 0, 0, rect.right, rect.bottom, scale(6), scale(6));
+            let _ = RoundRect(dc, 0, 0, rect.right, rect.bottom, scale(2), scale(2));
             SelectObject(dc, old_pen);
             SelectObject(dc, old_brush);
             let _ = DeleteObject(pen.into());
@@ -231,13 +338,15 @@ fn paint_button(hwnd: HWND, dc: HDC) {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(
             dc,
-            COLORREF(GetSysColor(if !IsWindowEnabled(hwnd).as_bool() {
-                COLOR_GRAYTEXT
-            } else if link {
-                COLOR_HOTLIGHT
-            } else {
-                COLOR_WINDOWTEXT
-            })),
+            COLORREF(crate::appearance::color(
+                if !IsWindowEnabled(hwnd).as_bool() {
+                    COLOR_GRAYTEXT
+                } else if link {
+                    COLOR_HOTLIGHT
+                } else {
+                    COLOR_WINDOWTEXT
+                },
+            )),
         );
         let mut value: Vec<_> = text(hwnd).encode_utf16().collect();
         let _ = DrawTextW(
@@ -267,6 +376,7 @@ fn text(hwnd: HWND) -> String {
     }
 }
 fn label(hwnd: HWND, value: &str) {
+    let value = crate::i18n::text(value);
     if text(hwnd) != value {
         let _ = unsafe { SetWindowTextW(hwnd, PCWSTR(wide(value).as_ptr())) };
     }
@@ -308,7 +418,7 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
         let result = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             PCWSTR(wide(CLASS).as_ptr()),
-            PCWSTR(wide("设置 — minicon-winmgr").as_ptr()),
+            PCWSTR(wide(crate::i18n::text("设置 — minicon-winmgr")).as_ptr()),
             WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -371,8 +481,17 @@ fn add(
     style: WINDOW_STYLE,
     footer: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let style = if matches!(id, 6211 | 6212 | 6213 | 6220 | 6202) {
+        style | WINDOW_STYLE(0x0200 /* SS_CENTERIMAGE */)
+    } else {
+        style
+    };
     let (parent, instance) = with(|p| (if footer { p.hwnd } else { p.view }, p.instance)).unwrap();
-    let button = style.0 & WS_TABSTOP.0 != 0 || matches!(id, FULL | ALWAYS | PID);
+    let button = style.0 & WS_TABSTOP.0 != 0
+        || matches!(
+            id,
+            FULL | ALWAYS | PID | DARK | AUTO | BOTTOM | LEFT | RIGHT | CHINESE
+        );
     let hwnd = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -395,6 +514,7 @@ fn add(
     with(|p| {
         p.controls.push(Control {
             id,
+            caption: title.into(),
             hwnd,
             height,
             top: 0,
@@ -410,42 +530,98 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
     let push = WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_MULTILINE as u32);
     let note = WINDOW_STYLE(0x0080 /* SS_NOPREFIX; SS_LEFT = 0 */);
     for (id, title, height, style) in [
-        (6190, "设置", 38, note),
-        (6191, "", 26, note),
-        (6200, "任务栏", 28, note),
-        (SHOW, "显示任务栏", 30, check | WS_GROUP),
+        (6190, crate::i18n::text("设置"), 34, note),
+        (6191, "", 22, note),
+        (6210, crate::i18n::text("外观与位置"), 26, note),
+        (6213, crate::i18n::text("语言"), 24, note),
+        (ENGLISH, "English", 30, radio | WS_GROUP | WS_TABSTOP),
+        (CHINESE, "中文", 30, radio),
+        (6312, "", 22, note),
+        (6211, crate::i18n::text("颜色主题"), 24, note),
+        (
+            LIGHT,
+            crate::i18n::text("白天"),
+            30,
+            radio | WS_GROUP | WS_TABSTOP,
+        ),
+        (DARK, crate::i18n::text("黑夜"), 30, radio),
+        (AUTO, crate::i18n::text("自动"), 30, radio),
+        (6310, "", 22, note),
+        (6212, crate::i18n::text("任务栏位置"), 24, note),
+        (
+            TOP,
+            crate::i18n::text("上方"),
+            30,
+            radio | WS_GROUP | WS_TABSTOP,
+        ),
+        (BOTTOM, crate::i18n::text("下方"), 30, radio),
+        (LEFT, crate::i18n::text("左侧"), 30, radio),
+        (RIGHT, crate::i18n::text("右侧"), 30, radio),
+        (6311, "", 22, note),
+        (6200, crate::i18n::text("任务与窗口"), 26, note),
+        (SHOW, crate::i18n::text("显示任务栏"), 30, check | WS_GROUP),
+        (
+            TRAY,
+            crate::i18n::text("显示通知区域"),
+            30,
+            check | WS_GROUP,
+        ),
         (6301, "", 24, note),
-        (TRAY, "显示通知区域", 30, check | WS_GROUP),
         (6302, "", 24, note),
         (6201, "窗口行为", 28, note),
-        (6220, "合并窗口", 24, note),
+        (6220, crate::i18n::text("合并窗口"), 24, note),
         (
             NEVER,
             MergeStrategy::Never.label(),
             30,
             radio | WS_GROUP | WS_TABSTOP,
         ),
-        (FULL, "放不下时合并", 30, radio),
+        (FULL, crate::i18n::text("拥挤时合并"), 30, radio),
         (ALWAYS, MergeStrategy::Always.label(), 30, radio),
         (6303, "", 22, note),
-        (6202, "合并依据", 26, note),
-        (EXE, GroupBy::Exe.label(), 30, radio | WS_GROUP | WS_TABSTOP),
-        (PID, GroupBy::Pid.label(), 30, radio),
+        (6202, crate::i18n::text("合并依据"), 26, note),
+        (
+            EXE,
+            crate::i18n::text("按应用"),
+            30,
+            radio | WS_GROUP | WS_TABSTOP,
+        ),
+        (PID, crate::i18n::text("按进程"), 30, radio),
         (6304, "", 22, note),
-        (PREVIEW, "悬停显示窗口缩略图", 30, check | WS_GROUP),
+        (
+            PREVIEW,
+            crate::i18n::text("悬停显示窗口缩略图"),
+            30,
+            check | WS_GROUP,
+        ),
         (6305, "", 22, note),
-        (CONFIG_INFO, "配置与关于…", 32, push | WS_GROUP),
-        (ADVANCED, "展开桌面管理…", 32, push | WS_GROUP),
-        (6307, "更改 Windows 桌面外壳，操作前会再次确认。", 26, note),
-        (REPLACE, "接管桌面…", 34, push | WS_GROUP),
-        (ROLLBACK, "还原系统桌面…", 34, push),
+        (
+            CONFIG_INFO,
+            crate::i18n::text("配置与关于…"),
+            32,
+            push | WS_GROUP,
+        ),
+        (
+            ADVANCED,
+            crate::i18n::text("展开桌面管理…"),
+            32,
+            push | WS_GROUP,
+        ),
+        (
+            6307,
+            crate::i18n::text("更改 Windows 桌面外壳，操作前会再次确认。"),
+            26,
+            note,
+        ),
+        (REPLACE, crate::i18n::text("接管桌面…"), 34, push | WS_GROUP),
+        (ROLLBACK, crate::i18n::text("还原系统桌面…"), 34, push),
     ] {
         add(id, title, height, style, false)?;
     }
-    add(STATUS, "更改自动保存", 52, note, true)?;
-    add(RETRY, "重试保存", 30, push, true)?;
-    add(DETAIL, "查看详情", 30, push, true)?;
-    add(CLOSE, "关闭", 30, push, true)?;
+    add(STATUS, crate::i18n::text("更改自动保存"), 52, note, true)?;
+    add(RETRY, crate::i18n::text("重试保存"), 30, push, true)?;
+    add(DETAIL, crate::i18n::text("查看详情"), 30, push, true)?;
+    add(CLOSE, crate::i18n::text("关闭"), 30, push, true)?;
     Ok(())
 }
 
@@ -465,7 +641,10 @@ pub(crate) fn show() {
             return;
         }
         if let Err(error) = install(HINSTANCE(raw as *mut _)) {
-            info_box(&format!("无法创建设置窗口：{error}"));
+            info_box(&crate::ui_format!(
+                "无法创建设置窗口：{error}",
+                "Unable to create the settings window: {error}"
+            ));
             return;
         }
     }
@@ -526,10 +705,33 @@ fn source_note(key: &'static str, reason: Option<&str>) -> String {
 }
 fn refresh() {
     let cfg = config::current();
+    let controls = with(|p| p.controls.clone()).unwrap_or_default();
+    for c in controls {
+        if !c.caption.is_empty() {
+            label(c.hwnd, &c.caption);
+        }
+    }
+    label(
+        control(ADVANCED),
+        if with(|p| p.advanced).unwrap_or(false) {
+            crate::i18n::text("收起桌面管理")
+        } else {
+            crate::i18n::text("展开桌面管理…")
+        },
+    );
     let actual = crate::hub::taskbar_running();
-    label(control(6191), "让任务栏按你的习惯工作。");
+    label(control(6191), crate::i18n::text("外观与日常行为"));
     let previous_focus = unsafe { GetFocus() };
     for (id, value) in [
+        (ENGLISH, cfg.language == crate::i18n::Language::En),
+        (CHINESE, cfg.language == crate::i18n::Language::Zh),
+        (LIGHT, cfg.theme_mode == ThemeMode::Light),
+        (DARK, cfg.theme_mode == ThemeMode::Dark),
+        (AUTO, cfg.theme_mode == ThemeMode::Auto),
+        (TOP, cfg.position == Position::Top),
+        (BOTTOM, cfg.position == Position::Bottom),
+        (LEFT, cfg.position == Position::Left),
+        (RIGHT, cfg.position == Position::Right),
         (SHOW, config::preferred_taskbar()),
         (TRAY, cfg.show_tray),
         (NEVER, cfg.merge == MergeStrategy::Never),
@@ -542,6 +744,13 @@ fn refresh() {
         send(control(id), BM_SETCHECK, usize::from(value), 0);
     }
     for (ids, key, dependency) in [
+        (&[ENGLISH, CHINESE][..], keys::LANGUAGE, true),
+        (&[LIGHT, DARK, AUTO][..], keys::THEME_MODE, true),
+        (
+            &[TOP, BOTTOM, LEFT, RIGHT][..],
+            keys::TASKBAR_POSITION,
+            true,
+        ),
         (&[SHOW][..], keys::TASKBAR_SHOW, true),
         (&[TRAY][..], keys::TASKBAR_TRAY, actual),
         (&[NEVER, FULL, ALWAYS][..], keys::TASKBAR_GROUP, actual),
@@ -558,6 +767,15 @@ fn refresh() {
     }
     // Exactly one tab stop per radio group, including environment-disabled groups.
     for (id, on) in [
+        (ENGLISH, cfg.language == crate::i18n::Language::En),
+        (CHINESE, cfg.language == crate::i18n::Language::Zh),
+        (LIGHT, cfg.theme_mode == ThemeMode::Light),
+        (DARK, cfg.theme_mode == ThemeMode::Dark),
+        (AUTO, cfg.theme_mode == ThemeMode::Auto),
+        (TOP, cfg.position == Position::Top),
+        (BOTTOM, cfg.position == Position::Bottom),
+        (LEFT, cfg.position == Position::Left),
+        (RIGHT, cfg.position == Position::Right),
         (NEVER, cfg.merge == MergeStrategy::Never),
         (FULL, cfg.merge == MergeStrategy::WhenFull),
         (ALWAYS, cfg.merge == MergeStrategy::Always),
@@ -573,55 +791,41 @@ fn refresh() {
             );
         }
     }
+    label(control(6312), &source_note(keys::LANGUAGE, None));
+    label(control(6310), &source_note(keys::THEME_MODE, None));
+    label(control(6311), &source_note(keys::TASKBAR_POSITION, None));
+    let pending = config::preferred_taskbar() != actual;
     label(
         control(6301),
-        &format!(
-            "重启后生效 · 当前{} / 下次{}{}",
-            if actual {
-                "显示"
+        &source_note(
+            keys::TASKBAR_SHOW,
+            pending.then_some(if actual {
+                crate::i18n::text("重启后隐藏；本次仍显示任务栏")
             } else {
-                "未显示 / 不可用"
-            },
-            if config::preferred_taskbar() {
-                "显示"
-            } else {
-                "隐藏"
-            },
-            if config::env_source(keys::TASKBAR_SHOW).is_some() {
-                format!(" · {}", config::source(keys::TASKBAR_SHOW))
-            } else {
-                String::new()
-            }
+                crate::i18n::text("重启后显示；本次未显示任务栏")
+            }),
         ),
     );
-    let mode = if crate::shell_swap::self_is_shell() {
-        "替换模式：应用通知图标可交互"
-    } else {
-        "伴随模式：应用通知图标由 Windows 管理"
-    };
     label(
         control(6302),
-        &format!("{mode}{}", {
-            let note = source_note(keys::TASKBAR_TRAY, (!actual).then_some("本次无任务栏"));
-            if note.is_empty() {
-                note
-            } else {
-                format!("\n{note}")
-            }
-        }),
+        &source_note(
+            keys::TASKBAR_TRAY,
+            (!actual).then_some(crate::i18n::text("本次无任务栏")),
+        ),
     );
     label(
         control(6303),
-        &source_note(keys::TASKBAR_GROUP, (!actual).then_some("本次无任务栏")),
+        &source_note(
+            keys::TASKBAR_GROUP,
+            (!actual).then_some(crate::i18n::text("本次无任务栏")),
+        ),
     );
     label(
         control(6304),
         &source_note(
             keys::TASKBAR_GROUP_BY,
             if !actual {
-                Some("本次无任务栏")
-            } else if cfg.merge == MergeStrategy::Never {
-                Some("需先启用窗口合并")
+                Some(crate::i18n::text("本次无任务栏"))
             } else {
                 None
             },
@@ -629,24 +833,28 @@ fn refresh() {
     );
     label(
         control(6305),
-        &source_note(keys::HOVER_PREVIEW, (!actual).then_some("本次无任务栏")),
+        &source_note(
+            keys::HOVER_PREVIEW,
+            (!actual).then_some(crate::i18n::text("本次无任务栏")),
+        ),
     );
     let status = crate::settings_store::status();
     let message = if let Some(error) = with(|p| p.error.clone()).flatten() {
         error
     } else if status.failed > 0 {
-        format!(
+        crate::ui_format!(
             "本次修改已保留，{} 项保存失败；下次启动尚未保存。请重试。",
+            "Applied to this session. {} setting(s) could not be saved for next start. Please retry.",
             status.failed
         )
     } else if status.pending > 0 {
-        "本次修改已保留，正在保存…".into()
+        crate::i18n::text("本次修改已保留，正在保存…").into()
     } else if status.saved && config::preferred_taskbar() != cfg.show_taskbar {
-        "已保存，任务栏显示设置重启后生效。".into()
+        crate::i18n::text("已保存，任务栏显示设置重启后生效。").into()
     } else if status.saved {
-        "已生效并保存。".into()
+        crate::i18n::text("已保存").into()
     } else {
-        "更改会自动保存".into()
+        crate::i18n::text("更改自动保存").into()
     };
     label(control(STATUS), &message);
     enabled(RETRY, status.failed > 0);
@@ -684,6 +892,28 @@ fn apply(id: u16) {
     with(|p| p.error = None);
     let cfg = config::current();
     match id {
+        ENGLISH | CHINESE => {
+            config::set_language(if id == ENGLISH {
+                crate::i18n::Language::En
+            } else {
+                crate::i18n::Language::Zh
+            });
+        }
+        LIGHT | DARK | AUTO => {
+            config::set_theme_mode(match id {
+                LIGHT => ThemeMode::Light,
+                DARK => ThemeMode::Dark,
+                _ => ThemeMode::Auto,
+            });
+        }
+        TOP | BOTTOM | LEFT | RIGHT => {
+            config::set_position(match id {
+                TOP => Position::Top,
+                BOTTOM => Position::Bottom,
+                LEFT => Position::Left,
+                _ => Position::Right,
+            });
+        }
         ADVANCED => {
             let expanded = with(|p| {
                 p.advanced = !p.advanced;
@@ -693,9 +923,9 @@ fn apply(id: u16) {
             label(
                 control(ADVANCED),
                 if expanded {
-                    "收起桌面管理"
+                    crate::i18n::text("收起桌面管理")
                 } else {
-                    "展开桌面管理…"
+                    crate::i18n::text("展开桌面管理…")
                 },
             );
             layout();
@@ -730,7 +960,12 @@ fn apply(id: u16) {
             if !cfg.hover_preview {
                 let instance = with(|p| p.instance).unwrap();
                 if let Err(e) = crate::hover_preview::prepare(instance) {
-                    with(|p| p.error = Some(format!("无法开启预览：{e}")));
+                    with(|p| {
+                        p.error = Some(crate::ui_format!(
+                            "无法开启预览：{e}",
+                            "Unable to enable previews: {e}"
+                        ))
+                    });
                     refresh();
                     return;
                 }
@@ -758,49 +993,85 @@ fn apply(id: u16) {
             }
         }
         CONFIG_INFO => {
-            let mut message = format!(
-                "minicon-winmgr {} · {}\n\n主题：配置配色，修改后重启生效\n任务栏唤出配置：{}（实际注册结果见日志）\n\n配置来源（启动时）\n",
+            let mut message = crate::ui_format!(
+                "minicon-winmgr {} · {}\n\n任务栏唤出配置：{}（实际注册结果见日志）\n\n配置来源（启动时）\n",
+                "minicon-winmgr {} · {}\n\nTaskbar hotkey: {} (registration results are recorded in the log)\n\nConfiguration sources at startup\n",
                 env!("CARGO_PKG_VERSION"),
                 crate::privilege::description(),
                 cfg.hotkey
             );
             for (title, key, value) in [
                 (
-                    "任务栏显示（下次启动）",
+                    crate::i18n::text("语言"),
+                    keys::LANGUAGE,
+                    cfg.language.as_key(),
+                ),
+                (
+                    crate::i18n::text("颜色主题"),
+                    keys::THEME_MODE,
+                    cfg.theme_mode.label(),
+                ),
+                (
+                    crate::i18n::text("任务栏位置"),
+                    keys::TASKBAR_POSITION,
+                    cfg.position.label(),
+                ),
+                (
+                    crate::i18n::text("任务栏显示（下次启动）"),
                     keys::TASKBAR_SHOW,
                     if config::preferred_taskbar() {
-                        "开启"
+                        crate::i18n::text("开启")
                     } else {
-                        "关闭"
+                        crate::i18n::text("关闭")
                     },
                 ),
                 (
-                    "通知区域",
+                    crate::i18n::text("通知区域"),
                     keys::TASKBAR_TRAY,
-                    if cfg.show_tray { "开启" } else { "关闭" },
+                    if cfg.show_tray {
+                        crate::i18n::text("开启")
+                    } else {
+                        crate::i18n::text("关闭")
+                    },
                 ),
-                ("窗口合并", keys::TASKBAR_GROUP, cfg.merge.label()),
-                ("合并依据", keys::TASKBAR_GROUP_BY, cfg.group_by.label()),
                 (
-                    "悬停预览",
+                    crate::i18n::text("窗口合并"),
+                    keys::TASKBAR_GROUP,
+                    cfg.merge.label(),
+                ),
+                (
+                    crate::i18n::text("合并依据"),
+                    keys::TASKBAR_GROUP_BY,
+                    cfg.group_by.label(),
+                ),
+                (
+                    crate::i18n::text("悬停预览"),
                     keys::HOVER_PREVIEW,
                     if cfg.hover_preview {
-                        "开启"
+                        crate::i18n::text("开启")
                     } else {
-                        "关闭"
+                        crate::i18n::text("关闭")
                     },
                 ),
             ] {
-                message.push_str(&format!(
+                message.push_str(&crate::ui_format!(
                     "{title}：{value}\n来源：{}\n\n",
+                    "{title}: {value}\nSource: {}\n\n",
                     config::source(key)
                 ));
             }
             if let Some(path) = config::settings_path() {
-                message.push_str(&format!("设置保存位置：{}", path.display()));
+                message.push_str(&crate::ui_format!(
+                    "设置保存位置：{}",
+                    "Settings file: {}",
+                    path.display()
+                ));
             }
             if let Err(error) = crate::settings_info::show(handle(), &message) {
-                info_box(&format!("无法打开配置详情：{error}"));
+                info_box(&crate::ui_format!(
+                    "无法打开配置详情：{error}",
+                    "Unable to open configuration details: {error}"
+                ));
             }
             return;
         }
@@ -819,7 +1090,7 @@ fn info_box(message: &str) {
         MessageBoxW(
             Some(handle()),
             PCWSTR(wide(message).as_ptr()),
-            PCWSTR(wide("设置").as_ptr()),
+            PCWSTR(wide(crate::i18n::text("设置")).as_ptr()),
             MB_OK | MB_ICONINFORMATION,
         );
     }
@@ -864,8 +1135,8 @@ fn fit(center: bool) {
         })
     }
     .max(96);
-    let width = (660 * dpi as i32 / 96).min(work.right - work.left).max(1);
-    let height = (740 * dpi as i32 / 96).min(work.bottom - work.top).max(1);
+    let width = (640 * dpi as i32 / 96).min(work.right - work.left).max(1);
+    let height = (570 * dpi as i32 / 96).min(work.bottom - work.top).max(1);
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -903,8 +1174,8 @@ struct Geometry {
 }
 fn geometry(width: i32, height: i32, dpi: u32) -> Geometry {
     let scale = |n: i32| n * dpi as i32 / 96;
-    let margin = scale(28).min(width.max(1) / 8);
-    let footer = scale(76).min((height - 1).max(0));
+    let margin = scale(24).min(width.max(1) / 8);
+    let footer = scale(64).min((height - 1).max(0));
     Geometry {
         margin,
         width: (width - 2 * margin).max(1),
@@ -990,11 +1261,17 @@ fn layout() {
         let (controls, view) = with(|p| (p.controls.clone(), p.view)).unwrap();
         let dc = GetDC(Some(hwnd));
         let old = SelectObject(dc, font.into());
-        let mut top = scale(18);
+        let mut top = scale(16);
         let mut positions = Vec::new();
         let mut row_top = top;
         let horizontal = g.width >= scale(420);
+        let compact = g.width >= scale(520);
         for c in controls.iter().filter(|c| !c.footer) {
+            if matches!(c.id, 6201 | 6191) {
+                let _ = ShowWindow(c.hwnd, SW_HIDE);
+                continue;
+            }
+
             if matches!(c.id, REPLACE | ROLLBACK | 6307) {
                 let visible = with(|p| p.advanced).unwrap_or(false);
                 let _ = ShowWindow(c.hwnd, if visible { SW_SHOW } else { SW_HIDE });
@@ -1002,7 +1279,7 @@ fn layout() {
                     continue;
                 }
             }
-            if (6301..=6305).contains(&c.id) {
+            if (6301..=6305).contains(&c.id) || matches!(c.id, 6310..=6312) {
                 let visible = !text(c.hwnd).is_empty();
                 let _ = ShowWindow(c.hwnd, if visible { SW_SHOW } else { SW_HIDE });
                 if !visible {
@@ -1010,6 +1287,23 @@ fn layout() {
                 }
             }
             let row = match c.id {
+                ENGLISH | CHINESE if horizontal => Some((ENGLISH, usize::from(c.id == CHINESE), 2)),
+                LIGHT | DARK | AUTO if horizontal => Some((
+                    LIGHT,
+                    [LIGHT, DARK, AUTO]
+                        .iter()
+                        .position(|id| *id == c.id)
+                        .unwrap(),
+                    3,
+                )),
+                TOP | BOTTOM | LEFT | RIGHT if horizontal => Some((
+                    TOP,
+                    [TOP, BOTTOM, LEFT, RIGHT]
+                        .iter()
+                        .position(|id| *id == c.id)
+                        .unwrap(),
+                    4,
+                )),
                 NEVER | FULL | ALWAYS if horizontal => Some((
                     NEVER,
                     [NEVER, FULL, ALWAYS]
@@ -1019,37 +1313,69 @@ fn layout() {
                     3,
                 )),
                 EXE | PID if horizontal => Some((EXE, usize::from(c.id == PID), 2)),
+                SHOW | TRAY if compact => Some((SHOW, usize::from(c.id == TRAY), 2)),
+                CONFIG_INFO | ADVANCED if horizontal => {
+                    Some((CONFIG_INFO, usize::from(c.id == ADVANCED), 2))
+                }
                 REPLACE | ROLLBACK if horizontal => {
                     Some((REPLACE, usize::from(c.id == ROLLBACK), 2))
                 }
                 _ => None,
             };
-            if matches!(c.id, CONFIG_INFO | ADVANCED) {
+            if c.id == CONFIG_INFO {
                 top += scale(12);
             }
-            if matches!(c.id, SHOW | 6220) {
-                top += scale(14);
-            }
-            if matches!(c.id, TRAY | 6202 | PREVIEW) {
+            if matches!(c.id, SHOW | 6213) {
                 top += scale(10);
             }
-            if is_heading(c.id) {
-                top += scale(if c.id == 6200 { 10 } else { 14 });
+            if matches!(c.id, 6220 | 6202 | PREVIEW | 6212 | 6211) || (c.id == TRAY && !compact) {
+                top += scale(6);
             }
-            let inset = if in_card(c.id) { scale(18) } else { 0 };
+            if is_heading(c.id) {
+                top += scale(if c.id == 6200 { 18 } else { 8 });
+            }
+            let inset = if in_card(c.id) { scale(14) } else { 0 };
             let available = (g.width - inset * 2).max(1);
+            let inline_label = compact && matches!(c.id, 6211 | 6212 | 6213 | 6220 | 6202);
+            let inline_options = compact
+                && matches!(
+                    c.id,
+                    ENGLISH
+                        | CHINESE
+                        | LIGHT
+                        | DARK
+                        | AUTO
+                        | TOP
+                        | BOTTOM
+                        | LEFT
+                        | RIGHT
+                        | NEVER
+                        | FULL
+                        | ALWAYS
+                        | EXE
+                        | PID
+                );
+            if inline_label {
+                row_top = top;
+            }
+            let label_width = scale(94);
+
             let (x, width) = if let Some((first, index, count)) = row {
-                if c.id == first {
+                if c.id == first && !inline_options {
                     row_top = top;
                 } else {
                     top = row_top;
                 }
-                let width = (available - scale(12) * (count - 1)) / count;
-                (inset + index as i32 * (width + scale(12)), width)
+                let left = if inline_options { label_width } else { 0 };
+                let gap = scale(8);
+                let width = (available - left - gap * (count - 1)) / count;
+                (inset + left + index as i32 * (width + gap), width)
             } else {
                 (
                     inset,
-                    if matches!(c.id, CONFIG_INFO | ADVANCED) {
+                    if inline_label {
+                        label_width
+                    } else if matches!(c.id, CONFIG_INFO | ADVANCED) {
                         scale(160).min(available)
                     } else {
                         available
@@ -1079,14 +1405,18 @@ fn layout() {
             }
             // Preferred height is immutable: a narrow intermediate layout must
             // never become the minimum height of all future layouts.
-            let height = scale(c.height).max(measured.bottom + scale(4));
+            let height = if inline_label || inline_options {
+                scale(30)
+            } else {
+                scale(c.height).max(measured.bottom + scale(4))
+            };
             positions.push((c.id, x, top, width, height));
             top += height;
-            if matches!(c.id, 6302 | 6305) {
-                top += scale(14);
+            if c.id == 6305 {
+                top += scale(6);
             }
         }
-        top += scale(20);
+        top += scale(12);
         SelectObject(dc, old);
         let _ = ReleaseDC(Some(hwnd), dc);
         let scroll = with(|p| {
@@ -1096,14 +1426,13 @@ fn layout() {
             p.scroll
         })
         .unwrap();
-        let cards = [(SHOW, 6302), (6220, PREVIEW)]
+        let cards = [(6213, RIGHT), (SHOW, PREVIEW)]
             .into_iter()
             .filter_map(|(start, end)| {
                 let a = positions.iter().find(|c| c.0 == start)?;
-                let b = positions
-                    .iter()
-                    .rev()
-                    .find(|c| c.0 == end || (end == PREVIEW && c.0 == 6305))?;
+                let b = positions.iter().rev().find(|c| {
+                    c.0 == end || (end == PREVIEW && c.0 == 6305) || (end == RIGHT && c.0 == 6311)
+                })?;
                 Some(RECT {
                     left: 0,
                     top: a.2 - scale(10) - scroll,
@@ -1180,6 +1509,19 @@ fn layout() {
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
     with(|p| p.layout = false);
+    // SetScrollInfo can show/hide the native scrollbar and synchronously send
+    // WM_SIZE while layout is guarded. Reflow once the client width settles.
+    unsafe {
+        let hwnd = handle();
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        let mut client = RECT::default();
+        let mut view = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let _ = GetClientRect(with(|p| p.view).unwrap(), &mut view);
+        if view.right != geometry(client.right, client.bottom, dpi).width {
+            let _ = PostMessageW(Some(hwnd), REFLOW, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 fn ensure_focus() {
     let focus = unsafe { GetFocus() };
@@ -1248,10 +1590,12 @@ pub(crate) fn allow_exit() -> bool {
         MessageBoxW(
             Some(handle()),
             PCWSTR(
-                wide("仍有设置尚未保存。\n选择“是”放弃未保存修改并退出；选择“否”返回设置重试。")
-                    .as_ptr(),
+                wide(crate::i18n::text(
+                    "仍有设置尚未保存。\n选择“是”放弃未保存修改并退出；选择“否”返回设置重试。",
+                ))
+                .as_ptr(),
             ),
-            PCWSTR(wide("设置尚未保存").as_ptr()),
+            PCWSTR(wide(crate::i18n::text("设置尚未保存")).as_ptr()),
             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
         )
     };
@@ -1290,18 +1634,27 @@ unsafe extern "system" fn childproc(
             if matches!(
                 id,
                 CONFIG_INFO | ADVANCED | CLOSE | RETRY | DETAIL | REPLACE | ROLLBACK
-            ) {
+            ) || choice(id)
+            {
                 if msg == WM_PAINT {
                     unsafe {
                         let mut paint = PAINTSTRUCT::default();
                         let dc = BeginPaint(hwnd, &mut paint);
-                        paint_button(hwnd, dc);
+                        if choice(id) {
+                            paint_choice(hwnd, dc)
+                        } else {
+                            paint_button(hwnd, dc)
+                        }
                         let _ = EndPaint(hwnd, &paint);
                     }
                     return LRESULT(0);
                 }
                 if msg == WM_PRINTCLIENT {
-                    paint_button(hwnd, HDC(wp.0 as *mut _));
+                    if choice(id) {
+                        paint_choice(hwnd, HDC(wp.0 as *mut _))
+                    } else {
+                        paint_button(hwnd, HDC(wp.0 as *mut _))
+                    }
                     return LRESULT(0);
                 }
             }
@@ -1370,12 +1723,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 layout();
                 LRESULT(0)
             }
-            WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+            WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_THEMECHANGED => {
+                crate::appearance::refresh();
                 fit(false);
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == POLL => {
                 refresh();
+                LRESULT(0)
+            }
+            REFLOW => {
+                layout();
                 LRESULT(0)
             }
             ENSURE_FOCUS => {
@@ -1426,7 +1784,7 @@ mod tests {
         show();
         let preferred: Vec<_> = with(|p| p.controls.iter().map(|c| c.height).collect()).unwrap();
         unsafe {
-            let _ = MoveWindow(handle(), 40, 40, 660, 900, true);
+            let _ = MoveWindow(handle(), 40, 40, 640, 550, true);
         }
         layout();
         let original = with(|p| p.content).unwrap();
@@ -1436,7 +1794,7 @@ mod tests {
             }
             layout();
             unsafe {
-                let _ = MoveWindow(handle(), 40, 40, 660, 900, true);
+                let _ = MoveWindow(handle(), 40, 40, 640, 550, true);
             }
             layout();
             assert_eq!(with(|p| p.content).unwrap(), original);

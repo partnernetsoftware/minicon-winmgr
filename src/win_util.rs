@@ -137,6 +137,13 @@ pub(crate) fn anchored_card(anchor: RECT, work: RECT, w: i32, h: i32, gap: i32) 
         anchor.bottom + gap
     };
 
+    if anchor.right <= work.left {
+        left = anchor.right + gap;
+        top = anchor.top;
+    } else if anchor.left >= work.right {
+        left = anchor.left - w - gap;
+        top = anchor.top;
+    }
     if left + w > work.right {
         left = work.right - w;
     }
@@ -571,6 +578,41 @@ mod tests {
         assert_eq!(centered_upper_quarter(1920, 0, 560).1, 0);
     }
 
+    #[test]
+    fn anchored_cards_open_into_work_area_from_both_vertical_edges() {
+        let work = RECT {
+            left: 180,
+            top: 0,
+            right: 1500,
+            bottom: 1000,
+        };
+        let left = anchored_card(
+            RECT {
+                left: 10,
+                top: 200,
+                right: 170,
+                bottom: 230,
+            },
+            work,
+            240,
+            160,
+            6,
+        );
+        assert!(left.left >= work.left && left.top == 200);
+        let right = anchored_card(
+            RECT {
+                left: 1510,
+                top: 200,
+                right: 1670,
+                bottom: 230,
+            },
+            work,
+            240,
+            160,
+            6,
+        );
+        assert!(right.right <= work.right && right.top == 200);
+    }
     #[test]
     fn anchored_card_prefers_above_the_anchor() {
         let anchor = rect(100, 300, 140, 320);

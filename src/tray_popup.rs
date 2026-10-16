@@ -70,7 +70,7 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
         let result = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             PCWSTR(name.as_ptr()),
-            PCWSTR(wide("通知区域").as_ptr()),
+            PCWSTR(wide(crate::i18n::text("通知区域")).as_ptr()),
             WS_POPUP | WS_BORDER,
             0,
             0,
@@ -181,6 +181,7 @@ fn show(bar: HWND, anchor: RECT, items: Vec<TrayItem>, all: bool) {
     });
     rebuild();
     unsafe {
+        crate::appearance::install(handle());
         let _ = ShowWindow(handle(), SW_SHOW);
         let _ = crate::win_util::force_foreground(handle());
     }
@@ -326,9 +327,8 @@ fn rebuild() {
             });
             font
         };
-        let x = (anchor.right - width).clamp(work.left, (work.right - width).max(work.left));
-        let y =
-            (anchor.top - height - scale(6)).clamp(work.top, (work.bottom - height).max(work.top));
+        let card = crate::win_util::anchored_card(anchor, work, width, height, scale(6));
+        let (x, y) = (card.left, card.top);
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -346,9 +346,9 @@ fn rebuild() {
         let mut buttons = vec![];
         if items.is_empty() {
             let caption = if crate::tray_host::is_installed() {
-                "暂无应用通知图标"
+                crate::i18n::text("暂无应用通知图标")
             } else {
-                "应用图标由 Windows 通知区域管理"
+                crate::i18n::text("应用图标由 Windows 通知区域管理")
             };
             let notice = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -375,7 +375,7 @@ fn rebuild() {
         {
             let local = offset - page * capacity;
             let title = if item.tooltip.is_empty() {
-                "应用通知图标"
+                crate::i18n::text("应用通知图标")
             } else {
                 &item.tooltip
             };
@@ -409,17 +409,29 @@ fn rebuild() {
         let paging = items.len() > capacity;
         let half = ((bw - scale(4)) / 2).max(1);
         for (id, title, bx, by, button_width) in [
-            (1, "音量设置", scale(8), base, bw),
-            (2, "网络设置", scale(16) + bw, base, bw),
+            (1, crate::i18n::text("音量设置"), scale(8), base, bw),
+            (2, crate::i18n::text("网络设置"), scale(16) + bw, base, bw),
             (
                 6,
-                "时间设置",
+                crate::i18n::text("时间设置"),
                 scale(8),
                 base + scale(30),
                 if paging { bw } else { width - scale(16) - 2 },
             ),
-            (3, "上页", scale(16) + bw, base + scale(30), half),
-            (4, "下页", scale(20) + bw + half, base + scale(30), half),
+            (
+                3,
+                crate::i18n::text("上页"),
+                scale(16) + bw,
+                base + scale(30),
+                half,
+            ),
+            (
+                4,
+                crate::i18n::text("下页"),
+                scale(20) + bw + half,
+                base + scale(30),
+                half,
+            ),
         ] {
             if matches!(id, 3 | 4) && !paging {
                 continue;
@@ -726,7 +738,7 @@ unsafe extern "system" fn child_proc(
                         let _ = GetWindowRect(hwnd, &mut r);
                         crate::bar_tip::show(
                             if item.tooltip.is_empty() {
-                                "应用通知图标"
+                                crate::i18n::text("应用通知图标")
                             } else {
                                 &item.tooltip
                             },
@@ -826,7 +838,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         s.launch.as_ref().and_then(|rx| match rx.try_recv() {
                             Ok(result) => Some(result),
                             Err(mpsc::TryRecvError::Disconnected) => {
-                                Some(Err("无法打开系统设置，请重试。".into()))
+                                Some(Err(crate::i18n::text("无法打开系统设置，请重试。").into()))
                             }
                             Err(mpsc::TryRecvError::Empty) => None,
                         })
@@ -841,7 +853,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                                 let _ = MessageBoxW(
                                     Some(hwnd),
                                     PCWSTR(wide(&error).as_ptr()),
-                                    PCWSTR(wide("无法打开系统设置").as_ptr()),
+                                    PCWSTR(wide(crate::i18n::text("无法打开系统设置")).as_ptr()),
                                     MB_OK | MB_ICONERROR,
                                 );
                             }

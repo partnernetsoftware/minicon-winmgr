@@ -22,11 +22,84 @@ use std::sync::{Mutex, OnceLock};
 /// `every_settable_key_round_trips` test, which walks each pair through both
 /// directions.
 pub mod keys {
+    pub const LANGUAGE: &str = "ui.language";
     pub const TASKBAR_SHOW: &str = "taskbar.show";
     pub const TASKBAR_TRAY: &str = "taskbar.tray";
     pub const TASKBAR_GROUP: &str = "taskbar.group";
     pub const TASKBAR_GROUP_BY: &str = "taskbar.group_by";
     pub const HOVER_PREVIEW: &str = "behavior.hover_preview";
+    pub const THEME_MODE: &str = "appearance.mode";
+    pub const TASKBAR_POSITION: &str = "taskbar.position";
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeMode {
+    Light,
+    Dark,
+    #[default]
+    Auto,
+}
+impl ThemeMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+            Self::Auto => "auto",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Light => crate::i18n::text("白天"),
+            Self::Dark => crate::i18n::text("黑夜"),
+            Self::Auto => crate::i18n::text("自动"),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Position {
+    #[default]
+    Bottom,
+    Top,
+    Left,
+    Right,
+}
+impl Position {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "bottom" => Some(Self::Bottom),
+            "top" => Some(Self::Top),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Bottom => "bottom",
+            Self::Top => "top",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bottom => crate::i18n::text("下方"),
+            Self::Top => crate::i18n::text("上方"),
+            Self::Left => crate::i18n::text("左侧"),
+            Self::Right => crate::i18n::text("右侧"),
+        }
+    }
+    pub fn vertical(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
 }
 
 /// The `true`/`false` spelling used on disk for a boolean setting.
@@ -94,9 +167,9 @@ impl MergeStrategy {
     /// User-facing label (also used by the settings radios).
     pub fn label(self) -> &'static str {
         match self {
-            MergeStrategy::Never => "从不合并",
-            MergeStrategy::WhenFull => "任务栏放不下时合并",
-            MergeStrategy::Always => "始终合并",
+            MergeStrategy::Never => crate::i18n::text("从不合并"),
+            MergeStrategy::WhenFull => crate::i18n::text("任务栏放不下时合并"),
+            MergeStrategy::Always => crate::i18n::text("始终合并"),
         }
     }
 }
@@ -129,8 +202,8 @@ impl GroupBy {
 
     pub fn label(self) -> &'static str {
         match self {
-            GroupBy::Exe => "按应用（可执行文件）",
-            GroupBy::Pid => "按进程（pid）",
+            GroupBy::Exe => crate::i18n::text("按应用（可执行文件）"),
+            GroupBy::Pid => crate::i18n::text("按进程（pid）"),
         }
     }
 }
@@ -139,6 +212,10 @@ impl GroupBy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub theme: Theme,
+    pub language: crate::i18n::Language,
+    pub theme_mode: ThemeMode,
+    pub position: Position,
+    theme_overrides: u8,
     /// Hotkey spec, e.g. `"alt+`"`.
     pub hotkey: String,
     pub show_taskbar: bool,
@@ -175,7 +252,11 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            language: crate::i18n::Language::En,
             theme: Theme::default(),
+            theme_mode: ThemeMode::Auto,
+            position: Position::Bottom,
+            theme_overrides: 0,
             hotkey: "alt+`".to_string(),
             show_taskbar: true,
             show_tray: true,
@@ -221,31 +302,52 @@ fn apply(cfg: &mut Config, key: &str, value: &str) {
         "theme.bg" => {
             if let Some(c) = parse_color(value) {
                 cfg.theme.bg = c;
+                cfg.theme_overrides |= 1;
             }
         }
         "theme.surface" => {
             if let Some(c) = parse_color(value) {
                 cfg.theme.surface = c;
+                cfg.theme_overrides |= 2;
             }
         }
         "theme.hover" => {
             if let Some(c) = parse_color(value) {
                 cfg.theme.hover = c;
+                cfg.theme_overrides |= 4;
             }
         }
         "theme.accent" => {
             if let Some(c) = parse_color(value) {
                 cfg.theme.accent = c;
+                cfg.theme_overrides |= 8;
             }
         }
         "theme.text" => {
             if let Some(c) = parse_color(value) {
                 cfg.theme.text = c;
+                cfg.theme_overrides |= 16;
             }
         }
         "theme.muted" => {
             if let Some(c) = parse_color(value) {
                 cfg.theme.muted = c;
+                cfg.theme_overrides |= 32;
+            }
+        }
+        keys::LANGUAGE => {
+            if let Some(language) = crate::i18n::Language::parse(value) {
+                cfg.language = language;
+            }
+        }
+        keys::THEME_MODE => {
+            if let Some(mode) = ThemeMode::parse(value) {
+                cfg.theme_mode = mode;
+            }
+        }
+        keys::TASKBAR_POSITION => {
+            if let Some(position) = Position::parse(value) {
+                cfg.position = position;
             }
         }
         "hotkey" => {
@@ -312,6 +414,26 @@ pub fn parse(text: &str) -> Config {
 
 /// Applies environment overrides on top of the file-derived configuration.
 fn apply_env(cfg: &mut Config) {
+    if let Some(language) = std::env::var("MINICON_LANGUAGE")
+        .ok()
+        .and_then(|v| crate::i18n::Language::parse(&v))
+    {
+        cfg.language = language;
+    }
+    if let Some(mode) = std::env::var("MINICON_THEME_MODE")
+        .ok()
+        .as_deref()
+        .and_then(ThemeMode::parse)
+    {
+        cfg.theme_mode = mode;
+    }
+    if let Some(position) = std::env::var("MINICON_TASKBAR_POSITION")
+        .ok()
+        .as_deref()
+        .and_then(Position::parse)
+    {
+        cfg.position = position;
+    }
     if std::env::var_os("MINICON_NO_TASKBAR").is_some() {
         cfg.show_taskbar = false;
     }
@@ -400,7 +522,11 @@ pub fn load() -> Config {
 
 fn runtime() -> &'static Mutex<Config> {
     static R: OnceLock<Mutex<Config>> = OnceLock::new();
-    R.get_or_init(|| Mutex::new(load()))
+    R.get_or_init(|| {
+        let cfg = load();
+        crate::i18n::set(cfg.language);
+        Mutex::new(cfg)
+    })
 }
 
 /// Snapshot of the live configuration (settings UI changes applied).
@@ -422,6 +548,17 @@ pub(crate) fn env_source_with(
     get: impl Fn(&str) -> Option<String>,
 ) -> Option<&'static str> {
     match key {
+        keys::LANGUAGE => get("MINICON_LANGUAGE")
+            .and_then(|v| crate::i18n::Language::parse(&v))
+            .map(|_| "MINICON_LANGUAGE"),
+        keys::THEME_MODE => get("MINICON_THEME_MODE")
+            .as_deref()
+            .and_then(ThemeMode::parse)
+            .map(|_| "MINICON_THEME_MODE"),
+        keys::TASKBAR_POSITION => get("MINICON_TASKBAR_POSITION")
+            .as_deref()
+            .and_then(Position::parse)
+            .map(|_| "MINICON_TASKBAR_POSITION"),
         keys::TASKBAR_SHOW => {
             if get("MINICON_TASKBAR")
                 .as_deref()
@@ -461,13 +598,19 @@ pub(crate) fn env_source(key: &str) -> Option<&'static str> {
 
 pub(crate) fn source(key: &'static str) -> String {
     if let Some(name) = env_source(key) {
-        return format!("由环境变量 {name} 控制");
+        return crate::ui_format!(
+            "由环境变量 {name} 控制",
+            "Controlled by environment variable {name}"
+        );
     }
     static SOURCES: OnceLock<std::collections::BTreeMap<&'static str, &'static str>> =
         OnceLock::new();
     let sources = SOURCES.get_or_init(|| {
         let mut sources = std::collections::BTreeMap::new();
-        for (path, label) in [(conf_path(), "minicon.conf"), (settings_path(), "设置文件")] {
+        for (path, label) in [
+            (conf_path(), "minicon.conf"),
+            (settings_path(), crate::i18n::text("设置文件")),
+        ] {
             if let Some(text) = path.as_deref().and_then(read_text) {
                 for raw in text.lines() {
                     let Some((k, value)) = raw.split_once('=') else {
@@ -475,6 +618,13 @@ pub(crate) fn source(key: &'static str) -> String {
                     };
                     let k = k.trim();
                     let canonical = match k {
+                        keys::LANGUAGE if crate::i18n::Language::parse(value).is_some() => {
+                            keys::LANGUAGE
+                        }
+                        keys::THEME_MODE if ThemeMode::parse(value).is_some() => keys::THEME_MODE,
+                        keys::TASKBAR_POSITION if Position::parse(value).is_some() => {
+                            keys::TASKBAR_POSITION
+                        }
                         "show_taskbar" | keys::TASKBAR_SHOW if parse_bool(value).is_some() => {
                             keys::TASKBAR_SHOW
                         }
@@ -494,20 +644,135 @@ pub(crate) fn source(key: &'static str) -> String {
         }
         sources
     });
-    format!(
+    crate::ui_format!(
         "启动来源：{}",
-        sources.get(key).copied().unwrap_or("内置默认")
+        "Startup source: {}",
+        crate::i18n::text(sources.get(key).copied().unwrap_or("内置默认"))
     )
 }
 
-/// The active theme, cached for the process lifetime.
+/// Active palette, refreshed on preference changes and Windows theme notifications.
 ///
 /// The taskbar, the bar-tip bubble and the settings window each used to wrap
 /// the same config value in their own `OnceLock`. One accessor means one
 /// answer, and a repaint still never touches the config file.
+fn theme_cache() -> &'static Mutex<Theme> {
+    static T: OnceLock<Mutex<Theme>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(effective_theme()))
+}
 pub fn theme() -> Theme {
-    static T: OnceLock<Theme> = OnceLock::new();
-    *T.get_or_init(|| load().theme)
+    *crate::win_util::lock_or_recover(theme_cache())
+}
+pub(crate) fn refresh_theme() -> bool {
+    let resolved = effective_theme();
+    let mut theme = crate::win_util::lock_or_recover(theme_cache());
+    let changed = *theme != resolved;
+    *theme = resolved;
+    changed
+}
+fn effective_theme() -> Theme {
+    use windows::Win32::{
+        Graphics::Gdi::*,
+        UI::{Accessibility::*, WindowsAndMessaging::*},
+    };
+    let mut high = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        if SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            high.cbSize,
+            Some((&mut high as *mut HIGHCONTRASTW).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_ok()
+            && high.dwFlags.0 & HCF_HIGHCONTRASTON.0 != 0
+        {
+            return Theme {
+                bg: GetSysColor(COLOR_BTNFACE),
+                surface: GetSysColor(COLOR_WINDOW),
+                hover: GetSysColor(COLOR_HIGHLIGHT),
+                accent: GetSysColor(COLOR_HIGHLIGHT),
+                text: GetSysColor(COLOR_WINDOWTEXT),
+                muted: GetSysColor(COLOR_WINDOWTEXT),
+            };
+        }
+    }
+    resolve_theme(&current(), system_light())
+}
+fn system_light() -> bool {
+    use windows::{Win32::System::Registry::*, core::PCWSTR};
+    let mut light = 1u32;
+    let mut size = size_of::<u32>() as u32;
+    unsafe {
+        let _ = RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(
+                crate::win_util::wide(
+                    "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                )
+                .as_ptr(),
+            ),
+            PCWSTR(crate::win_util::wide("AppsUseLightTheme").as_ptr()),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut light as *mut u32).cast()),
+            Some(&mut size),
+        );
+    }
+    light != 0
+}
+fn resolve_theme(cfg: &Config, system_light: bool) -> Theme {
+    let rgb = |value: u32| (value & 0xff00) | ((value >> 16) & 0xff) | ((value & 0xff) << 16);
+    let light =
+        cfg.theme_mode == ThemeMode::Light || (cfg.theme_mode == ThemeMode::Auto && system_light);
+    let values = if light {
+        [0xF5F1E9, 0xFFFCF7, 0xE9E0D3, 0x9A5F34, 0x352A24, 0x827568]
+    } else {
+        [0x24211E, 0x2F2A25, 0x40372F, 0xC89864, 0xF0E6D8, 0xB9AB9B]
+    };
+    let custom = [
+        cfg.theme.bg,
+        cfg.theme.surface,
+        cfg.theme.hover,
+        cfg.theme.accent,
+        cfg.theme.text,
+        cfg.theme.muted,
+    ];
+    let color = |index| {
+        if cfg.theme_overrides & (1u8 << index) != 0 {
+            custom[index]
+        } else {
+            rgb(values[index])
+        }
+    };
+    Theme {
+        bg: color(0),
+        surface: color(1),
+        hover: color(2),
+        accent: color(3),
+        text: color(4),
+        muted: color(5),
+    }
+}
+pub fn set_language(language: crate::i18n::Language) -> bool {
+    if update(|c| c.language = language, keys::LANGUAGE, language.as_key()) {
+        crate::i18n::set(language);
+        true
+    } else {
+        false
+    }
+}
+pub fn set_theme_mode(mode: ThemeMode) -> bool {
+    update(|c| c.theme_mode = mode, keys::THEME_MODE, mode.as_key())
+}
+pub fn set_position(position: Position) -> bool {
+    update(
+        |c| c.position = position,
+        keys::TASKBAR_POSITION,
+        position.as_key(),
+    )
 }
 
 /// Replaces the live config and persists the single changed key.
@@ -599,6 +864,72 @@ pub fn upsert(text: &str, key: &str, value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn language_preference_defaults_to_english_and_round_trips() {
+        use crate::i18n::Language;
+        assert_eq!(parse("").language, Language::En);
+        assert_eq!(parse("ui.language = invalid").language, Language::En);
+        for language in [Language::En, Language::Zh] {
+            let text = upsert("unknown = keep\n", keys::LANGUAGE, language.as_key());
+            assert_eq!(parse(&text).language, language);
+            assert!(text.contains("unknown = keep"));
+        }
+        assert_eq!(
+            env_source_with(keys::LANGUAGE, |_| Some("bad".into())),
+            None
+        );
+        assert_eq!(
+            env_source_with(keys::LANGUAGE, |_| Some("zh".into())),
+            Some("MINICON_LANGUAGE")
+        );
+    }
+    #[test]
+    fn appearance_preferences_round_trip_and_ignore_invalid_values() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Auto] {
+            for edge in [
+                Position::Bottom,
+                Position::Top,
+                Position::Left,
+                Position::Right,
+            ] {
+                let text = upsert(
+                    &upsert("# keep\nunknown = yes\n", keys::THEME_MODE, mode.as_key()),
+                    keys::TASKBAR_POSITION,
+                    edge.as_key(),
+                );
+                let cfg = parse(&text);
+                assert_eq!(cfg.theme_mode, mode);
+                assert_eq!(cfg.position, edge);
+                assert!(text.contains("unknown = yes"));
+            }
+        }
+        let cfg = parse("appearance.mode = bad\ntaskbar.position = bad\n");
+        assert_eq!(cfg.theme_mode, ThemeMode::Auto);
+        assert_eq!(cfg.position, Position::Bottom);
+        assert_eq!(
+            env_source_with(keys::THEME_MODE, |_| Some("bad".into())),
+            None
+        );
+        assert_eq!(
+            env_source_with(keys::TASKBAR_POSITION, |_| Some("left".into())),
+            Some("MINICON_TASKBAR_POSITION")
+        );
+    }
+    #[test]
+    fn auto_palette_follows_system_and_explicit_colors_survive_mode_changes() {
+        let auto = Config::default();
+        let light = parse("appearance.mode = light\n");
+        let dark = parse("appearance.mode = dark\n");
+        assert_eq!(resolve_theme(&auto, true), resolve_theme(&light, false));
+        assert_eq!(resolve_theme(&auto, false), resolve_theme(&dark, true));
+        assert_ne!(resolve_theme(&auto, true), resolve_theme(&auto, false));
+        let custom = parse("appearance.mode = dark\ntheme.bg = #112233\n");
+        assert_eq!(resolve_theme(&custom, true).bg, 0x332211);
+        assert_eq!(
+            resolve_theme(&custom, true).text,
+            resolve_theme(&dark, true).text
+        );
+    }
     #[test]
     fn effective_environment_sources_follow_parser_precedence() {
         let vars = [

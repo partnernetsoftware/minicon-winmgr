@@ -159,7 +159,7 @@ pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                     Job::Record(input) => {
                         let error = history.record_success(&input).err().map(|error| {
                             tracing::warn!(%error,"Run history persistence failed");
-                            "历史保存失败，本次仍可使用，重启后可能丢失。".into()
+                            crate::i18n::text("历史保存失败，本次仍可使用，重启后可能丢失。").into()
                         });
                         let _ = history_reply.send(Reply::History(
                             history.entries().to_vec(),
@@ -170,7 +170,7 @@ pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Job::Clear => {
                         let error = history.clear().err().map(|_| {
-                            "本次历史已清空，磁盘历史清除失败，重启后可能恢复。请再次清空重试。"
+                            crate::i18n::text("本次历史已清空，磁盘历史清除失败，重启后可能恢复。请再次清空重试。")
                                 .into()
                         });
                         let retry = error.is_some();
@@ -188,7 +188,7 @@ pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                 let result = if com.is_err() {
                     Err(crate::shell_launch::LaunchError {
                         code: None,
-                        message: "启动服务初始化失败，请重启后重试。".into(),
+                        message: crate::i18n::text("启动服务初始化失败，请重启后重试。").into(),
                     })
                 } else {
                     crate::shell_launch::parse_command(&input)
@@ -230,7 +230,7 @@ pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             PCWSTR(class.as_ptr()),
-            PCWSTR(wide("运行").as_ptr()),
+            PCWSTR(wide(crate::i18n::text("运行")).as_ptr()),
             WS_POPUP | WS_CAPTION | WS_SYSMENU,
             0,
             0,
@@ -280,8 +280,13 @@ pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             })
         });
         for (id, class, label, style) in [
-            (HELP, "STATIC", "输入程序、文件夹、文档或网址", 0),
-            (LABEL, "STATIC", "打开(&O)：", 0),
+            (
+                HELP,
+                "STATIC",
+                crate::i18n::text("输入程序、文件夹、文档或网址"),
+                0,
+            ),
+            (LABEL, "STATIC", crate::i18n::text("打开(&O)："), 0),
             (
                 EDIT,
                 "EDIT",
@@ -308,19 +313,19 @@ pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             (
                 CLEAR,
                 "BUTTON",
-                "清空历史",
+                crate::i18n::text("清空历史"),
                 BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
             ),
             (
                 RUN,
                 "BUTTON",
-                "运行",
+                crate::i18n::text("运行"),
                 BS_DEFPUSHBUTTON as u32 | WS_TABSTOP.0,
             ),
             (
                 CANCEL,
                 "BUTTON",
-                "取消",
+                crate::i18n::text("取消"),
                 BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
             ),
         ] {
@@ -652,6 +657,7 @@ fn show() {
         }
     }
     unsafe {
+        crate::appearance::install(window());
         let _ = ShowWindow(window(), SW_SHOW);
         let _ = crate::win_util::force_foreground(window());
         let _ = SetFocus(Some(control(EDIT)));
@@ -768,7 +774,7 @@ fn run() {
     .unwrap_or(false);
     if queued {
         expand(false);
-        status("正在打开…");
+        status(crate::i18n::text("正在打开…"));
         enabled();
     }
 }
@@ -797,9 +803,9 @@ fn poll() {
                     let label = format!(
                         "[{}] {}",
                         if item.source == CandidateSource::History {
-                            "最近"
+                            crate::i18n::text("最近")
                         } else {
-                            "路径"
+                            crate::i18n::text("路径")
                         },
                         item.text
                     );
@@ -856,7 +862,7 @@ fn poll() {
                     status(&error);
                 } else if cleared {
                     with(|s| s.notice = None);
-                    status("历史已清空");
+                    status(crate::i18n::text("历史已清空"));
                 }
                 enabled();
             }
@@ -905,7 +911,7 @@ fn poll() {
             s.waiting = None;
             s.query = s.query.wrapping_add(1);
         });
-        status("路径建议暂不可用");
+        status(crate::i18n::text("路径建议暂不可用"));
     }
     with(|s| {
         if let Some(job) = s.actions.pop_front() {
@@ -1064,7 +1070,7 @@ fn clear() {
         s.clear_retry = true;
     });
     expand(false);
-    status("正在清空历史…");
+    status(crate::i18n::text("正在清空历史…"));
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {

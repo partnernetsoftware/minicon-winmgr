@@ -3,14 +3,17 @@
 // to the parent console on demand (see `attach_console_if_needed`).
 #![windows_subsystem = "windows"]
 
+mod appearance;
 mod bar_tip;
 mod config;
+mod dock;
 mod dwm;
 mod folder_stack;
 mod grouping;
 mod hotkeys;
 mod hover_preview;
 mod hub;
+mod i18n;
 mod launcher;
 mod launcher_ui;
 mod logging;
@@ -101,7 +104,9 @@ fn main() {
                 windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
                     None,
                     windows::core::PCWSTR(win_util::wide(&error).as_ptr()),
-                    windows::core::PCWSTR(win_util::wide("无法以普通权限启动").as_ptr()),
+                    windows::core::PCWSTR(
+                        win_util::wide(crate::i18n::text("无法以普通权限启动")).as_ptr(),
+                    ),
                     windows::Win32::UI::WindowsAndMessaging::MB_OK
                         | windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
                 );

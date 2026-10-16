@@ -25,21 +25,20 @@ use windows::Win32::Foundation::{
     COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
-    DEFAULT_CHARSET, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_TOP, DT_VCENTER, DrawTextW, EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ,
-    InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor,
-    TRANSPARENT,
+    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DT_CENTER,
+    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_TOP, DT_VCENTER, DrawTextW,
+    EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS,
+    PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, RegisterHotKey, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    UnregisterHotKey, VIRTUAL_KEY, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_ESCAPE,
-    VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT,
+    UnregisterHotKey, VIRTUAL_KEY, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_DOWN,
+    VK_ESCAPE, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::Shell::{
-    ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_POSCHANGED, APPBARDATA,
-    SHAppBarMessage,
+    ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
+    ABN_POSCHANGED, APPBARDATA, SHAppBarMessage,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyWindow, DrawIconEx,
@@ -61,6 +60,13 @@ use crate::win_util::{guard_abi, lock_or_recover, wide};
 
 // --- layout tokens --------------------------------------------------------
 const BAR_H: i32 = 36;
+const SIDE_W: i32 = 180;
+fn vertical() -> bool {
+    crate::config::current().position.vertical()
+}
+fn thickness() -> i32 {
+    if vertical() { SIDE_W } else { BAR_H }
+}
 const PAD: i32 = 10;
 /// Spacing between adjacent elements of the bar. Primarily the gap between
 /// task buttons, but it is the bar's shared token: the quick-launch strip, the
@@ -208,8 +214,6 @@ fn density_for(budget: i32, prev: Density) -> Density {
 
 // --- palette: `crate::config::theme()`, cached process-wide ----------------
 
-const COLORREF_BLACK: COLORREF = COLORREF(0);
-
 // WM_MOUSELEAVE lives in Win32::UI::Controls, which we don't pull in.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
@@ -237,12 +241,11 @@ static ACRYLIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// docking is unavailable, i.e. no explorer AppBar broker). Restored on teardown.
 static ORIG_WORKAREA: Mutex<Option<RECT>> = Mutex::new(None);
 
-/// Reserves the bottom strip by shrinking the work area so maximized windows
-/// stop above our bar when AppBar docking failed. Captures the original area
+/// Reserves the selected edge so maximized windows avoid our bar when
+/// AppBar docking failed. Captures the original area
 /// once so it can be restored faithfully, and persists both rectangles so a run
 /// that is *killed* (task manager, `shellctl stop`) can still be recovered.
-fn reserve_workarea(area: (i32, i32, i32, i32)) {
-    let (x, y, w, h) = area;
+fn reserve_workarea(_area: (i32, i32, i32, i32)) {
     let mut guard = lock_or_recover(&ORIG_WORKAREA);
     // SAFETY: `SystemParametersInfoW` reads/writes the RECT we point at, which
     // outlives the call; these are process-global work-area queries.
@@ -262,12 +265,11 @@ fn reserve_workarea(area: (i32, i32, i32, i32)) {
             }
             *guard = Some(current);
         }
-        let mut target = RECT {
-            left: x,
-            top: y,
-            right: x + w,
-            bottom: y + h - BAR_H,
-        };
+        let mut target = crate::dock::reserve(
+            guard.unwrap(),
+            crate::config::current().position,
+            thickness(),
+        );
         if let Err(err) = SystemParametersInfoW(
             SPI_SETWORKAREA,
             0,
@@ -283,7 +285,7 @@ fn reserve_workarea(area: (i32, i32, i32, i32)) {
             save_workarea_state(&orig, &target);
         }
     }
-    tracing::info!(bottom = y + h - BAR_H, "work area reserved above the bar");
+    tracing::info!(position = ?crate::config::current().position, "work area reserved beside the bar");
 }
 
 /// Restores the work area captured by [`reserve_workarea`], if any.
@@ -440,8 +442,14 @@ pub fn recover_workarea() {
     clear_workarea_state();
 }
 
-fn hbrush(v: isize) -> HBRUSH {
-    HBRUSH(v as *mut core::ffi::c_void)
+fn hbrush(dc: HDC, v: isize) -> HBRUSH {
+    unsafe {
+        windows::Win32::Graphics::Gdi::SetDCBrushColor(dc, COLORREF(v as u32));
+        HBRUSH(
+            windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::DC_BRUSH)
+                .0,
+        )
+    }
 }
 
 fn hwnd_from(v: isize) -> HWND {
@@ -476,6 +484,8 @@ struct BarEntry {
     hwnd: isize,
     /// Monitor work area this bar is docked to.
     area: (i32, i32, i32, i32),
+    position: crate::config::Position,
+    appbar: bool,
     rects: Vec<RECT>,
     /// Overflow button rect, shown when some task buttons do not fit.
     overflow: Option<RECT>,
@@ -522,6 +532,9 @@ fn tray_icons() -> &'static Mutex<Vec<crate::tray::TrayItem>> {
 /// The single source of the strip's geometry on the message thread: the painter
 /// and every mouse handler call this, so their coordinate maths cannot diverge.
 fn tray_layout(client: RECT) -> crate::tray_bar::Layout {
+    if vertical() {
+        return crate::tray_bar::Layout::new(client.bottom - BAR_H * 2, client.right - PAD, BAR_H);
+    }
     let right = client.right - PAD - CLOCK_W - PAD;
     crate::tray_bar::Layout::new(BTN_TOP, right, BAR_H - 2 * BTN_TOP)
 }
@@ -572,7 +585,13 @@ fn tray_tooltip(key: isize, index: usize) -> Option<(String, RECT)> {
 }
 
 fn notification_parts(client: RECT) -> (Vec<crate::tray::TrayItem>, Vec<crate::tray::TrayItem>) {
-    let capacity = ((client.right - RIGHT_W - 200).max(0)
+    let capacity = ((client.right
+        - if vertical() {
+            PAD * 2 + crate::tray_bar::CELL
+        } else {
+            RIGHT_W + 200
+        })
+    .max(0)
         / (crate::tray_bar::CELL + crate::tray_bar::GAP))
         .min(4) as usize;
     let mut visible = Vec::new();
@@ -608,12 +627,28 @@ fn notification_arrow(client: RECT) -> Option<RECT> {
         - crate::tray_bar::GAP;
     Some(RECT {
         left: right - crate::tray_bar::CELL,
-        top: 0,
+        top: if vertical() {
+            tray_layout(client).top
+        } else {
+            0
+        },
         right,
-        bottom: BAR_H,
+        bottom: if vertical() {
+            tray_layout(client).top + BAR_H
+        } else {
+            BAR_H
+        },
     })
 }
 fn clock_rect(client: RECT) -> RECT {
+    if vertical() {
+        return RECT {
+            left: PAD,
+            top: (client.bottom - BAR_H).max(0),
+            right: client.right - PAD,
+            bottom: client.bottom,
+        };
+    }
     let (left, right) = clock_span(client.right);
     RECT {
         left,
@@ -720,22 +755,15 @@ struct Brushes {
     accent: isize,
 }
 
-fn brushes() -> &'static Brushes {
-    static B: OnceLock<Brushes> = OnceLock::new();
-    B.get_or_init(|| {
-        // SAFETY: solid brushes are process-lifetime GDI objects, never freed.
-        unsafe {
-            Brushes {
-                bg: CreateSolidBrush(COLORREF(theme().bg)).0 as isize,
-                // Pure black doubles as the "glass" fill when the frame is
-                // extended into the client area (DWM backdrop shows through).
-                glass: CreateSolidBrush(COLORREF_BLACK).0 as isize,
-                surface: CreateSolidBrush(COLORREF(theme().surface)).0 as isize,
-                hover: CreateSolidBrush(COLORREF(theme().hover)).0 as isize,
-                accent: CreateSolidBrush(COLORREF(theme().accent)).0 as isize,
-            }
-        }
-    })
+fn brushes() -> Brushes {
+    let t = theme();
+    Brushes {
+        bg: t.bg as isize,
+        glass: 0,
+        surface: t.surface as isize,
+        hover: t.hover as isize,
+        accent: t.accent as isize,
+    }
 }
 
 fn font() -> isize {
@@ -882,6 +910,17 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         let mut acrylic_ok = acrylic_wanted;
 
         for (i, (x, y, w, h)) in areas.into_iter().enumerate() {
+            let position = crate::config::current().position;
+            let rect = crate::dock::bounds(
+                RECT {
+                    left: x,
+                    top: y,
+                    right: x + w,
+                    bottom: y + h,
+                },
+                position,
+                thickness(),
+            );
             let hwnd = CreateWindowExW(
                 // `WS_EX_NOACTIVATE` is what makes the bar behave like the stock
                 // shell: clicking a button must not deactivate the app the user
@@ -895,10 +934,10 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(class_title.as_ptr()),
                 WS_POPUP | WS_VISIBLE,
-                x,
-                y + h - BAR_H,
-                w,
-                BAR_H,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
                 None,
                 None,
                 Some(hinstance),
@@ -908,12 +947,20 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
             lock_or_recover(bars()).push(BarEntry {
                 hwnd: hwnd.0 as isize,
                 area: (x, y, w, h),
+                position,
                 ..Default::default()
             });
             tracing::info!(hwnd = ?hwnd, index = i, "taskbar window created");
 
             // Dock as an AppBar so maximized windows stop above the bar.
-            if register_appbar(hwnd, (x, y, w, h)) {
+            let appbar = register_appbar(hwnd, (x, y, w, h));
+            if let Some(bar) = lock_or_recover(bars())
+                .iter_mut()
+                .find(|bar| bar.hwnd == hwnd.0 as isize)
+            {
+                bar.appbar = appbar;
+            }
+            if appbar {
                 tracing::info!(hwnd = ?hwnd, "taskbar docked as AppBar");
             } else {
                 tracing::warn!(hwnd = ?hwnd, "AppBar registration failed; reserving work area instead");
@@ -963,7 +1010,7 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Registers `hwnd` as an AppBar docked to the bottom edge, then positions it
+/// Registers `hwnd` as an AppBar on the configured edge, then positions it
 /// within `area` (a monitor work area). Returns false if registration failed.
 fn register_appbar(hwnd: HWND, area: (i32, i32, i32, i32)) -> bool {
     // SAFETY: `abd` is a properly sized APPBARDATA with a live window handle.
@@ -982,8 +1029,20 @@ fn register_appbar(hwnd: HWND, area: (i32, i32, i32, i32)) -> bool {
     true
 }
 
-/// Repositions a registered AppBar to the bottom of `area`, reserving BAR_H.
+/// Repositions a registered AppBar on the configured edge with its thickness.
 fn set_appbar_pos(hwnd: HWND, area: (i32, i32, i32, i32)) {
+    thread_local! { static POSITIONING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    if POSITIONING.replace(true) {
+        return;
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            POSITIONING.set(false);
+        }
+    }
+    let _reset = Reset;
+    let position = crate::config::current().position;
     let (x, y, w, h) = area;
     // SAFETY: `abd` is a properly sized APPBARDATA for a registered AppBar.
     unsafe {
@@ -991,7 +1050,12 @@ fn set_appbar_pos(hwnd: HWND, area: (i32, i32, i32, i32)) {
             cbSize: std::mem::size_of::<APPBARDATA>() as u32,
             hWnd: hwnd,
             uCallbackMessage: APPBAR_CALLBACK,
-            uEdge: ABE_BOTTOM,
+            uEdge: match position {
+                crate::config::Position::Bottom => ABE_BOTTOM,
+                crate::config::Position::Top => ABE_TOP,
+                crate::config::Position::Left => ABE_LEFT,
+                crate::config::Position::Right => ABE_RIGHT,
+            },
             rc: RECT {
                 left: x,
                 top: y,
@@ -1006,7 +1070,7 @@ fn set_appbar_pos(hwnd: HWND, area: (i32, i32, i32, i32)) {
                 "AppBar: ABM_QUERYPOS refused; using the full screen rect"
             );
         }
-        abd.rc.top = abd.rc.bottom - BAR_H;
+        abd.rc = crate::dock::bounds(abd.rc, position, thickness());
         if SHAppBarMessage(ABM_SETPOS, &mut abd) == 0 {
             tracing::warn!(
                 ?hwnd,
@@ -1187,7 +1251,7 @@ fn reference_client_width() -> i32 {
                 let _ = GetClientRect(hwnd_from(b.hwnd), &mut r);
             }
             if r.right > 0 {
-                return r.right;
+                return if vertical() { r.bottom } else { r.right };
             }
         }
     }
@@ -1234,8 +1298,134 @@ fn hide_pins(avail_with_pins: i32, avail_without_pins: i32, n: usize, gap: i32) 
     overflows(avail_with_pins, n, gap) && !overflows(avail_without_pins, n, gap)
 }
 
+fn show_overflow(hwnd: HWND, hidden_from: usize) {
+    let entries: Vec<crate::task_list::Entry> = lock_or_recover(tasks())
+        .iter()
+        .skip(hidden_from)
+        .map(|t| crate::task_list::Entry {
+            label: t.label.clone(),
+            hwnd: t.hwnd,
+        })
+        .collect();
+    if let Some(target) = crate::task_list::popup(hwnd, &entries) {
+        activate(hwnd_from(target));
+    }
+}
+fn reposition() {
+    let position = crate::config::current().position;
+    let changed: Vec<_> = {
+        let mut bars = lock_or_recover(bars());
+        bars.iter_mut()
+            .enumerate()
+            .filter_map(|(i, b)| {
+                if b.position == position {
+                    return None;
+                }
+                b.position = position;
+                Some((i, b.hwnd, b.area, b.appbar))
+            })
+            .collect()
+    };
+    if changed.is_empty() {
+        return;
+    }
+    cancel_hover();
+    // Keep the lifetime baseline. Restoring and recapturing between edges can
+    // capture an intermediate work area adjusted by another shell participant.
+    // reserve_workarea replaces our reservation from that baseline atomically.
+    for (i, key, area, appbar) in changed {
+        if appbar {
+            set_appbar_pos(hwnd_from(key), area)
+        } else {
+            let (x, y, w, h) = area;
+            let r = crate::dock::bounds(
+                RECT {
+                    left: x,
+                    top: y,
+                    right: x + w,
+                    bottom: y + h,
+                },
+                position,
+                thickness(),
+            );
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd_from(key),
+                    Some(HWND_TOPMOST),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOACTIVATE,
+                );
+            }
+            if i == 0 {
+                reserve_workarea(area)
+            }
+        }
+    }
+}
+fn settings_rect(client: RECT) -> RECT {
+    RECT {
+        left: PAD,
+        top: BTN_TOP,
+        right: if vertical() {
+            client.right - PAD - grip_w()
+        } else {
+            PAD + SETTINGS_W
+        },
+        bottom: BAR_H - BTN_TOP,
+    }
+}
+fn vertical_layout(width: i32, start: i32, end: i32, n: usize) -> ButtonLayout {
+    let capacity = ((end - start).max(0) / BAR_H) as usize;
+    let visible = if n > capacity {
+        capacity.saturating_sub(1)
+    } else {
+        n
+    };
+    let row = |i: usize| RECT {
+        left: PAD,
+        top: start + i as i32 * BAR_H,
+        right: (width - PAD).max(PAD),
+        bottom: start + i as i32 * BAR_H + BAR_H - BTN_GAP,
+    };
+    ButtonLayout {
+        rects: (0..visible).map(row).collect(),
+        overflow: if n > visible && capacity > 0 {
+            Some(row(visible))
+        } else {
+            None
+        },
+        hidden_from: visible,
+        density: Density::Full,
+    }
+}
+
 /// Re-enumerates task windows, recomputes every bar's layout, and repaints.
 pub fn refresh() {
+    thread_local! { static REFRESHING:std::cell::Cell<bool>=const{std::cell::Cell::new(false)}; static PENDING:std::cell::Cell<bool>=const{std::cell::Cell::new(false)}; }
+    if REFRESHING.replace(true) {
+        PENDING.set(true);
+        return;
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REFRESHING.set(false);
+        }
+    }
+    let _reset = Reset;
+    loop {
+        PENDING.set(false);
+        refresh_inner();
+        if !PENDING.get() {
+            break;
+        }
+    }
+}
+fn refresh_inner() {
+    reposition();
     crate::hover_preview::clear_invalid_target();
     // Window handles are recycled, so a cached icon may belong to a window that
     // has since been closed. Drop the cache before re-enumerating. Path icons
@@ -1301,11 +1491,18 @@ pub fn refresh() {
         // `never` normally keeps one button per window — but once the density
         // would drop to icon-only, identical squares for the same application
         // become indistinguishable, so the application folds locally (+N).
-        crate::config::MergeStrategy::Never => fold_needed(fold_avail, windows.len(), BTN_GAP),
+        crate::config::MergeStrategy::Never => {
+            !vertical() && fold_needed(fold_avail, windows.len(), BTN_GAP)
+        }
         crate::config::MergeStrategy::Always => true,
         // Group only once a per-window bar would overflow at the densest tier.
         crate::config::MergeStrategy::WhenFull => {
-            would_overflow(reference_client_width(), windows.len(), tray_w)
+            if vertical() {
+                windows.len().saturating_mul(BAR_H as usize)
+                    > (reference_client_width() - 180).max(0) as usize
+            } else {
+                would_overflow(reference_client_width(), windows.len(), tray_w)
+            }
         }
     };
     let tasks_now = if use_grouping {
@@ -1367,25 +1564,50 @@ pub fn refresh() {
         unsafe {
             let _ = GetClientRect(hwnd, &mut client);
         }
-        bar.pin_rects = if hide_pins_now {
-            Vec::new()
+        let bl = if vertical() {
+            let count = lock_or_recover(pins()).len();
+            let cols = ((client.right - 2 * PAD)
+                / (crate::quick_launch::CELL + crate::quick_launch::PIN_GAP))
+                .max(1) as usize;
+            let stride = crate::quick_launch::CELL + crate::quick_launch::PIN_GAP;
+            bar.pin_rects = (0..count)
+                .map(|i| {
+                    let x = PAD + (i % cols) as i32 * stride;
+                    let y = BAR_H + PAD + (i / cols) as i32 * stride;
+                    RECT {
+                        left: x,
+                        top: y,
+                        right: x + crate::quick_launch::CELL,
+                        bottom: y + crate::quick_launch::CELL,
+                    }
+                })
+                .collect();
+            let start = BAR_H
+                + PAD
+                + count.div_ceil(cols) as i32 * stride
+                + if count > 0 { PAD } else { 0 };
+            vertical_layout(client.right, start, client.bottom - BAR_H * 2 - PAD, n)
         } else {
-            let pin_count = lock_or_recover(pins()).len();
-            crate::quick_launch::layout(
-                pins_left(),
-                pin_count,
-                crate::quick_launch::CELL,
-                crate::quick_launch::PIN_GAP,
-                BAR_H,
+            bar.pin_rects = if hide_pins_now {
+                Vec::new()
+            } else {
+                let pin_count = lock_or_recover(pins()).len();
+                crate::quick_launch::layout(
+                    pins_left(),
+                    pin_count,
+                    crate::quick_launch::CELL,
+                    crate::quick_launch::PIN_GAP,
+                    BAR_H,
+                )
+            };
+            layout(
+                tasks_left,
+                client.right,
+                n,
+                notification_width(client),
+                bar.density,
             )
         };
-        let bl = layout(
-            tasks_left,
-            client.right,
-            n,
-            notification_width(client),
-            bar.density,
-        );
         bar.rects = bl.rects;
         bar.overflow = bl.overflow;
         bar.hidden_from = bl.hidden_from;
@@ -1396,8 +1618,9 @@ pub fn refresh() {
         if bar.hover.is_some_and(|h| h >= n) {
             bar.hover = None;
         }
-        if bar.selected.is_some_and(|s| s >= n) {
-            bar.selected = n.checked_sub(1);
+        let navigable = bar.rects.len() + usize::from(bar.overflow.is_some());
+        if bar.selected.is_some_and(|s| s >= navigable) {
+            bar.selected = navigable.checked_sub(1);
         }
         // SAFETY: same as above.
         unsafe {
@@ -1563,7 +1786,9 @@ unsafe extern "system" fn wndproc_inner(
                 crate::bar_tip::hide();
                 let want = tray_hover.is_some()
                     || (hover.is_some()
-                        && (density.is_icon_only() || crate::hover_preview::enabled()));
+                        && (vertical()
+                            || density.is_icon_only()
+                            || crate::hover_preview::enabled()));
                 if want {
                     let _ = unsafe { SetTimer(Some(hwnd), HOVER_TIMER_ID, HOVER_DELAY_MS, None) };
                 }
@@ -1603,7 +1828,7 @@ unsafe extern "system" fn wndproc_inner(
                         right: r.right + wr.left,
                         bottom: r.bottom + wr.top,
                     };
-                    if density.is_icon_only() {
+                    if vertical() || density.is_icon_only() {
                         // A title-less square gets a label bubble (always).
                         if let Some(label) =
                             lock_or_recover(tasks()).get(i).map(|t| t.label.clone())
@@ -1663,7 +1888,7 @@ unsafe extern "system" fn wndproc_inner(
                 show_notifications(hwnd, client, true);
                 return LRESULT(0);
             }
-            if clock_hit(client.right, x) && contains(clock_rect(client)) {
+            if (vertical() || clock_hit(client.right, x)) && contains(clock_rect(client)) {
                 show_notifications(hwnd, client, false);
                 return LRESULT(0);
             }
@@ -1678,7 +1903,7 @@ unsafe extern "system" fn wndproc_inner(
                 return LRESULT(0);
             }
             // Settings button (leftmost) opens the settings window.
-            if x < PAD + SETTINGS_W {
+            if contains(settings_rect(client)) {
                 crate::settings_ui::toggle_from(hwnd);
                 return LRESULT(0);
             }
@@ -1686,8 +1911,12 @@ unsafe extern "system" fn wndproc_inner(
             // [`grip_w`]), so this only fires for a config-file opt-in — and the
             // slot has zero width unless that opt-in is set.
             if crate::config::current().start_menu
-                && x >= PAD + SETTINGS_W
-                && x < PAD + SETTINGS_W + grip_w()
+                && contains(RECT {
+                    left: settings_rect(client).right,
+                    top: BTN_TOP,
+                    right: settings_rect(client).right + grip_w(),
+                    bottom: BAR_H - BTN_TOP,
+                })
             {
                 crate::start_menu::toggle();
                 return LRESULT(0);
@@ -1702,17 +1931,7 @@ unsafe extern "system" fn wndproc_inner(
             };
             // Overflow button: popup over the tasks that did not fit.
             if overflow.is_some_and(|r| crate::win_util::rect_contains(r, x, y)) {
-                let entries: Vec<crate::task_list::Entry> = lock_or_recover(tasks())
-                    .iter()
-                    .skip(hidden_from)
-                    .map(|t| crate::task_list::Entry {
-                        label: t.label.clone(),
-                        hwnd: t.hwnd,
-                    })
-                    .collect();
-                if let Some(target) = crate::task_list::popup(hwnd, &entries) {
-                    activate(hwnd_from(target));
-                }
+                show_overflow(hwnd, hidden_from);
                 return LRESULT(0);
             }
             // Quick-launch pins.
@@ -1885,6 +2104,11 @@ unsafe extern "system" fn wndproc_inner(
             }
             LRESULT(0)
         }
+        windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE
+        | windows::Win32::UI::WindowsAndMessaging::WM_THEMECHANGED => {
+            crate::appearance::refresh();
+            LRESULT(0)
+        }
         WM_KEYDOWN => {
             let vk = wparam.0 as u16;
             let n = lock_or_recover(tasks()).len();
@@ -1903,11 +2127,28 @@ unsafe extern "system" fn wndproc_inner(
                         tracing::debug!(index = i, "keyboard digit jump");
                     } else {
                         match vk {
-                            k if k == VK_LEFT.0 || k == VK_RIGHT.0 => {
-                                bar.selected = step_index(bar.selected, n, k == VK_RIGHT.0);
+                            k if k == VK_LEFT.0
+                                || k == VK_RIGHT.0
+                                || k == VK_UP.0
+                                || k == VK_DOWN.0 =>
+                            {
+                                bar.selected = step_index(
+                                    bar.selected,
+                                    bar.rects.len() + usize::from(bar.overflow.is_some()),
+                                    k == VK_RIGHT.0 || k == VK_DOWN.0,
+                                );
                                 changed = true;
                             }
                             k if k == VK_RETURN.0 => {
+                                if bar.overflow.is_some() && bar.selected == Some(bar.hidden_from) {
+                                    let from = bar.hidden_from;
+                                    bar.selected = None;
+                                    drop(bars);
+                                    show_overflow(hwnd, from);
+                                    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                                    return LRESULT(0);
+                                }
+
                                 let target = bar
                                     .selected
                                     .and_then(|i| lock_or_recover(tasks()).get(i).map(|t| t.hwnd));
@@ -2021,17 +2262,16 @@ unsafe fn paint(hwnd: HWND) {
         } else {
             br.bg
         };
-        FillRect(hdc, &client, hbrush(bg));
+        FillRect(hdc, &client, hbrush(hdc, bg));
 
         // Settings button (left of the menu dot): a three-slider glyph.
-        let set_rect = RECT {
-            left: PAD,
-            top: BTN_TOP,
-            right: PAD + SETTINGS_W,
-            bottom: BAR_H - BTN_TOP,
+        let set_rect = settings_rect(client);
+        FillRect(hdc, &set_rect, hbrush(hdc, br.surface));
+        let scx = if vertical() {
+            PAD + SETTINGS_W / 2
+        } else {
+            (set_rect.left + set_rect.right) / 2
         };
-        FillRect(hdc, &set_rect, hbrush(br.surface));
-        let scx = (set_rect.left + set_rect.right) / 2;
         for (k, off) in [4, -3, 1].into_iter().enumerate() {
             let y = BAR_H / 2 - 5 + k as i32 * 5;
             let line = RECT {
@@ -2040,14 +2280,14 @@ unsafe fn paint(hwnd: HWND) {
                 right: scx + 6,
                 bottom: y + 1,
             };
-            FillRect(hdc, &line, hbrush(br.accent));
+            FillRect(hdc, &line, hbrush(hdc, br.accent));
             let knob = RECT {
                 left: scx + off - 1,
                 top: y - 2,
                 right: scx + off + 2,
                 bottom: y + 3,
             };
-            FillRect(hdc, &knob, hbrush(br.accent));
+            FillRect(hdc, &knob, hbrush(hdc, br.accent));
         }
 
         // Start-menu entry: a small accent dot in the slot right of settings.
@@ -2057,17 +2297,29 @@ unsafe fn paint(hwnd: HWND) {
         // zero width otherwise, so nothing is reserved and no dead gap remains.
         if crate::config::current().start_menu {
             let dot = RECT {
-                left: PAD + SETTINGS_W + 3,
+                left: settings_rect(client).right + 3,
                 top: BAR_H / 2 - 3,
-                right: PAD + SETTINGS_W + 9,
+                right: settings_rect(client).right + 9,
                 bottom: BAR_H / 2 + 3,
             };
-            FillRect(hdc, &dot, hbrush(br.accent));
+            FillRect(hdc, &dot, hbrush(hdc, br.accent));
         }
 
         let old_font = SelectObject(hdc, HGDIOBJ(font() as *mut core::ffi::c_void));
         SetBkMode(hdc, TRANSPARENT);
 
+        if vertical() {
+            SetTextColor(hdc, COLORREF(theme().text));
+            let mut title: Vec<u16> = crate::i18n::text("设置").encode_utf16().collect();
+            let mut r = set_rect;
+            r.left += SETTINGS_W + PAD;
+            DrawTextW(
+                hdc,
+                &mut title,
+                &mut r,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
         let fg = GetForegroundWindow().0 as isize;
         let tasks = lock_or_recover(tasks());
         let (rects, overflow, pin_rects, hover, pin_hover, selected, density) = {
@@ -2106,7 +2358,7 @@ unsafe fn paint(hwnd: HWND) {
             } else {
                 br.surface
             };
-            FillRect(hdc, &r, hbrush(brush));
+            FillRect(hdc, &r, hbrush(hdc, brush));
 
             if active {
                 let marker = RECT {
@@ -2115,12 +2367,12 @@ unsafe fn paint(hwnd: HWND) {
                     right: r.left + 3,
                     bottom: r.bottom,
                 };
-                FillRect(hdc, &marker, hbrush(br.accent));
+                FillRect(hdc, &marker, hbrush(hdc, br.accent));
             }
 
             // Keyboard cursor: a 1px accent outline around the selected button.
             if is_selected {
-                FrameRect(hdc, &r, hbrush(br.accent));
+                FrameRect(hdc, &r, hbrush(hdc, br.accent));
             }
 
             // Identity slot: the application icon. Drawn at its natural colors —
@@ -2238,7 +2490,7 @@ unsafe fn paint(hwnd: HWND) {
             } else {
                 br.surface
             };
-            FillRect(hdc, r, hbrush(fill));
+            FillRect(hdc, r, hbrush(hdc, fill));
             let Some((label, icon)) = pin_items.get(i) else {
                 continue;
             };
@@ -2274,7 +2526,10 @@ unsafe fn paint(hwnd: HWND) {
 
         // Overflow button: shown when some task buttons do not fit.
         if let Some(r) = overflow {
-            FillRect(hdc, &r, hbrush(br.surface));
+            FillRect(hdc, &r, hbrush(hdc, br.surface));
+            if selected == Some(rects.len()) {
+                FrameRect(hdc, &r, hbrush(hdc, br.accent));
+            }
             SetTextColor(hdc, COLORREF(theme().muted));
             let mut text: Vec<u16> = "»".encode_utf16().collect();
             let mut tr = r;
@@ -2314,12 +2569,23 @@ unsafe fn paint(hwnd: HWND) {
             now.wHour,
             now.wMinute
         );
-        draw_right(
-            hdc,
-            &clock,
-            client.right - PAD - CLOCK_W,
-            client.right - PAD,
-        );
+        if vertical() {
+            let mut text: Vec<u16> = clock.encode_utf16().collect();
+            let mut r = clock_rect(client);
+            DrawTextW(
+                hdc,
+                &mut text,
+                &mut r,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        } else {
+            draw_right(
+                hdc,
+                &clock,
+                client.right - PAD - CLOCK_W,
+                client.right - PAD,
+            );
+        }
 
         SelectObject(hdc, old_font);
         let _ = EndPaint(hwnd, &ps);
@@ -2457,27 +2723,27 @@ fn window_menu(owner: HWND, target: HWND, title: &str) {
         crate::win_util::popup_menu(
             owner,
             &[
-                crate::win_util::MenuRow::command(MENU_RESTORE, "还原"),
-                crate::win_util::MenuRow::command(MENU_MINIMIZE, "最小化"),
-                crate::win_util::MenuRow::command(MENU_MAXIMIZE, "最大化"),
-                crate::win_util::MenuRow::command(MENU_CLOSE, "关闭"),
+                crate::win_util::MenuRow::command(MENU_RESTORE, crate::i18n::text("还原")),
+                crate::win_util::MenuRow::command(MENU_MINIMIZE, crate::i18n::text("最小化")),
+                crate::win_util::MenuRow::command(MENU_MAXIMIZE, crate::i18n::text("最大化")),
+                crate::win_util::MenuRow::command(MENU_CLOSE, crate::i18n::text("关闭")),
                 crate::win_util::MenuRow::Separator,
                 if pin_disabled {
                     crate::win_util::MenuRow::disabled(
                         MENU_PIN,
                         if pinned {
-                            "从快速启动移除"
+                            crate::i18n::text("从快速启动移除")
                         } else {
-                            "添加到快速启动"
+                            crate::i18n::text("添加到快速启动")
                         },
                     )
                 } else {
                     crate::win_util::MenuRow::command(
                         MENU_PIN,
                         if pinned {
-                            "从快速启动移除"
+                            crate::i18n::text("从快速启动移除")
                         } else {
-                            "添加到快速启动"
+                            crate::i18n::text("添加到快速启动")
                         },
                     )
                 },
@@ -2538,15 +2804,33 @@ fn group_menu(owner: HWND, anchor: HWND, label: &str, members: &[isize]) {
         crate::win_util::popup_menu(
             owner,
             &[
-                crate::win_util::MenuRow::command(MENU_GROUP_OPEN_ALL, "打开组内全部窗口"),
-                crate::win_util::MenuRow::command(MENU_GROUP_RESTORE_ALL, "全部还原"),
-                crate::win_util::MenuRow::command(MENU_GROUP_MINIMIZE_ALL, "全部最小化"),
-                crate::win_util::MenuRow::command(MENU_GROUP_CLOSE_ALL, "全部关闭"),
+                crate::win_util::MenuRow::command(
+                    MENU_GROUP_OPEN_ALL,
+                    crate::i18n::text("打开组内全部窗口"),
+                ),
+                crate::win_util::MenuRow::command(
+                    MENU_GROUP_RESTORE_ALL,
+                    crate::i18n::text("全部还原"),
+                ),
+                crate::win_util::MenuRow::command(
+                    MENU_GROUP_MINIMIZE_ALL,
+                    crate::i18n::text("全部最小化"),
+                ),
+                crate::win_util::MenuRow::command(
+                    MENU_GROUP_CLOSE_ALL,
+                    crate::i18n::text("全部关闭"),
+                ),
                 crate::win_util::MenuRow::Separator,
                 if pin_disabled {
-                    crate::win_util::MenuRow::disabled(MENU_GROUP_PIN_ALL, "添加到快速启动")
+                    crate::win_util::MenuRow::disabled(
+                        MENU_GROUP_PIN_ALL,
+                        crate::i18n::text("添加到快速启动"),
+                    )
                 } else {
-                    crate::win_util::MenuRow::command(MENU_GROUP_PIN_ALL, "添加到快速启动")
+                    crate::win_util::MenuRow::command(
+                        MENU_GROUP_PIN_ALL,
+                        crate::i18n::text("添加到快速启动"),
+                    )
                 },
             ],
             x,
@@ -2628,9 +2912,12 @@ fn pin_menu(owner: HWND, index: usize) {
         crate::win_util::popup_menu(
             owner,
             &[
-                crate::win_util::MenuRow::command(MENU_OPEN_PIN, format!("打开 {label}")),
+                crate::win_util::MenuRow::command(
+                    MENU_OPEN_PIN,
+                    crate::ui_format!("打开 {label}", "Open {label}"),
+                ),
                 crate::win_util::MenuRow::Separator,
-                crate::win_util::MenuRow::command(MENU_UNPIN, "从快速启动移除"),
+                crate::win_util::MenuRow::command(MENU_UNPIN, crate::i18n::text("从快速启动移除")),
             ],
             x,
             y,
@@ -2751,6 +3038,23 @@ mod tests {
     /// The settings button must never touch whatever follows it: with the
     /// start-menu slot off it still keeps the standard inter-button gap, and
     /// with the slot on that width is used verbatim.
+    #[test]
+    fn vertical_tasks_keep_titles_and_never_overlap_footer_even_when_full() {
+        for height in [0, 35, 36, 71, 72, 350, 1080] {
+            for count in [0, 1, 2, 25, 10000] {
+                let start = 44;
+                let end = (height - 72).max(start);
+                let result = super::vertical_layout(180, start, end, count);
+                assert_eq!(result.density, Density::Full);
+                assert_eq!(result.hidden_from, result.rects.len());
+                let mut previous = start;
+                for r in result.rects.iter().chain(result.overflow.iter()) {
+                    assert!(r.top >= previous && r.bottom <= end && r.right <= 180 && r.left >= 0);
+                    previous = r.bottom;
+                }
+            }
+        }
+    }
     #[test]
     fn after_settings_always_keeps_a_gap() {
         assert_eq!(

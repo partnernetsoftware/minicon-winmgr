@@ -117,10 +117,14 @@ pub fn parse_command_with(
 ) -> Result<LaunchRequest, LaunchError> {
     let input = input.trim();
     if input.is_empty() {
-        return Err(LaunchError::input("请输入程序、路径或网址。"));
+        return Err(LaunchError::input(crate::i18n::text(
+            "请输入程序、路径或网址。",
+        )));
     }
     if input.contains('\0') {
-        return Err(LaunchError::input("输入包含无效字符，请修改后重试。"));
+        return Err(LaunchError::input(crate::i18n::text(
+            "输入包含无效字符，请修改后重试。",
+        )));
     }
     let home = home.filter(|h| !h.is_empty());
     let resolve = |target: &str, check_whole: bool| -> Result<String, LaunchError> {
@@ -138,16 +142,18 @@ pub fn parse_command_with(
                 || target.starts_with('.'))
         {
             let base = home.ok_or_else(|| {
-                LaunchError::input("用户目录不可用，无法打开相对路径。请使用完整路径。")
+                LaunchError::input(crate::i18n::text(
+                    "用户目录不可用，无法打开相对路径。请使用完整路径。",
+                ))
             })?;
             let target = if drive_relative {
                 if !base
                     .get(..2)
                     .is_some_and(|drive| drive.eq_ignore_ascii_case(&target[..2]))
                 {
-                    return Err(LaunchError::input(
+                    return Err(LaunchError::input(crate::i18n::text(
                         "盘符相对路径没有用户目录基准，请使用完整路径（例如 C:\\目录\\文件）。",
-                    ));
+                    )));
                 }
                 &target[2..]
             } else {
@@ -174,12 +180,14 @@ pub fn parse_command_with(
         (expand_target(input, &lookup), String::new())
     } else {
         let (target, params) = if let Some(tail) = input.strip_prefix('"') {
-            let end = tail
-                .find('"')
-                .ok_or_else(|| LaunchError::input("引号未闭合，请补全目标路径的引号。"))?;
+            let end = tail.find('"').ok_or_else(|| {
+                LaunchError::input(crate::i18n::text("引号未闭合，请补全目标路径的引号。"))
+            })?;
             let remainder = &tail[end + 1..];
             if !remainder.is_empty() && !remainder.starts_with(char::is_whitespace) {
-                return Err(LaunchError::input("目标与参数之间需要空格。"));
+                return Err(LaunchError::input(crate::i18n::text(
+                    "目标与参数之间需要空格。",
+                )));
             }
             (&tail[..end], remainder)
         } else {
@@ -192,7 +200,9 @@ pub fn parse_command_with(
         )
     };
     if target.is_empty() {
-        return Err(LaunchError::input("请输入程序、路径或网址。"));
+        return Err(LaunchError::input(crate::i18n::text(
+            "请输入程序、路径或网址。",
+        )));
     }
     let launch = if params.trim().is_empty() {
         let name = target.rsplit(['\\', '/']).next().unwrap_or(&target);
@@ -240,18 +250,25 @@ pub fn parse_command(input: &str) -> Result<LaunchRequest, LaunchError> {
 pub fn error_from_code(code: i32) -> LaunchError {
     let message = match code {
         value if value == CO_E_APPNOTFOUND.0 => {
-            "关联的应用程序不可用。请指定程序或修复系统默认打开方式。".into()
+            crate::i18n::text("关联的应用程序不可用。请指定程序或修复系统默认打开方式。").into()
         }
-        2 => "找不到目标。请检查名称或路径后重试。".into(),
-        3 => "路径不可用。请检查目录或设备连接。".into(),
-        5 => "权限不足。请检查目标的访问权限。".into(),
-        27 | 31 | 1155 => "没有默认打开方式。请为此文件设置关联应用。".into(),
-        1223 => "打开操作已取消。可以修改输入后重试。".into(),
-        28 | 258 | 1460 => "关联应用响应超时。请确认应用可用后重试。".into(),
-        29 | 30 | 1156 => "无法与关联应用通信。请关闭其阻塞窗口后重试。".into(),
-        26 | 32 | 1157 => "目标或所需组件不可用。请关闭占用程序或修复应用后重试。".into(),
-        11 | 193 | 216 => "目标不是可运行的程序，或与当前系统不兼容。请检查文件。".into(),
-        _ => format!("启动失败（错误码 {code}），请修改输入后重试。"),
+        2 => crate::i18n::text("找不到目标。请检查名称或路径后重试。").into(),
+        3 => crate::i18n::text("路径不可用。请检查目录或设备连接。").into(),
+        5 => crate::i18n::text("权限不足。请检查目标的访问权限。").into(),
+        27 | 31 | 1155 => crate::i18n::text("没有默认打开方式。请为此文件设置关联应用。").into(),
+        1223 => crate::i18n::text("打开操作已取消。可以修改输入后重试。").into(),
+        28 | 258 | 1460 => crate::i18n::text("关联应用响应超时。请确认应用可用后重试。").into(),
+        29 | 30 | 1156 => crate::i18n::text("无法与关联应用通信。请关闭其阻塞窗口后重试。").into(),
+        26 | 32 | 1157 => {
+            crate::i18n::text("目标或所需组件不可用。请关闭占用程序或修复应用后重试。").into()
+        }
+        11 | 193 | 216 => {
+            crate::i18n::text("目标不是可运行的程序，或与当前系统不兼容。请检查文件。").into()
+        }
+        _ => crate::ui_format!(
+            "启动失败（错误码 {code}），请修改输入后重试。",
+            "Launch failed (error {code}). Edit the input and try again."
+        ),
     };
     LaunchError {
         code: Some(code),
@@ -338,10 +355,12 @@ pub fn execute(request: &LaunchRequest) -> Result<(), LaunchError> {
                             .any(|name| ext.eq_ignore_ascii_case(name))
                     })
             {
-                error.message = "文件存在，但默认打开程序不可用。请在文件路径前指定程序（例如 notepad），或修复系统默认打开方式。".into();
+                error.message = crate::i18n::text("文件存在，但默认打开程序不可用。请在文件路径前指定程序（例如 notepad），或修复系统默认打开方式。").into();
             }
             if request.file.contains('%') {
-                error.message.push_str(" 请检查未定义的环境变量。");
+                error
+                    .message
+                    .push_str(crate::i18n::text(" 请检查未定义的环境变量。"));
             }
             tracing::warn!(file = %request.file, code, "run request failed");
             Err(error)
@@ -486,7 +505,7 @@ mod tests {
     fn missing_associated_application_hresult_has_actionable_feedback() {
         let error = super::error_from_code(super::CO_E_APPNOTFOUND.0);
         assert_eq!(error.code, Some(0x800401F5u32 as i32));
-        assert!(error.message.contains("默认打开方式"));
+        assert!(error.message.contains("file association"));
     }
 
     fn command(input: &str) -> Result<super::LaunchRequest, super::LaunchError> {
@@ -621,7 +640,7 @@ mod tests {
             command(r"D:notes.txt")
                 .unwrap_err()
                 .message
-                .contains("完整路径")
+                .contains("absolute path")
         );
         assert!(super::parse_command_with(r"\notes.txt", None, None, |_| None, |_| false).is_err());
     }
@@ -649,7 +668,7 @@ mod tests {
             command("\"C:\\Program Files\\app.exe")
                 .unwrap_err()
                 .message
-                .contains("引号未闭合")
+                .contains("quotation marks")
         );
         assert!(command("\"app\"--x").is_err());
         assert!(command(" ").is_err());
@@ -669,18 +688,26 @@ mod tests {
 
     #[test]
     fn shell_errors_offer_specific_corrections() {
-        assert!(super::error_from_code(2).message.contains("找不到"));
-        assert!(super::error_from_code(3).message.contains("路径不可用"));
-        assert!(super::error_from_code(5).message.contains("权限不足"));
-        assert!(super::error_from_code(31).message.contains("默认打开方式"));
+        assert!(super::error_from_code(2).message.contains("not found"));
+        assert!(
+            super::error_from_code(3)
+                .message
+                .contains("path is unavailable")
+        );
+        assert!(super::error_from_code(5).message.contains("Access denied"));
+        assert!(
+            super::error_from_code(31)
+                .message
+                .contains("file association")
+        );
         assert!(
             super::error_from_code(1155)
                 .message
-                .contains("默认打开方式")
+                .contains("file association")
         );
-        assert!(super::error_from_code(1223).message.contains("已取消"));
-        assert!(super::error_from_code(1156).message.contains("通信"));
-        assert!(super::error_from_code(1460).message.contains("超时"));
+        assert!(super::error_from_code(1223).message.contains("cancelled"));
+        assert!(super::error_from_code(1156).message.contains("communicate"));
+        assert!(super::error_from_code(1460).message.contains("timed out"));
         assert!(super::error_from_code(8).message.contains('8'));
     }
 

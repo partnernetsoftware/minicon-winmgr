@@ -43,7 +43,9 @@ pub fn enabled() -> bool {
 /// Vertical gap between the button and the preview.
 const PREVIEW_GAP: i32 = 6;
 /// Dark backing colour so letterboxed thumbnails read as a single card.
-const BG_COLOR: COLORREF = COLORREF(0x0020_2020);
+fn bg_color() -> COLORREF {
+    COLORREF(crate::config::theme().surface)
+}
 
 const CLASS_NAME: &str = "minicon_winmgr_hover_preview";
 const WINDOW_TITLE: &str = "minicon preview";
@@ -149,7 +151,7 @@ pub(crate) fn prepare(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Er
     unsafe {
         let class_name = wide(CLASS_NAME);
         let title = wide(WINDOW_TITLE);
-        let background = CreateSolidBrush(BG_COLOR);
+        let background = CreateSolidBrush(bg_color());
 
         let wnd_class = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
@@ -313,7 +315,7 @@ fn paint(hwnd: HWND) {
             right: PREVIEW_W,
             bottom: PREVIEW_H,
         };
-        if let Some(background) = crate::win_util::Brush::solid(BG_COLOR) {
+        if let Some(background) = crate::win_util::Brush::solid(bg_color()) {
             FillRect(hdc, &client, background.handle());
         }
 

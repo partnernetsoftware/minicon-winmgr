@@ -151,13 +151,15 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 ### 5.1 信息架构（`src/settings_panel.rs`）
 | 分组 | 设置项 | 控件 | 默认 |
 |------|--------|------|------|
+| 外观与位置 | 白天 / 黑夜 / 自动 | 三选一单选，立即生效 | 自动 |
+| 外观与位置 | 上 / 下 / 左 / 右 | 四选一单选，立即生效 | 下 |
 | 任务栏 | 显示任务栏 | 复选（重启后生效） | 开 |
 | 任务栏 | 显示通知区域（仅作外壳时可点） | 复选 | 开 |
 | 任务栏 | ~~显示开始菜单~~ | ~~复选~~ | 已于 2026-10-14 撤除（入口退役，不再有行） |
 | 窗口合并 | 合并窗口 | 三态单选（3 行） | 从不合并 |
 | 窗口合并 | 合并依据 | 单选（按应用 / 按进程），仅在合并 ≠ 从不时可用 | 按应用 |
 | 行为 | 悬停预览 | 复选 | 关 |
-| 外观 / 快捷键 / 关于 | 主题色 / 唤出键 / 版本 | 只读 | — |
+| 配置与关于 | 有效值 / 来源 / 唤出键 / 版本 / 权限 | 可滚动、可复制的详情窗口 | — |
 
 ### 5.2 原生控件与反馈
 
@@ -169,7 +171,8 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 | 合并策略 / 依据 / 通知区域条 | **即时**：更新运行 Config，经 `hub::request_taskbar_refresh()` 刷新；异步保存并显示失败与重试 |
 | 显示任务栏 | **重启**：只在启动时决定是否创建；分别显示运行状态与下次启动偏好 |
 | 悬停预览 | 即时：从关闭启动也能初始化，关闭清理计时器与位图，语义见 [§7](prd_6_1_1.md#7-悬停预览生命周期s5) |
-| 主题色 / 圆角 / 亚克力 | **重启**（`config::theme()` 走 `OnceLock` 永久缓存）——UI 上标注"重启后生效" |
+| 主题模式 / 任务栏位置 | **即时**；自动模式跟随 Windows 应用主题；显式 `theme.*` 在模式调色板上覆盖 |
+| 手写颜色 / 圆角 / 亚克力配置 | 文件在启动时读取；运行时切换主题模式不会删改手写颜色 |
 
 ## 6. 配置与持久化（配置键唯一真值表）
 
@@ -177,6 +180,9 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 
 | 键 | 取值 | 默认 |
 |----|------|------|
+| `ui.language` | `en` \| `zh` | `en`；环境 `MINICON_LANGUAGE`，设置即时切换并保存 |
+| `appearance.mode` | `light` \| `dark` \| `auto` | `auto`；环境 `MINICON_THEME_MODE` |
+| `taskbar.position` | `bottom` \| `top` \| `left` \| `right` | `bottom`；环境 `MINICON_TASKBAR_POSITION` |
 | `show_taskbar`（别名 `taskbar.show`） | `true` \| `false` | `true` |
 | `taskbar.tray` | `true` \| `false` | `true`（通知区域条；两形态下图标与可点性不同，见 [`prd_1_1.md`](prd_1_1.md)「通知区 / 托盘」） |
 | `taskbar.group` | `never` \| `when_full` \| `always` | `never` |
