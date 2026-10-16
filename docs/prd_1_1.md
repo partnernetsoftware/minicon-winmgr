@@ -68,7 +68,7 @@
   - 行为：悬停显示缩略图预览（复选，即时生效）
   - 外观 / 快捷键 / 关于：只读信息
   - 底部动作：**接管桌面（立即生效）/ 还原系统桌面（立即生效）**（见 [`prd_3_1.md`](prd_3_1.md)）
-- ✅ 生效与持久化：命中控件 → 更新内存配置 → **key-level upsert** 写回 exe 旁 `minicon-settings.txt`（写前备份 `.bak`）→ `taskbar::refresh()` **即时生效**（主题类仍重启生效）。优先级 `环境变量 > minicon-settings.txt > minicon.conf > 默认`；**从不改写**用户手写的 `minicon.conf`。
+- ✅ 生效与持久化：命中控件 → 更新内存配置 → **key-level upsert** 写回设置文件（0.1.10 起默认 `~/winmgr.cnf`，旧文件迁移见 [配置规格 §6](prd_6_1.md#6-配置与持久化配置键唯一真值表)）（写前备份 `.bak`）→ `taskbar::refresh()` **即时生效**（主题类仍重启生效）。优先级 `环境变量 > 设置文件 > minicon.conf > 默认`；**从不改写**用户手写的 `minicon.conf`。
 - ⬜ 主题拾色器、每屏窗口过滤（见 [`prd_6_1.md`](prd_6_1.md) §10）。
 
 ## 多显示器
@@ -102,7 +102,7 @@
 `MINICON_ALT_SHELL=path`、`MINICON_TRAY_HOST=1|0`、`MINICON_CONFIG=path`、`MINICON_SETTINGS=path`（设置文件位置）、
 `MINICON_CONFIRM_SHELL=yes`、`RUST_LOG=...`。
 
-> 配置优先级：`环境变量 > minicon-settings.txt（设置 UI 写）> minicon.conf（手写）> 内置默认`。
+> 配置优先级：`环境变量 > 设置文件（0.1.10 起默认 ~/winmgr.cnf）> minicon.conf（手写）> 内置默认`。
 
 ## CLI
 `--shell-status` / `--shell-list`（只读）、`--shell-set <explorer|alt|minicon|path>` / `--shell-replace` / `--shell-rollback <value|default>`（写入需 `MINICON_CONFIRM_SHELL=yes`）、`--launch` / `--launch-run`、`--help`。

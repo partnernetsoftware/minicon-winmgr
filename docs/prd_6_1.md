@@ -182,6 +182,7 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 |----|------|------|
 | `ui.language` | `en` \| `zh` | `en`；环境 `MINICON_LANGUAGE`，设置即时切换并保存 |
 | `appearance.mode` | `light` \| `dark` \| `auto` | `auto`；环境 `MINICON_THEME_MODE` |
+| `taskbar.side_width` | `160`–`480` DIP；有效像素宽度还受所在屏幕三分之一限制 | `180`；左右共用，通过内侧边缘拖动保存（0.1.10） |
 | `taskbar.position` | `bottom` \| `top` \| `left` \| `right` | `bottom`；环境 `MINICON_TASKBAR_POSITION` |
 | `show_taskbar`（别名 `taskbar.show`） | `true` \| `false` | `true` |
 | `taskbar.tray` | `true` \| `false` | `true`（通知区域条；两形态下图标与可点性不同，见 [`prd_1_1.md`](prd_1_1.md)「通知区 / 托盘」） |
@@ -191,10 +192,11 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 | `theme.bg` / `surface` / `hover` / `accent` / `text` / `muted` | `#RRGGBB` 或 `0xRRGGBB`（默认值见 [`prd_4_1.md`](prd_4_1.md) §2） | — |
 | `hotkey` | 热键串，如 `alt+`` | `alt+`` |
 
-- **文件**：手写配置 `<exe 旁>/minicon.conf`（`MINICON_CONFIG` 可覆盖）；UI 独占写 `<exe 旁>/minicon-settings.txt`（`MINICON_SETTINGS` 可覆盖）。
+- **文件**：手写配置 `<exe 旁>/minicon.conf`（`MINICON_CONFIG` 可覆盖）；0.1.10 起 UI 写 `~/winmgr.cnf`（`%USERPROFILE%\winmgr.cnf`），与可执行文件位置无关（`MINICON_SETTINGS` 可覆盖）。
+- **旧设置迁移（0.1.10）**：新文件不存在时兼容读取 exe 旁 `minicon-settings.txt`；第一次保存以旧文件完整内容为基础，保留注释和其余偏好，写入新文件。新文件存在后不再合并旧文件；旧文件不改写。显式 `MINICON_SETTINGS` 完全隔离旧配置。无用户目录时才退回 exe 旁路径。设置读写上限 1 MiB，损坏或超长输入拒绝覆盖。
 - **为什么不用 `minicon.conf`**：它读侧会丢弃注释与未知键、且全项目**无写回器**；UI 一旦整文件重写，用户手写的主题注释与未来新增键全部丢失。
-- **写回基线**：key-level upsert（只替换目标行，保留其余原行）；成功写前备份 `minicon-settings.txt.bak`。读取/备份失败中止，使用同目录临时文件刷新后替换；数据完整性与失败处理见 [§6](prd_6_1_1.md#6-保存状态与数据完整性s4)。
-- **优先级**：`环境变量 > minicon-settings.txt > minicon.conf > 内置默认`。保留 `MINICON_GROUP_TASKS`（`=1` ≡ `group=always`）作为兼容与调试入口，优先于设置面板。
+- **写回基线**：key-level upsert（只替换目标行，保留其余原行）；成功写前备份设置文件到同名 `.bak`。读取/备份失败中止，使用同目录临时文件刷新后替换；数据完整性与失败处理见 [§6](prd_6_1_1.md#6-保存状态与数据完整性s4)。
+- **优先级**：`环境变量 > winmgr.cnf > minicon.conf > 内置默认`。保留 `MINICON_GROUP_TASKS`（`=1` ≡ `group=always`）作为兼容与调试入口，优先于设置面板。
 - 环境变量完整清单以 [`prd_1_1.md`](prd_1_1.md)「环境变量 / 开关」为准。
 
 ## 7. 可发现性与文案

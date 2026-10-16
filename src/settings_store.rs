@@ -71,11 +71,12 @@ pub(crate) fn install_delayed_test_writer() -> std::sync::mpsc::Receiver<bool> {
 
 fn start_worker(state: &Arc<(Mutex<State>, Condvar)>) {
     let path = crate::config::settings_path();
+    let legacy = crate::config::legacy_settings_path();
     spawn_worker(state, move |key, value| {
         let path = path
             .as_deref()
             .ok_or_else(|| crate::i18n::text("无法确定设置文件路径").to_string())?;
-        persist(path, key, value)
+        persist_seeded(path, legacy.as_deref(), key, value, |_| Ok(()))
     });
 }
 fn spawn_worker(
@@ -192,20 +193,44 @@ pub(crate) fn status() -> Status {
     }
 }
 
-fn read_existing(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
+pub(crate) fn read_existing(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    const LIMIT: u64 = 1024 * 1024;
+    match std::fs::File::open(path) {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > LIMIT {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Settings file exceeds 1 MiB",
+                ));
+            }
+            Ok(Some(bytes))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
 }
 
+#[cfg(test)]
 pub(crate) fn persist(path: &Path, key: &str, value: &str) -> Result<(), String> {
     persist_with(path, key, value, |_| Ok(()))
 }
 
+#[cfg(test)]
 fn persist_with(
     path: &Path,
+    key: &str,
+    value: &str,
+    checkpoint: impl Fn(&str) -> io::Result<()>,
+) -> Result<(), String> {
+    persist_seeded(path, None, key, value, checkpoint)
+}
+
+fn persist_seeded(
+    path: &Path,
+    legacy: Option<&Path>,
     key: &str,
     value: &str,
     checkpoint: impl Fn(&str) -> io::Result<()>,
@@ -213,9 +238,20 @@ fn persist_with(
     let mut stage = "读取";
     let mut action = || -> io::Result<()> {
         let original = read_existing(path)?;
-        let text = std::str::from_utf8(original.as_deref().unwrap_or_default())
+        let seed = if original.is_none() {
+            legacy.map_or(Ok(None), read_existing)?
+        } else {
+            None
+        };
+        let text = std::str::from_utf8(original.as_deref().or(seed.as_deref()).unwrap_or_default())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let updated = crate::config::upsert(text, key, value);
+        if updated.len() > 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Settings file exceeds 1 MiB",
+            ));
+        }
         checkpoint("read")?;
         stage = "备份";
         if let Some(bytes) = &original {
@@ -275,6 +311,76 @@ fn persist_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn first_home_save_migrates_all_old_preferences_without_modifying_legacy() {
+        let dir = Temp::new();
+        let path = dir.0.join("winmgr.cnf");
+        let legacy = dir.0.join("legacy.txt");
+        let old = "# retained\nui.language=zh\nappearance.mode=dark\ntaskbar.side_width=248\n";
+        std::fs::write(&legacy, old).unwrap();
+        persist_seeded(
+            &path,
+            Some(&legacy),
+            "taskbar.position",
+            "right",
+            |_| Ok(()),
+        )
+        .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let restored = crate::config::parse(&saved);
+        assert_eq!(restored.language, crate::i18n::Language::Zh);
+        assert_eq!(restored.theme_mode, crate::config::ThemeMode::Dark);
+        assert_eq!(restored.side_width, 248);
+        assert_eq!(restored.position, crate::config::Position::Right);
+        assert!(saved.contains("# retained"));
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), old);
+        // Once the home file exists, old preferences no longer seed it.
+        std::fs::write(&legacy, [0xff]).unwrap();
+        persist_seeded(
+            &path,
+            Some(&legacy),
+            "taskbar.side_width",
+            "320",
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::config::parse(&std::fs::read_to_string(path).unwrap()).side_width,
+            320
+        );
+    }
+
+    #[test]
+    fn migration_failure_and_oversize_input_preserve_existing_files() {
+        let dir = Temp::new();
+        let path = dir.0.join("winmgr.cnf");
+        let legacy = dir.0.join("legacy.txt");
+        std::fs::write(&legacy, "ui.language=zh\n").unwrap();
+        assert!(
+            persist_seeded(&path, Some(&legacy), "taskbar.position", "left", |stage| {
+                if stage == "replace" {
+                    Err(io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            "ui.language=zh\n"
+        );
+        std::fs::write(&legacy, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        assert!(persist_seeded(&path, Some(&legacy), "key", "value", |_| Ok(())).is_err());
+        assert!(!path.exists());
+        // A corrupt migration source is also preserved rather than replaced.
+        std::fs::write(&legacy, [0xff]).unwrap();
+        assert!(persist_seeded(&path, Some(&legacy), "key", "value", |_| Ok(())).is_err());
+        assert_eq!(std::fs::read(&legacy).unwrap(), [0xff]);
+        assert!(!path.exists());
+    }
+
     #[test]
     fn slow_serial_worker_coalesces_last_choice_without_holding_state_lock() {
         let state = Arc::new((Mutex::new(State::default()), Condvar::new()));

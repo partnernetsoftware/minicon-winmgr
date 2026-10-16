@@ -1,11 +1,12 @@
 //! Lightweight configuration: theme tokens, hotkey, taskbar visibility,
 //! and the taskbar's window-merge policy.
 //!
-//! Two files feed the effective configuration, lowest precedence first:
+//! Files feed the effective configuration, lowest precedence first:
 //!
 //! 1. `minicon.conf` (hand-written; theme + hotkey). **Never rewritten** — it
 //!    has no writer, so the UI can never clobber a user's comments.
-//! 2. `minicon-settings.txt` (owned by the settings UI; key-level upsert).
+//! 2. `~/winmgr.cnf` (owned by the settings UI; key-level upsert).
+//!    The old executable-adjacent settings file is a migration fallback only.
 //!
 //! Environment variables sit on top of both (`env > settings > conf > default`)
 //! so debug/compat entry points such as `MINICON_GROUP_TASKS` keep working.
@@ -509,27 +510,67 @@ fn conf_path() -> Option<PathBuf> {
     Some(exe.parent()?.join("minicon.conf"))
 }
 
-/// Path of the UI-owned settings file: `MINICON_SETTINGS` or
-/// `<exe_dir>/minicon-settings.txt`.
-pub fn settings_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("MINICON_SETTINGS") {
-        return Some(PathBuf::from(p));
+fn settings_locations(
+    explicit: Option<PathBuf>,
+    home: Option<PathBuf>,
+    executable_dir: Option<PathBuf>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    if let Some(path) = explicit {
+        return (Some(path), None);
     }
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("minicon-settings.txt"))
+    let legacy = executable_dir.map(|dir| dir.join("minicon-settings.txt"));
+    match home {
+        Some(home) => (Some(home.join("winmgr.cnf")), legacy),
+        None => (legacy, None),
+    }
+}
+
+fn settings_locations_current() -> (Option<PathBuf>, Option<PathBuf>) {
+    settings_locations(
+        std::env::var_os("MINICON_SETTINGS").map(PathBuf::from),
+        std::env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .or_else(|| std::env::var_os("HOME").filter(|value| !value.is_empty()))
+            .map(PathBuf::from),
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf)),
+    )
+}
+
+/// UI preferences live in `~/winmgr.cnf` independently of the executable.
+/// An explicit `MINICON_SETTINGS` isolates both reads and writes from migration.
+pub fn settings_path() -> Option<PathBuf> {
+    settings_locations_current().0
+}
+
+pub(crate) fn legacy_settings_path() -> Option<PathBuf> {
+    settings_locations_current().1
+}
+
+fn read_preferences(path: &Path, legacy: Option<&Path>) -> std::io::Result<Option<Vec<u8>>> {
+    match crate::settings_store::read_existing(path)? {
+        Some(bytes) => Ok(Some(bytes)),
+        None => legacy.map_or(Ok(None), crate::settings_store::read_existing),
+    }
 }
 
 /// Loads the effective configuration from the files, then the environment.
 ///
-/// Precedence (lowest first): defaults → `minicon.conf` → `minicon-settings.txt`
+/// Precedence (lowest first): defaults → `minicon.conf` → `~/winmgr.cnf`
 /// → environment variables.
 pub fn load() -> Config {
     let mut cfg = match conf_path().as_deref().and_then(read_text) {
         Some(text) => parse(&text),
         None => Config::default(),
     };
-    if let Some(text) = settings_path().as_deref().and_then(read_text) {
-        apply_text(&mut cfg, &text);
+    if let Some(bytes) = settings_path().as_deref().and_then(|path| {
+        read_preferences(path, legacy_settings_path().as_deref())
+            .ok()
+            .flatten()
+    }) && let Ok(text) = std::str::from_utf8(&bytes)
+    {
+        apply_text(&mut cfg, text);
     }
     apply_env(&mut cfg);
     cfg
@@ -626,11 +667,21 @@ pub(crate) fn source(key: &'static str) -> String {
         OnceLock::new();
     let sources = SOURCES.get_or_init(|| {
         let mut sources = std::collections::BTreeMap::new();
-        for (path, label) in [
-            (conf_path(), "minicon.conf"),
-            (settings_path(), crate::i18n::text("设置文件")),
+        for (path, label, preferences) in [
+            (conf_path(), "minicon.conf", false),
+            (settings_path(), crate::i18n::text("设置文件"), true),
         ] {
-            if let Some(text) = path.as_deref().and_then(read_text) {
+            let text = path.as_deref().and_then(|path| {
+                if preferences {
+                    read_preferences(path, legacy_settings_path().as_deref())
+                        .ok()
+                        .flatten()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                } else {
+                    read_text(path)
+                }
+            });
+            if let Some(text) = text {
                 for raw in text.lines() {
                     let Some((k, value)) = raw.split_once('=') else {
                         continue;
@@ -891,6 +942,120 @@ pub fn upsert(text: &str, key: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_settings_survive_a_fresh_process_without_a_settings_path_override() {
+        const MARKER: &str = "WINMGR_TEST_HOME_PREFERENCES";
+        if let Ok(mode) = std::env::var(MARKER) {
+            assert!(std::env::var_os("MINICON_SETTINGS").is_none());
+            if mode == "save" {
+                assert!(set_language(crate::i18n::Language::Zh));
+                assert!(set_theme_mode(ThemeMode::Dark));
+                assert!(set_position(Position::Right));
+                assert!(set_side_width(320));
+                assert!(set_show_taskbar(false));
+                assert!(set_show_tray(false));
+                assert!(set_merge(MergeStrategy::Always));
+                assert!(set_group_by(GroupBy::Pid));
+                assert!(set_hover_preview(true));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while crate::settings_store::status().dirty() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "settings did not save"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            } else {
+                let cfg = load();
+                assert_eq!(cfg.language, crate::i18n::Language::Zh);
+                assert_eq!(cfg.theme_mode, ThemeMode::Dark);
+                assert_eq!(cfg.position, Position::Right);
+                assert_eq!(cfg.side_width, 320);
+                assert!(!cfg.show_taskbar);
+                assert!(!cfg.show_tray);
+                assert_eq!(cfg.merge, MergeStrategy::Always);
+                assert_eq!(cfg.group_by, GroupBy::Pid);
+                assert!(cfg.hover_preview);
+            }
+            return;
+        }
+        let directory =
+            std::env::temp_dir().join(format!("winmgr-home-process-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        for mode in ["save", "load"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "config::tests::home_settings_survive_a_fresh_process_without_a_settings_path_override", "--nocapture"])
+                .env(MARKER, mode)
+                .env("USERPROFILE", &directory)
+                .env("MINICON_CONFIG", directory.join("empty.conf"))
+                .env_remove("MINICON_SETTINGS")
+                .env_remove("MINICON_LANGUAGE").env_remove("MINICON_THEME_MODE")
+                .env_remove("MINICON_TASKBAR_POSITION").env_remove("MINICON_NO_TASKBAR")
+                .env_remove("MINICON_TASKBAR").env_remove("MINICON_TRAY")
+                .env_remove("MINICON_GROUP_TASKS").env_remove("MINICON_GROUP_BY")
+                .env_remove("MINICON_HOVER_PREVIEW")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::remove_file(directory.join("winmgr.cnf")).unwrap();
+        std::fs::remove_file(directory.join("winmgr.cnf.bak")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn settings_follow_the_user_profile_and_explicit_paths_are_isolated() {
+        let home = PathBuf::from("profile");
+        let exe = PathBuf::from("installation");
+        assert_eq!(
+            settings_locations(None, Some(home.clone()), Some(exe.clone())),
+            (
+                Some(home.join("winmgr.cnf")),
+                Some(exe.join("minicon-settings.txt"))
+            )
+        );
+        let explicit = PathBuf::from("test-settings.txt");
+        assert_eq!(
+            settings_locations(Some(explicit.clone()), Some(home), Some(exe.clone())),
+            (Some(explicit), None)
+        );
+        assert_eq!(
+            settings_locations(None, None, Some(exe.clone())),
+            (Some(exe.join("minicon-settings.txt")), None)
+        );
+        assert_eq!(settings_locations(None, None, None), (None, None));
+    }
+
+    #[test]
+    fn home_preferences_replace_legacy_and_invalid_home_is_not_silently_ignored() {
+        let dir = std::env::temp_dir().join(format!("winmgr-config-home-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let home = dir.join("winmgr.cnf");
+        let legacy = dir.join("legacy.txt");
+        std::fs::write(&legacy, "taskbar.position=left\ntaskbar.side_width=260\n").unwrap();
+        let restored = read_preferences(&home, Some(&legacy)).unwrap().unwrap();
+        let cfg = parse(std::str::from_utf8(&restored).unwrap());
+        assert_eq!(cfg.position, Position::Left);
+        assert_eq!(cfg.side_width, 260);
+        std::fs::write(&home, "taskbar.position=right\ntaskbar.side_width=320\n").unwrap();
+        let restored = read_preferences(&home, Some(&legacy)).unwrap().unwrap();
+        let cfg = parse(std::str::from_utf8(&restored).unwrap());
+        assert_eq!(cfg.position, Position::Right);
+        assert_eq!(cfg.side_width, 320);
+        std::fs::write(&home, [0xff]).unwrap();
+        assert_eq!(
+            read_preferences(&home, Some(&legacy)).unwrap().unwrap(),
+            [0xff]
+        );
+        std::fs::remove_file(&home).unwrap();
+        std::fs::remove_file(&legacy).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
 
     #[test]
     fn language_preference_defaults_to_english_and_round_trips() {

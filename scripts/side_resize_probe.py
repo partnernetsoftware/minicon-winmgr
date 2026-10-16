@@ -19,11 +19,13 @@ def main():
     original = os.environ.copy()
     environment = original.copy()
     for name in ['MINICON_NO_TASKBAR', 'MINICON_TASKBAR', 'MINICON_TASKBAR_POSITION',
-                 'MINICON_LANGUAGE', 'MINICON_HOVER_PREVIEW', 'MINICON_THEME_MODE']:
+                 'MINICON_LANGUAGE', 'MINICON_HOVER_PREVIEW', 'MINICON_THEME_MODE', 'MINICON_SETTINGS']:
         environment.pop(name, None)
-    config = OUT / 'settings.txt'
+    profile = OUT / 'profile'
+    profile.mkdir()
+    config = profile / 'winmgr.cnf'
     config.write_text('ui.language=en\ntaskbar.position=left\nbehavior.hover_preview=false\n', encoding='utf-8')
-    environment.update(MINICON_SETTINGS=str(config), MINICON_CONFIG=str(OUT/'empty.conf'))
+    environment.update(USERPROFILE=str(profile), MINICON_CONFIG=str(OUT/'empty.conf'))
     backup = OUT / 'original-live.exe'
     shutil.copy2(p.LIVE, backup)
     with backup.open('rb') as source:
@@ -77,8 +79,10 @@ def main():
     try:
         p.stop()
         baseline_work = work_area()
+        report['baseline_work_area'] = baseline_work
         shutil.copy2(p.SOURCE, p.LIVE)
         p.start(environment, ['--settings']); p.show()
+        report['initial_work_area'] = work_area()
         p.wait(lambda: bar() and width() > 0)
         dpi = p.u.GetDpiForWindow(bar()) or 96
         scaled = lambda value: (value*dpi+48)//96
@@ -88,8 +92,10 @@ def main():
         check('drag_does_not_persist_each_pixel', preference() is None)
         mouse(4)
         p.wait(lambda: preference() == 260)
+        p.wait(lambda: work_area()[0] == baseline_work[0]+width())
         check('left_width_saved_once_on_release', abs(width()-scaled(260)) <= 2)
-        check('left_resize_updates_reserved_work_area', work_area()[0] == baseline_work[0]+width())
+        check('left_resize_updates_reserved_work_area', work_area()[0] == baseline_work[0]+width(),
+              {'baseline': baseline_work, 'actual': work_area(), 'width': width()})
         drag_start('left', scaled(340))
         p.u.PostMessageW(bar(), 0x001F, 0, 0)  # WM_CANCELMODE, own taskbar only.
         p.wait(lambda: abs(width()-scaled(260)) <= 2)
@@ -111,6 +117,7 @@ def main():
         p.wait(lambda: p.checked(6143) and abs(width()-scaled(260)) <= 2)
         drag_start('right', scaled(320)); mouse(4)
         p.wait(lambda: preference() == 320)
+        p.wait(lambda: work_area()[0] == baseline_work[0] and work_area()[2] == baseline_work[2]-width())
         check('right_inner_edge_drags_in_reverse_direction', abs(width()-scaled(320)) <= 2, width())
         check('right_resize_restores_old_edge_and_reserves_new_width',
               work_area()[0] == baseline_work[0] and work_area()[2] == baseline_work[2]-width())
@@ -123,7 +130,10 @@ def main():
         mouse(4); time.sleep(.1)
         drag_start('right', scaled(320)); mouse(4)
         p.wait(lambda: preference() == 320)
-        p.stop(); p.start(environment, ['--settings']); p.show()
+        p.stop(); p.start(environment)
+        p.wait(lambda: bar() and abs(width()-scaled(320)) <= 2)
+        check('no_argument_start_restores_home_preferences', preference() == 320)
+        p.show()
         p.wait(lambda: p.checked(6143) and abs(width()-scaled(320)) <= 2)
         check('restart_preserves_side_and_width', preference() == 320)
         p.key('ESC')

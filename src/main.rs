@@ -16,6 +16,7 @@ mod hub;
 mod i18n;
 mod launcher;
 mod launcher_ui;
+mod log_store;
 mod logging;
 mod metrics;
 mod model;

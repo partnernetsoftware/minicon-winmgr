@@ -71,7 +71,7 @@ Copy-Item .\target\debug\minicon-winmgr.exe .\target\debug\live\minicon-winmgr.e
 
 Alt+反引号聚焦任务栏，方向键选择、Home/End 到首尾、Enter/Space 激活、Esc 返回原窗口；Win+B 打开通知面板，支持方向键、Home/End、Tab、Enter/Space、Shift+F10、Esc。窗口贴靠使用 Win+方向键，冲突时有 Ctrl+Alt+方向键回退；实际注册结果目前主要写入日志。
 
-配置优先级：环境变量 > exe 旁 `minicon-settings.txt` > `minicon.conf` > 默认值。`MINICON_CONFIG` / `MINICON_SETTINGS` 可指定路径；设置文件异步按键更新并备份，失败保留原文件、显示状态并可重试，手写配置不被重写。有效环境覆盖项在面板中只读，仅显示简短的固定提示；技术来源可在“配置与关于”中查看。完整键表只维护在 [任务栏与配置规格 §6](docs/prd_6_1.md)。显示任务栏只修改下次启动偏好，面板同时显示当前状态；悬停预览支持运行时开关。Run 的目标和参数均展开已定义的 `%变量%`，未知变量保留；默认打开程序失效时提示指定编辑器。
+0.1.10（开发中）会将偏好自动保存到 `~/winmgr.cnf`（`%USERPROFILE%\winmgr.cnf`），无参数启动即可恢复。任务栏在左/右侧时，拖动朝向桌面的边缘即可调宽，宽度也会保存。新文件不存在时兼容读取程序旁的旧 `minicon-settings.txt`，首次成功保存时迁入新文件，旧文件保留。配置优先级：环境变量 > `winmgr.cnf` > `minicon.conf` > 默认值。`MINICON_CONFIG` / `MINICON_SETTINGS` 可指定路径；设置文件异步按键更新并备份，失败保留原文件、显示状态并可重试，手写配置不被重写。有效环境覆盖项在面板中只读，仅显示简短的固定提示；技术来源可在“配置与关于”中查看。完整键表只维护在 [任务栏与配置规格 §6](docs/prd_6_1.md)。显示任务栏只修改下次启动偏好，面板同时显示当前状态；悬停预览支持运行时开关。Run 的目标和参数均展开已定义的 `%变量%`，未知变量保留；默认打开程序失效时提示指定编辑器。
 
 接管会立即关闭当前会话的桌面外壳，并修改当前用户的后续登录 Shell。先读 [接管与回滚规格](docs/prd_3_1.md)，保留回滚记录；命令行修改需显式 `MINICON_CONFIRM_SHELL=yes`，设置面板保留默认“否”的确认。普通开发无需接管桌面。
 
