@@ -46,6 +46,7 @@ mod tray_bar;
 mod tray_host;
 mod tray_popup;
 mod update;
+mod update_cancel;
 mod update_http;
 mod update_install;
 mod update_stream;
@@ -287,6 +288,7 @@ fn run_companion(show_settings: bool) {
     crate::taskbar::recover_workarea();
 
     let result = window::run(show_settings);
+    crate::update::shutdown();
     crate::settings_ui::shutdown();
     crate::diagnostic_export::shutdown();
     crate::run_dialog::shutdown();

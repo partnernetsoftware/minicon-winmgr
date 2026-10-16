@@ -145,7 +145,7 @@ mod asynchronous {
         pub(super) fn context(&self) -> usize {
             Arc::as_ptr(&self.context) as usize
         }
-        pub(super) fn wait(&mut self, budget: &Budget) -> Result<Completion, String> {
+        pub(super) fn wait(&mut self, budget: &Budget<'_>) -> Result<Completion, String> {
             let mut completion = crate::win_util::lock_or_recover(&self.context.completion);
             loop {
                 budget.remaining_ms()?;
@@ -155,7 +155,7 @@ mod asynchronous {
                         value => Ok(value),
                     };
                 }
-                let timeout = Duration::from_millis(budget.remaining_ms()? as u64);
+                let timeout = Duration::from_millis((budget.remaining_ms()? as u64).min(100));
                 let result = self
                     .context
                     .changed
@@ -167,7 +167,7 @@ mod asynchronous {
         pub(super) fn expect(
             &mut self,
             expected: Completion,
-            budget: &Budget,
+            budget: &Budget<'_>,
         ) -> Result<(), String> {
             if self.wait(budget)? == expected {
                 Ok(())
@@ -177,7 +177,7 @@ mod asynchronous {
         }
         pub(super) fn read(
             &mut self,
-            budget: &Budget,
+            budget: &Budget<'_>,
             mut consume: impl FnMut(&[u8]) -> Result<(), String>,
         ) -> Result<usize, String> {
             let buffer = crate::win_util::lock_or_recover(&self.context.buffer).as_mut_ptr();
@@ -248,12 +248,14 @@ mod asynchronous {
     }
 }
 
-struct Budget {
+struct Budget<'a> {
     started: Instant,
     duration: Duration,
+    cancel: &'a crate::update_cancel::Token,
 }
-impl Budget {
+impl Budget<'_> {
     fn remaining_ms(&self) -> Result<i32, String> {
+        self.cancel.check()?;
         let remaining = self
             .duration
             .checked_sub(self.started.elapsed())
@@ -277,30 +279,72 @@ impl Budget {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn get(
     url: &str,
     limit: usize,
     budget: Duration,
     progress: impl Fn(usize),
 ) -> Result<Vec<u8>, String> {
+    get_cancellable(
+        url,
+        limit,
+        budget,
+        progress,
+        &crate::update_cancel::Token::default(),
+    )
+}
+pub(crate) fn get_cancellable(
+    url: &str,
+    limit: usize,
+    budget: Duration,
+    progress: impl Fn(usize),
+    cancel: &crate::update_cancel::Token,
+) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
-    get_into(url, limit, budget, progress, |chunk| {
-        body.extend_from_slice(chunk);
-        Ok(())
-    })?;
+    get_into_cancellable(
+        url,
+        limit,
+        budget,
+        progress,
+        |chunk| {
+            body.extend_from_slice(chunk);
+            Ok(())
+        },
+        cancel,
+    )?;
     Ok(body)
 }
+#[cfg(test)]
 pub(crate) fn get_into(
     url: &str,
     limit: usize,
     budget: Duration,
     progress: impl Fn(usize),
+    consume: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<usize, String> {
+    get_into_cancellable(
+        url,
+        limit,
+        budget,
+        progress,
+        consume,
+        &crate::update_cancel::Token::default(),
+    )
+}
+pub(crate) fn get_into_cancellable(
+    url: &str,
+    limit: usize,
+    budget: Duration,
+    progress: impl Fn(usize),
     mut consume: impl FnMut(&[u8]) -> Result<(), String>,
+    cancel: &crate::update_cancel::Token,
 ) -> Result<usize, String> {
     let url = Url::parse(url)?;
     let budget = Budget {
         started: Instant::now(),
         duration: budget,
+        cancel,
     };
     budget.remaining_ms()?;
     // Handle lifetimes are nested request -> connection -> session, all confined
@@ -706,6 +750,68 @@ mod tests {
             released(),
             "consumer panic retained native callback context/read buffer"
         );
+    }
+
+    #[test]
+    fn cancellation_interrupts_inflight_requests_and_releases_callbacks_before_peer_close() {
+        use std::io::{Read, Write};
+        for headers in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/cancel", listener.local_addr().unwrap());
+            let cancel = crate::update_cancel::Token::default();
+            let signal = cancel.clone();
+            let (release, stop) = std::sync::mpsc::channel();
+            let peer = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut bytes = [0; 8192];
+                assert!(stream.read(&mut bytes).unwrap() > 0);
+                if headers {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n",
+                    );
+                }
+                signal.cancel();
+                let _ = stop.recv_timeout(Duration::from_secs(4));
+            });
+            asynchronous::start_lifetime_probe();
+            let started = Instant::now();
+            let result = get_into_cancellable(
+                &url,
+                100000,
+                Duration::from_secs(30),
+                |_| {},
+                |_| panic!("cancelled request must not consume data"),
+                &cancel,
+            );
+            let elapsed = started.elapsed();
+            let released = asynchronous::finish_lifetime_probe();
+            let started = Instant::now();
+            while !released() && started.elapsed() < Duration::from_secs(1) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let closed_before_peer = released();
+            let _ = release.send(());
+            peer.join().unwrap();
+            assert_eq!(result.unwrap_err(), "update operation cancelled");
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "cancel waited {elapsed:?}"
+            );
+            assert!(closed_before_peer);
+        }
+        let cancelled = crate::update_cancel::Token::default();
+        cancelled.cancel();
+        let result = get_cancellable(
+            "http://127.0.0.1:1/cancelled",
+            10,
+            Duration::from_secs(30),
+            |_| panic!("cancelled request must not report progress"),
+            &cancelled,
+        );
+        assert_eq!(result.unwrap_err(), "update operation cancelled");
     }
 
     #[test]

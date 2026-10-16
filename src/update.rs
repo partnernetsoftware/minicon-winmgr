@@ -1,6 +1,15 @@
 //! Manual update state machine. No startup I/O, networking, or resident worker.
 use crate::{update_http as http, update_install as install};
-use std::{cell::RefCell, path::PathBuf, sync::mpsc, time::Duration};
+use std::{
+    cell::RefCell,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+    time::Duration,
+};
 
 const API: &str = "https://api.github.com/repos/partnernetsoftware/minicon-winmgr/releases/latest";
 pub(crate) const MAX_EXE: usize = 64 * 1024 * 1024;
@@ -120,7 +129,6 @@ pub(crate) struct View {
 enum Event {
     Checked(Release),
     Staged(PathBuf),
-    Progress(usize),
     Quit,
     Failed(String),
 }
@@ -129,6 +137,9 @@ struct State {
     release: Option<Release>,
     staged: Option<PathBuf>,
     receiver: Option<mpsc::Receiver<Event>>,
+    cancel: Option<crate::update_cancel::Token>,
+    progress: Option<Arc<AtomicUsize>>,
+    closing: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -146,6 +157,9 @@ impl Default for State {
             release: None,
             staged: None,
             receiver: None,
+            cancel: None,
+            progress: None,
+            closing: false,
         }
     }
 }
@@ -155,28 +169,48 @@ pub(crate) fn view() -> View {
 }
 fn begin(
     phase: Phase,
-    work: impl FnOnce(mpsc::SyncSender<Event>) -> Result<Event, String> + Send + 'static,
+    work: impl FnOnce(Arc<AtomicUsize>, crate::update_cancel::Token) -> Result<Event, String>
+    + Send
+    + 'static,
 ) {
-    let (sender, receiver) = mpsc::sync_channel(4);
+    if STATE.with(|state| {
+        let state = state.borrow();
+        state.closing || state.receiver.is_some()
+    }) {
+        return;
+    }
+    let cancel = crate::update_cancel::Token::default();
+    let progress = Arc::new(AtomicUsize::new(0));
+    let (sender, receiver) = mpsc::sync_channel(1);
     STATE.with(|s| {
         let mut s = s.borrow_mut();
         s.view.phase = phase;
         s.view.error = None;
         s.view.bytes = 0;
         s.receiver = Some(receiver);
+        s.cancel = Some(cancel.clone());
+        s.progress = Some(progress.clone());
     });
     let result = std::thread::Builder::new()
         .name("manual-update".into())
         .spawn(move || {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(sender.clone())))
-                    .unwrap_or_else(|_| Err("update worker panicked".into()));
-            let _ = sender.send(result.unwrap_or_else(Event::Failed));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work(progress, cancel.clone())
+            }))
+            .unwrap_or_else(|_| Err("update worker panicked".into()));
+            if !cancel.cancelled() {
+                let _ = sender.try_send(result.unwrap_or_else(Event::Failed));
+            }
+            // Progress is a coalesced counter, so the single terminal result
+            // has its own bounded slot and never waits for a hidden Settings UI.
+            drop(cancel);
         });
     if let Err(error) = result {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             s.receiver = None;
+            s.cancel = None;
+            s.progress = None;
             s.view.phase = Phase::Failed;
             s.view.error = Some(error.to_string());
         });
@@ -194,13 +228,20 @@ pub(crate) fn check() {
         state.release = None;
         state.view.version = None;
     });
-    begin(Phase::Checking, |_| {
+    begin(Phase::Checking, |_, cancel| {
         let endpoint = match std::env::var("MINICON_WINMGR_UPDATE_API") {
             Ok(v) if http::loopback(&v) => v,
             Ok(_) => return Err("only a loopback test API override is supported".into()),
             Err(_) => API.into(),
         };
-        let body = http::get(&endpoint, 512 * 1024, Duration::from_secs(25), |_| {})?;
+        let body = http::get_cancellable(
+            &endpoint,
+            512 * 1024,
+            Duration::from_secs(25),
+            |_| {},
+            &cancel,
+        )?;
+        cancel.check()?;
         Ok(Event::Checked(parse_release(
             &body,
             http::loopback(&endpoint),
@@ -220,25 +261,33 @@ pub(crate) fn download() {
     let Some(release) = STATE.with(|s| s.borrow().release.clone()) else {
         return;
     };
-    begin(Phase::Downloading, move |sender| {
-        let sums = http::get(&release.sums, 64 * 1024, Duration::from_secs(25), |_| {})?;
+    begin(Phase::Downloading, move |progress, cancel| {
+        let sums = http::get_cancellable(
+            &release.sums,
+            64 * 1024,
+            Duration::from_secs(25),
+            |_| {},
+            &cancel,
+        )?;
         let hash = checksum(&sums, &release.name)?;
-        Ok(Event::Staged(install::prepare(
+        Ok(Event::Staged(install::prepare_cancellable(
             &hash,
             &release.version,
             |file| {
                 use std::io::Write;
-                http::get_into(
+                http::get_into_cancellable(
                     &release.url,
                     MAX_EXE,
                     Duration::from_secs(300),
                     |count| {
-                        let _ = sender.try_send(Event::Progress(count));
+                        progress.store(count, Ordering::Relaxed);
                     },
                     |chunk| file.write_all(chunk).map_err(|e| e.to_string()),
+                    &cancel,
                 )?;
                 Ok(())
             },
+            || cancel.check(),
         )?))
     });
 }
@@ -249,21 +298,41 @@ pub(crate) fn restart() {
     let Some(plan) = STATE.with(|s| s.borrow().staged.clone()) else {
         return;
     };
-    begin(Phase::Restarting, move |_| {
+    begin(Phase::Restarting, move |_, _| {
         install::start_helper(&plan)?;
         Ok(Event::Quit)
     });
 }
+/// Application exit only: hiding Settings does not cancel an explicit download.
+/// No UI join or file I/O here. Dropping the receiver releases the result slot.
+pub(crate) fn shutdown() {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.closing = true;
+        if let Some(cancel) = state.cancel.take() {
+            cancel.cancel();
+        }
+        state.receiver = None;
+        state.progress = None;
+    });
+}
+
 /// Called by the existing settings timer. It only drains in-memory messages.
 pub(crate) fn poll() {
     let mut quit = false;
     STATE.with(|s| {
         let mut s = s.borrow_mut();
-        while let Some(receiver) = s.receiver.as_ref() {
+        if let Some(progress) = &s.progress {
+            s.view.bytes = progress.load(Ordering::Relaxed);
+        }
+        if let Some(receiver) = s.receiver.as_ref() {
             match receiver.try_recv() {
-                Ok(Event::Progress(bytes)) => s.view.bytes = bytes,
                 Ok(event) => {
+                    if let Some(progress) = s.progress.take() {
+                        s.view.bytes = progress.load(Ordering::Relaxed);
+                    }
                     s.receiver = None;
+                    s.cancel = None;
                     match event {
                         Event::Checked(release) => {
                             let newer = Version::parse(&release.version)
@@ -290,16 +359,15 @@ pub(crate) fn poll() {
                                 Phase::Failed
                             };
                         }
-                        Event::Progress(_) => unreachable!(),
                     }
-                    break;
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
                     s.receiver = None;
+                    s.cancel = None;
+                    s.progress = None;
                     s.view.phase = Phase::Failed;
                     s.view.error = Some("update worker disconnected".into());
-                    break;
                 }
             }
         }
@@ -335,13 +403,98 @@ pub(crate) fn poll() {
 mod tests {
     use super::*;
     #[test]
-    fn worker_panic_and_full_progress_queue_fail_then_allow_a_new_check() {
+    fn coalesced_progress_and_terminal_result_release_worker_before_hidden_ui_polls() {
+        STATE.with(|state| *state.borrow_mut() = State::default());
+        let (entered, started) = mpsc::sync_channel(1);
+        begin(Phase::Checking, move |progress, cancel| {
+            for bytes in 0..100000 {
+                progress.store(bytes, Ordering::Relaxed);
+            }
+            entered.send(()).unwrap();
+            cancel.check()?;
+            Err("synthetic completed operation".into())
+        });
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        let lifetime = STATE.with(|state| state.borrow().cancel.as_ref().unwrap().lifetime());
+        let start = std::time::Instant::now();
+        // One reference belongs to State. The worker's reference must disappear
+        // even though nobody has drained progress or the terminal result.
+        while lifetime.strong_count() > 1 && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            lifetime.strong_count(),
+            1,
+            "worker waited for the hidden UI"
+        );
+        poll();
+        assert_eq!(view().bytes, 99999);
+        assert_eq!(
+            view().error.as_deref(),
+            Some("synthetic completed operation")
+        );
+        let start = std::time::Instant::now();
+        shutdown();
+        shutdown();
+        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(lifetime.upgrade().is_none());
+        begin(Phase::Checking, |_, _| {
+            panic!("must not start after shutdown")
+        });
+        assert!(STATE.with(|state| state.borrow().cancel.is_none()));
+        STATE.with(|state| *state.borrow_mut() = State::default());
+    }
+
+    #[test]
+    fn shutdown_interrupts_the_actual_network_worker_without_waiting_for_the_server() {
+        use std::io::Read;
+        STATE.with(|state| *state.borrow_mut() = State::default());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/shutdown", listener.local_addr().unwrap());
+        let (connected, started) = mpsc::sync_channel(1);
+        let (release, stop) = mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = [0; 8192];
+            assert!(stream.read(&mut bytes).unwrap() > 0);
+            connected.send(()).unwrap();
+            let _ = stop.recv_timeout(Duration::from_secs(4));
+        });
+        begin(Phase::Checking, move |_, cancel| {
+            http::get_cancellable(&url, 100, Duration::from_secs(30), |_| {}, &cancel)?;
+            Err("silent server should not complete".into())
+        });
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        let lifetime = STATE.with(|state| state.borrow().cancel.as_ref().unwrap().lifetime());
+        let started = std::time::Instant::now();
+        shutdown();
+        let ui_elapsed = started.elapsed();
+        while lifetime.upgrade().is_some() && started.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let exited_before_peer = lifetime.upgrade().is_none();
+        let _ = release.send(());
+        server.join().unwrap();
+        assert!(ui_elapsed < Duration::from_millis(100));
+        assert!(
+            exited_before_peer,
+            "network worker survived application shutdown cancellation"
+        );
+        assert!(STATE.with(|state| state.borrow().receiver.is_none()));
+        STATE.with(|state| *state.borrow_mut() = State::default());
+    }
+
+    #[test]
+    fn worker_panic_and_coalesced_progress_fail_then_allow_a_new_check() {
         STATE.with(|state| *state.borrow_mut() = State::default());
         let (entered, started) = mpsc::sync_channel(1);
         let (release, blocked) = mpsc::sync_channel(1);
-        begin(Phase::Checking, move |sender| {
+        begin(Phase::Checking, move |progress, _| {
             for bytes in 0..1000 {
-                let _ = sender.try_send(Event::Progress(bytes));
+                progress.store(bytes, Ordering::Relaxed);
             }
             entered.send(()).unwrap();
             blocked.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -361,7 +514,7 @@ mod tests {
         }
         assert_eq!(view().phase, Phase::Failed);
         assert_eq!(view().error.as_deref(), Some("update worker panicked"));
-        begin(Phase::Checking, |_| {
+        begin(Phase::Checking, |_, _| {
             Ok(Event::Checked(Release {
                 version: env!("CARGO_PKG_VERSION").into(),
                 url: String::new(),

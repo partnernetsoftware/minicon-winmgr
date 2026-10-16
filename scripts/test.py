@@ -72,13 +72,13 @@ def main():
             report['scope']=['pin-file corruption/size/replace failure/external edit/lock',
                              'handoff manifest bounds, streamed staging failures and confinement',
                              'loopback HTTP size/truncation, silent/trickling response cancellation, callback lifetime, sink errors and bounded incremental hashing',
-                             'update worker panic with a full progress queue and retry']
+                             'update worker panic, coalesced progress, hidden-UI terminal delivery, exit cancellation and retry']
             report['not_covered']=['public DNS/proxy/TLS failure matrix','process handoff and recovery (use update layer)',
                                    'long-run and physical display faults']
             command('cargo','test','quick_launch::tests::pin_mutations')
             command('cargo','test','update_install::tests')
             command('cargo','test','update_http::tests')
-            command('cargo','test','update::tests::worker_panic_and_full_progress_queue_fail_then_allow_a_new_check')
+            command('cargo','test','update::tests')
             command('cargo','test','update_stream::tests')
         if args.layer in ['check','quality','release']:
             command('cargo','fmt','--all','--','--check')

@@ -52,22 +52,35 @@ fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     read_limited(file, limit)
 }
 
-pub(crate) fn prepare(
+pub(crate) fn prepare_cancellable(
     hash: &str,
     version: &str,
     download: impl FnOnce(&mut fs::File) -> Result<(), String>,
+    checkpoint: impl Fn() -> Result<(), String>,
 ) -> Result<PathBuf, String> {
+    checkpoint()?;
     let target = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(|e| e.to_string())?;
-    prepare_at(target, hash, version, download)
+    prepare_at_cancellable(target, hash, version, download, checkpoint)
 }
+#[cfg(test)]
 fn prepare_at(
     target: PathBuf,
     hash: &str,
     version: &str,
     download: impl FnOnce(&mut fs::File) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
+    prepare_at_cancellable(target, hash, version, download, || Ok(()))
+}
+fn prepare_at_cancellable(
+    target: PathBuf,
+    hash: &str,
+    version: &str,
+    download: impl FnOnce(&mut fs::File) -> Result<(), String>,
+    checkpoint: impl Fn() -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    checkpoint()?;
     let parent = target.parent().ok_or("no executable directory")?;
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -82,11 +95,16 @@ fn prepare_at(
             .create_new(true)
             .open(&payload_path)
             .map_err(|e| e.to_string())?;
+        checkpoint()?;
         download(&mut payload)?;
+        checkpoint()?;
         payload.sync_all().map_err(|e| e.to_string())?;
         drop(payload);
+        checkpoint()?;
         verify_file(&payload_path, hash)?;
+        checkpoint()?;
         let old_hash = copy_hashed(&target, &folder.join("helper.exe"))?;
+        checkpoint()?;
         let plan = Plan {
             target: target.clone(),
             parent: std::process::id(),
@@ -99,6 +117,7 @@ fn prepare_at(
             &path,
             &serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
         )?;
+        checkpoint()?;
         Ok(path)
     })();
     if result.is_err() {
@@ -400,6 +419,42 @@ mod tests {
         bytes[152..154].copy_from_slice(&[0x0b, 0x02]);
         bytes
     }
+    #[test]
+    fn cancellation_at_each_staging_boundary_preserves_installation_and_removes_owned_files() {
+        let body = executable_bytes();
+        let expected = crate::update_http::sha256(&body).unwrap();
+        for stop_at in 1..=7 {
+            let installation = Installation::new();
+            let target = installation.executable();
+            let mut old = body.clone();
+            old[1000] = 7;
+            fs::write(&target, &old).unwrap();
+            let cancel = crate::update_cancel::Token::default();
+            let calls = std::cell::Cell::new(0);
+            let result = prepare_at_cancellable(
+                target.clone(),
+                &expected,
+                "0.1.10",
+                |file| file.write_all(&body).map_err(|error| error.to_string()),
+                || {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == stop_at {
+                        cancel.cancel();
+                    }
+                    cancel.check()
+                },
+            );
+            assert_eq!(result.unwrap_err(), "update operation cancelled");
+            assert_eq!(calls.get(), stop_at);
+            assert_eq!(fs::read(&target).unwrap(), old);
+            assert_eq!(
+                fs::read_dir(&installation.0).unwrap().count(),
+                1,
+                "cancellation boundary {stop_at} retained owned staging files"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "isolated update memory experiment; run update-memory layer"]
     fn streaming_preparation_commit_footprint() {
