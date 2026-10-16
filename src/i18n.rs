@@ -69,6 +69,48 @@ macro_rules! ui_format {
     ($zh:literal,$en:literal $(,$($args:tt)*)?)=>{if $crate::i18n::language()==$crate::i18n::Language::En {format!($en $(,$($args)*)?)}else{format!($zh $(,$($args)*)?)}};
 }
 const CATALOG: &[(&str, &str)] = &[
+    (
+        "无法打开保存窗口，请重试。",
+        "Could not open the Save dialog. Try again.",
+    ),
+    ("诊断…", "Diagnostics…"),
+    ("资源观察", "Resource observation"),
+    ("场景", "Scenario"),
+    ("日常使用", "Daily use"),
+    ("空闲", "Idle"),
+    ("窗口操作", "Window activity"),
+    ("版本更新", "Version update"),
+    ("开始记录", "Start"),
+    ("新记录", "New"),
+    ("停止", "Stop"),
+    ("导出摘要…", "Export…"),
+    ("准备就绪，尚未记录", "Ready — no recording yet"),
+    (
+        "导出仅含版本、时间、场景和资源数值。请先查看上方摘要；保存时可取消。",
+        "Export includes version, times, scenario and counters. Review above; you can cancel Save.",
+    ),
+    ("正在保存摘要…", "Saving summary…"),
+    ("上次摘要已保存", "Last summary saved"),
+    (
+        "保存失败，请选择可写位置后重试。",
+        "Save failed. Choose another location.",
+    ),
+    (
+        "无法保存摘要，请稍后重试。",
+        "Could not start export. Try again.",
+    ),
+    (
+        "无法开始记录，请重试。",
+        "Could not start recording. Try again.",
+    ),
+    (
+        "开始新记录会替换当前记录。继续？",
+        "A new recording replaces the current one. Continue?",
+    ),
+    (
+        "点击“开始记录”后，每 5 秒采样一次，最长 8 小时。\n关闭此窗口会停止记录，已有数据保留至新记录或程序退出。\n\n记录包含诊断自身开销；资源变化不等于泄漏，也不自动代表稳定性通过。\n缺失指标显示为暂不可用，不填成零。",
+        "Press Start to sample every 5 seconds, for up to 8 hours.\nClosing this window stops recording. Data stays until a new recording or application exit.\n\nMeasurements include diagnostic overhead. Resource changes are not an automatic leak or stability verdict.\nMissing metrics stay unavailable, rather than becoming zero.",
+    ),
     ("预览暂不可用", "Preview unavailable"),
     (
         "此处无法更新，请下载发布文件后手动替换。",

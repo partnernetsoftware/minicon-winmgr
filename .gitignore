@@ -21,3 +21,4 @@ scripts/__pycache__/
 !scripts/resources_probe.py
 !scripts/side_resize_probe.py
 !scripts/update_memory_probe.py
+!scripts/diagnostics_probe.py

@@ -188,6 +188,7 @@ pub(crate) fn refresh() {
     unsafe {
         let _ = EnumWindows(Some(visit), LPARAM(0));
     }
+    crate::diagnostic_ui::refresh();
 }
 unsafe extern "system" fn native(
     hwnd: HWND,

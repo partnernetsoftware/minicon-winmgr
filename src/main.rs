@@ -6,6 +6,9 @@
 mod appearance;
 mod bar_tip;
 mod config;
+mod diagnostic_export;
+mod diagnostic_ui;
+mod diagnostics;
 mod dock;
 mod dwm;
 mod folder_stack;
@@ -285,6 +288,7 @@ fn run_companion(show_settings: bool) {
 
     let result = window::run(show_settings);
     crate::settings_ui::shutdown();
+    crate::diagnostic_export::shutdown();
     crate::run_dialog::shutdown();
     crate::tray_popup::shutdown();
     // The message loop only closes the message-only window, so the taskbar

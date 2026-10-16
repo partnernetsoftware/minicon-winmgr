@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'memory', 'soak', 'resources', 'update-memory', 'fault', 'side-resize', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
+    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'memory', 'soak', 'resources', 'update-memory', 'diagnostics', 'fault', 'side-resize', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
     parser.add_argument('--filter', help='Rust test name/module filter; only with --layer unit')
     parser.add_argument('--pid', type=int, help='Existing test process; only memory/soak')
     parser.add_argument('--duration', type=float, help='Observation seconds; required for soak')
@@ -64,6 +64,10 @@ def main():
         if args.layer=='update-memory':
             import update_memory_probe
             step('bounded update staging memory comparison',update_memory_probe.main)
+        if args.layer in ['diagnostics','release']:
+            import diagnostics_probe
+            command('cargo','test','diagnostic')
+            step('opt-in diagnostics native language and theme matrix',diagnostics_probe.main)
         if args.layer=='fault':
             report['scope']=['pin-file corruption/size/replace failure/external edit/lock',
                              'handoff manifest bounds, streamed staging failures and confinement',

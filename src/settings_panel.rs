@@ -690,6 +690,7 @@ pub(crate) fn show() {
     ensure_focus();
 }
 fn hide() {
+    crate::settings_info::close();
     let focus = unsafe { GetFocus() };
     if unsafe { IsChild(handle(), focus).as_bool() } {
         with(|p| p.last_focus = focus);
@@ -1651,6 +1652,9 @@ fn ensure_focus() {
     }
 }
 pub(crate) fn filter(msg: &MSG) -> bool {
+    if crate::diagnostic_ui::filter(msg) {
+        return true;
+    }
     if crate::settings_info::filter(msg) {
         return true;
     }
@@ -1714,6 +1718,7 @@ pub(crate) fn allow_exit() -> bool {
     }
 }
 pub(crate) fn shutdown() {
+    crate::diagnostic_ui::shutdown();
     if let Some(p) = PANEL.with(|cell| cell.borrow_mut().take()) {
         unsafe {
             let _ = DestroyWindow(p.hwnd);

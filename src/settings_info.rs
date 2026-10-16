@@ -20,6 +20,7 @@ fn resize(hwnd: HWND) {
         let _ = GetClientRect(hwnd, &mut rect);
         let unit = |n| n * GetDpiForWindow(hwnd).max(96) as i32 / 96;
         let margin = unit(20).min(rect.right.max(1) / 8);
+        let button_width = unit(110).min(((rect.right - margin * 2 - unit(8)) / 2).max(1));
         let _ = MoveWindow(
             GetDlgItem(Some(hwnd), 1).unwrap_or_default(),
             margin,
@@ -30,9 +31,17 @@ fn resize(hwnd: HWND) {
         );
         let _ = MoveWindow(
             GetDlgItem(Some(hwnd), 2).unwrap_or_default(),
-            (rect.right - margin - unit(90)).max(0),
+            (rect.right - margin - button_width).max(0),
             (rect.bottom - margin - unit(32)).max(0),
-            unit(90),
+            button_width,
+            unit(32),
+            true,
+        );
+        let _ = MoveWindow(
+            GetDlgItem(Some(hwnd), 3).unwrap_or_default(),
+            margin,
+            (rect.bottom - margin - unit(32)).max(0),
+            button_width,
             unit(32),
             true,
         );
@@ -47,7 +56,7 @@ fn update_font(hwnd: HWND) {
         let face = wide("Microsoft YaHei UI");
         value.lfFaceName[..face.len()].copy_from_slice(&face);
         let font = CreateFontIndirectW(&value);
-        for id in [1, 2] {
+        for id in [1, 2, 3] {
             let _ = SendMessageW(
                 GetDlgItem(Some(hwnd), id).unwrap_or_default(),
                 WM_SETFONT,
@@ -143,6 +152,20 @@ pub(crate) fn show(owner: HWND, value: &str) -> Result<(), windows::core::Error>
                     Some(instance),
                     None,
                 )?;
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    windows::core::w!("BUTTON"),
+                    PCWSTR(wide(crate::i18n::text("诊断…")).as_ptr()),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                    0,
+                    0,
+                    1,
+                    1,
+                    Some(hwnd),
+                    Some(HMENU(3usize as *mut _)),
+                    Some(instance),
+                    None,
+                )?;
                 Ok(())
             })();
             if let Err(error) = controls {
@@ -169,6 +192,12 @@ pub(crate) fn filter(msg: &MSG) -> bool {
         return false;
     }
     if msg.message == WM_KEYDOWN {
+        if msg.wParam.0 == VK_RETURN.0 as usize && unsafe { GetDlgCtrlID(msg.hwnd) } == 3 {
+            unsafe {
+                let _ = SendMessageW(msg.hwnd, BM_CLICK, None, None);
+            }
+            return true;
+        }
         if msg.wParam.0 == VK_ESCAPE.0 as usize
             || (msg.wParam.0 == VK_RETURN.0 as usize && unsafe { GetDlgCtrlID(msg.hwnd) } == 2)
         {
@@ -186,16 +215,35 @@ pub(crate) fn filter(msg: &MSG) -> bool {
     }
     unsafe { IsDialogMessageW(hwnd, msg).as_bool() }
 }
+pub(crate) fn close() {
+    let hwnd = WINDOW.get();
+    if !hwnd.is_invalid() {
+        unsafe {
+            let _ = SendMessageW(hwnd, WM_CLOSE, None, None);
+        }
+    }
+}
+#[cfg(test)]
+pub(crate) fn test_handle() -> HWND {
+    WINDOW.get()
+}
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     guard_abi(
         "settings information",
         || match msg {
             WM_CLOSE => unsafe {
+                crate::diagnostic_ui::close();
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 crate::settings_panel::restore_info_focus();
                 LRESULT(0)
             },
             WM_COMMAND if wp.0 & 0xffff == 2 => unsafe { SendMessageW(hwnd, WM_CLOSE, None, None) },
+            WM_COMMAND if wp.0 & 0xffff == 3 => {
+                if let Err(error) = crate::diagnostic_ui::show(hwnd) {
+                    tracing::warn!(code = error.code().0, "diagnostic window unavailable");
+                }
+                LRESULT(0)
+            }
             WM_SIZE => {
                 resize(hwnd);
                 LRESULT(0)
