@@ -84,3 +84,8 @@ python scripts/instance_switch_probe.py --candidate <candidate-exe> --legacy <of
 ```
 
 只使用忽略目录内的副本，测试默认取消、Esc、明确确认、原进程正常退出、新进程就绪、相同构建重复启动。外层恢复原程序并核对工作区与 Shell。历史版本无需支持新就绪消息；只在候选上检查该消息。它不覆盖进程异常终止时的恢复或拒绝退出故障注入。
+
+
+发布候选由 `gh workflow run candidate.yml --ref main` 显式构建，成功后下载 `windows-x64-candidate` artifact。正式场景及 full release 使用其中原样 exe。全部验证与审阅后，将 BUILDINFO.toml 的五个公开字段保存为相应版本的 `.artifact.toml` 发布清单，提交文档再打 tag；release 工作流从成功的生产 run 下载并逐项复核，原样晋升这份文件。不可用本机或后续 CI 重建文件替代已测候选。`quality` 同时运行 10 项晋升门槛测试；它们是受控校验器测试，不是实际文件发布证据。
+
+全发布桌面层另包含 `native_feature_probe.main()`：实际程序“关于 → 诊断”中英/明暗四组，以及实际 DWM hover、源窗口最小化/销毁。回收站场景覆盖中英/明暗、原生 Tab、Enter/Space 八组组合。开发时可通过 `desktop_session.isolated` 独立运行，不能与其他桌面动作并发。

@@ -114,6 +114,7 @@ def main():
             import sys
             command(sys.executable,'scripts/test_scenario_probe.py')
             command(sys.executable,'scripts/test_resource_gate.py')
+            command(sys.executable,'scripts/test_release_artifact.py')
         if args.layer in ['unit','release']:
             command('cargo','test','--all',*(['--release'] if args.layer=='release' else []),*([args.filter] if args.filter else []))
         if args.layer=='release':
@@ -152,6 +153,8 @@ def main():
                 if args.layer=='release':
                     import scenario_probe
                     from types import SimpleNamespace
+                    import native_feature_probe
+                    step('actual candidate diagnostic entry and composed hover',native_feature_probe.main)
                     for scenario in ['docking','shortcuts']:
                         options=SimpleNamespace(candidate=args.release_binary,restore_exe=settings.LIVE,
                             baseline=args.release_binary,subject='candidate',profile='release',scenario=scenario,

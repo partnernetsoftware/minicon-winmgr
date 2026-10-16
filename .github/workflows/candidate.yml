@@ -1,0 +1,31 @@
+name: Release candidate
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Public evidence boundary
+        run: python scripts/check_public_docs.py
+      - name: Quality and complete optimized unit suite
+        run: |
+          python scripts/test.py --layer quality
+          cargo test --all --release --locked
+      - name: Build optimized candidate
+        run: cargo build --release --locked
+      - name: Record portable build provenance
+        run: python scripts/release_artifact.py prepare --exe target/release/minicon-winmgr.exe --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-candidate
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90

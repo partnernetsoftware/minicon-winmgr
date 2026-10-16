@@ -310,10 +310,14 @@ $ids=@($shell.Windows() | ForEach-Object {
         return set(values)
     before=bins();created=set();checks=[]
     try:
-        for language,ident,caption in [('en',6150,'Recycle Bin'),('zh',6151,'回收站')]:
+        cases=[(language,ident,caption,theme,theme_id,key)
+            for language,ident,caption in [('en',6150,'Recycle Bin'),('zh',6151,'回收站')]
+            for theme,theme_id in [('light',6130),('dark',6131)] for key in ['enter','space']]
+        for language,ident,caption,theme,theme_id,key in cases:
             desktop.send(p.message(),SETTINGS,pid=child.pid)
             panel=p.wait(lambda:p.panel() if p.panel() and p.pid(p.panel())==child.pid and p.u.IsWindowVisible(p.panel()) else None)
             desktop.send(p.controls().get(ident),0xF5,pid=child.pid)
+            desktop.send(p.controls().get(theme_id),0xF5,pid=child.pid)
             observation.wait(desktop,.2)
             notification=p.window('minicon_winmgr_notification_panel')
             desktop.send(notification,0x312,pid=child.pid)
@@ -321,8 +325,15 @@ $ids=@($shell.Windows() | ForEach-Object {
             button=p.u.GetDlgItem(notification,7)
             if not button or p.text(button)!=caption or not p.u.IsWindowVisible(button):
                 raise RuntimeError('Localized recycle-bin shortcut is missing')
-            p.capture_settings(observation.folder/(language+'-shortcuts.png'),notification)
-            desktop.send(button,0xF5,pid=child.pid)
+            p.capture_settings(observation.folder/(language+'-'+theme+'-shortcuts.png'),notification)
+            # Native Tab handlers set focus on the owner thread. Exercise the
+            # actual button subclass and Space key-up, without global input.
+            for ident in [1,2,6]:
+                desktop.send(p.u.GetDlgItem(notification,ident),0x100,9,pid=child.pid)
+            if p.focus()!=button:raise RuntimeError('Tab did not reach the recycle-bin shortcut')
+            code=13 if key=='enter' else 32
+            desktop.send(button,0x100,code,pid=child.pid)
+            desktop.send(button,0x101,code,pid=child.pid)
             end=time.monotonic()+15
             while True:
                 actual=bins();created|=actual-before
@@ -330,7 +341,8 @@ $ids=@($shell.Windows() | ForEach-Object {
                 if time.monotonic()>end:raise RuntimeError('Recycle-bin folder did not open')
                 observation.wait(desktop,.1)
             p.wait(lambda:not p.u.IsWindowVisible(notification))
-            checks.append(dict(language=language,localized_button=True,actual_namespace_opened=True))
+            checks.append(dict(language=language,theme=theme,key=key,tab_focus=True,
+                localized_button=True,actual_namespace_opened=True))
             desktop.send(panel,16,pid=child.pid)
         observation.operations['shortcut_checks']=len(checks)
     finally:

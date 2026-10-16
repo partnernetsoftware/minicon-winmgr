@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release:
@@ -34,16 +35,10 @@ jobs:
       - name: Full release unit tests
         run: cargo test --all --release
 
-      - name: Build release binary
-        run: cargo build --release
-
-      - name: Stage asset
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp target/release/minicon-winmgr.exe \
-             "dist/minicon-winmgr-${GITHUB_REF_NAME}-x86_64-windows.exe"
-          (cd dist && sha256sum *.exe > SHA256SUMS.txt)
+      - name: Promote the exact tested CI candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_artifact.py promote --manifest "docs/releases/${{ github.ref_name }}.artifact.toml" --download target/accepted-candidate --output dist --tag "${{ github.ref_name }}"
 
       - name: Stage draft GitHub Release
         shell: bash
