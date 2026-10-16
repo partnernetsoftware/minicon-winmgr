@@ -283,6 +283,12 @@ unsafe extern "system" fn wndproc_inner(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        crate::window_icon_worker::READY_MESSAGE => {
+            if crate::window_icon_worker::publish() {
+                crate::taskbar::refresh_icons();
+            }
+            LRESULT(0)
+        }
         STARTUP_READY_MESSAGE => LRESULT(isize::from(STARTUP_READY.get())),
         windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY
             if wparam.0 == crate::run_dialog::HOTKEY_ID =>

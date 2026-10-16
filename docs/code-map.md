@@ -1,6 +1,6 @@
 # 代码与文档地图
 
-> 2026-10-16 · 当前实现 0.1.9；验证见[验收摘要](validation.md)，下一版见[0.1.10 设计](plan_0_1_10.md)。
+> 2026-10-16 · 公开版 0.1.9，0.1.10 开发中；验证见[验收摘要](validation.md)，下一版见[0.1.10 设计](plan_0_1_10.md)。
 
 | 用户路径 | 主要实现 | 规格/证据 |
 |---|---|---|
@@ -10,9 +10,9 @@
 | 设置、配置来源与持久化 | `settings_ui`（桌面管理门面）、`settings_panel`（原生窗口）、`config`（状态/来源）、`settings_store`（串行 IO） | [0.1.6 需求](prd_6_1_1.md) |
 | 启动、Run、历史、路径建议 | `launcher`、`launcher_ui`、`run_dialog`、`run_history`、`shell_launch` | [Run 规格](prd_1_1_1.md) |
 | 通知宿主、图标、面板 | `tray_host`、`tray`、`tray_bar`、`tray_popup` | [通知规格](prd_1_1_2.md)、[验收数据](validation.md) |
-| 悬停标题/缩略图、图标 | `bar_tip`、`hover_preview`、`window_icon` | [当前限制与计划](archive/plan_0_1_6.md) |
+| 悬停标题/缩略图、图标 | `bar_tip`、`hover_preview`、`window_icon`、`window_icon_worker` | [资源审计与开发状态](resources_0_1_10.md) |
 | 兼容的旧菜单、快捷固定项、文件夹 | `start_menu`、`quick_launch`、`folder_stack`、`recents` | [后续清单](prd_5_1.md)；默认 UI 入口已退役 |
-| 外壳接管、回滚、会话与观测 | `shell_registry`、`shell_swap`、`session`、`logging`、`metrics` | [外壳规格](prd_3_1.md) |
+| 外壳接管、回滚、会话与观测 | `shell_registry`、`shell_swap`、`session`、`logging`、`log_store`、`metrics` | [外壳规格](prd_3_1.md) |
 
 ## 已交付基础与覆盖边界
 
@@ -20,7 +20,7 @@
 - 独立串行 IO worker 合并最新键值；读取、备份、临时文件与替换有分阶段错误；旧结果不清除新请求，失败可重试。
 - 当前任务栏状态、下次启动偏好和配置来源分别展示；有效环境覆盖只读。
 - `--settings` 使用固定消息，在同一用户会话内呼出已有实例；无任务栏同样可用。
-- 预览可从关闭启动热开启；关闭取消悬停计时并清理位图。同步 PrintWindow 仍有慢目标风险，见 FUT-07。
+- 0.1.10 预览改用一个 DWM 缩略图关系，隐藏/换目标/销毁释放；图标查询改用一个固定 worker 和 owned 快照。隐藏窗口资源验证见[开发验收](validation_0_1_10.md)，真实可视与长跑覆盖仍待补齐。
 - Run 展开目标与参数环境变量；既有文件关联的编辑器缺失时显示可操作错误。
 
 物理混合 DPI/热插拔、屏幕阅读器语音和高对比度未覆盖；短轮次资源检查不能替代小时级稳定性验收。
@@ -39,4 +39,4 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 0.1.9：`update` 管理手动状态与一次性 worker；`update_http` 封装有界 WinHTTP/CNG；`update_install` 负责暂存、同版本助手、进程退出等待、备份替换、启动回执与回滚；`settings_panel` 呈现三按钮和双语状态，不在渲染路径联网。`scripts/update_probe.py` 为隔离真实交接层，并纳入 release。
 
-0.1.9：`update` 管理手动状态与短生命周期 worker，`update_http` 约束 WinHTTP 与哈希校验，`update_install` 管理独立助手、替换、启动回执及回滚；设置中的三按钮不在启动时联网。
+0.1.10：`memory_probe.py` 提供外部有界采样；`window_icon_worker` 合并查询、拒绝过期结果，UI 只绘制 owned 图像；`log_store` 固定日志保留预算；`settings_store` 默认持久化用户目录偏好并兼容迁移。完整范围与待办以[版本计划](plan_0_1_10.md)为准。

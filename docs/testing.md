@@ -34,7 +34,7 @@
 |---|---|
 | `python scripts/test.py --layer memory --pid <test-pid> --duration 60` | 只读观察现有测试实例，记录数值；有 matplotlib 时生成本地曲线，不重启、不修改配置；默认 5 秒采样 |
 | `python scripts/test.py --layer soak --pid <test-pid> --duration 28800` | 显式 8 小时观察；提前退出记为不完整，不自动判定没有泄漏 |
-| `python scripts/test.py --layer resources` | 创建本测试的隐藏窗口并停滞源消息线程，验证 DWM 100 次注册/释放；另用 6 个全新子进程对照两种日志队列容量，不替换正常外壳 |
+| `python scripts/test.py --layer resources` | 创建本测试的隐藏窗口并停滞源消息线程，验证 DWM 100 次注册/释放和 owned 图标寿命；图标 worker 在三个全新进程各验证 32 个隐藏窗口、1000 次请求及通知合并；另用 6 个全新子进程对照两种日志队列容量，不替换正常外壳 |
 
 原始数据写入每次唯一的 observation 目录，不覆盖上次实验。曲线依赖 matplotlib；采样本身只使用 Python 标准库。独立工具 `scripts/memory_probe.py` 也要求显式 PID 与时长。Private Working Set 只在确认支持的系统尝试，缺失值保持为空。当前层通过只代表工具和执行完整，不等于 0.1.10 的长期门槛已通过。
 

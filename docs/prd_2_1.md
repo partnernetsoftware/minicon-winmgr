@@ -53,8 +53,8 @@
    宿主卡死即把整条栏卡住数秒）——0.1.3 已把它**移出 `refresh()`**，改为**心跳（默认 30 s）采样 + 缓存**、
    超时降到 **250 ms**，`refresh()` 只读缓存（见 [`prd_1_1.md`](prd_1_1.md)「通知区 / 托盘」）。其余 IO
    （如扫描开始菜单）仍须遵守本条。
-3. **悬停预览禁止在 `WM_MOUSEMOVE` 同步 `PrintWindow`**：用 `WM_TIMER` 节流（350ms），单窗口 show/hide 复用，
-   `HBITMAP` 在 target 变化与 `WM_DESTROY` 时释放。
+3. **UI 不同步调用未知窗口的截图/图标处理**：0.1.10 开发将预览改为单个 DWM 关系，隐藏/换目标/销毁释放；
+   图标由固定 worker 查询、复制为 owned 快照，界面只读完成缓存。请求/结果/通知合并，超时不新增线程；见[资源审计](resources_0_1_10.md)。
 4. **窗口类必须设 `hCursor`**（`IDC_ARROW`）：否则悬停显示"应用正在启动"的忙光标。
 5. **不改 `Cargo.toml` 的 feature 冻结约定**：禁止用 `windows::core::link!` 绕过未启用 feature；
    改用语义化 feature（如 `PrintWindow` 需 `Win32_Storage_Xps`）。

@@ -495,6 +495,10 @@ fn restore_workarea() {
 /// shrink it again (the screen would creep up, one bar-height per restart).
 /// Call this once the message loop has ended, on the message thread.
 pub fn shutdown() {
+    crate::window_icon_worker::shutdown();
+    lock_or_recover(tasks()).clear();
+    lock_or_recover(pins()).clear();
+    crate::window_icon::clear_path_icons();
     let handles: Vec<isize> = lock_or_recover(bars()).iter().map(|b| b.hwnd).collect();
     for raw in handles {
         // SAFETY: `DestroyWindow` runs `WM_DESTROY` synchronously here (same
@@ -642,7 +646,7 @@ struct TaskItem {
     /// Button label (title, with `(+N)` when the group has more windows).
     label: String,
     /// Application icon to draw in the button's identity slot; `0` = none.
-    icon: crate::window_icon::Icon,
+    icon: crate::window_icon::SharedIcon,
 }
 
 /// One rendered quick-launch pin: the stored shortcut plus its resolved icon.
@@ -650,7 +654,7 @@ struct PinItem {
     label: String,
     path: String,
     /// Icon drawn in the pin square; `0` falls back to the label's initial.
-    icon: crate::window_icon::PathIcon,
+    icon: crate::window_icon::SharedIcon,
 }
 
 /// Per-bar state: layout, mouse hover, and keyboard cursor.
@@ -1314,6 +1318,18 @@ fn stable_order(prev: &[TaskItem], current: Vec<TaskItem>) -> Vec<TaskItem> {
     out
 }
 
+/// Apply a completed icon snapshot without rebuilding or scheduling new work.
+pub(crate) fn refresh_icons() {
+    for item in lock_or_recover(tasks()).iter_mut() {
+        item.icon = crate::window_icon::for_window(hwnd_from(item.hwnd));
+    }
+    for bar in lock_or_recover(bars()).iter() {
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd_from(bar.hwnd)), None, false);
+        }
+    }
+}
+
 /// Builds one button per window (merge = `never`).
 fn build_ungrouped(windows: Vec<crate::window_snapshot::WindowInfo>) -> Vec<TaskItem> {
     windows
@@ -1407,7 +1423,7 @@ fn build_grouped(
                 label,
                 icon: anchor_win
                     .map(|w| crate::window_icon::for_window(w.hwnd))
-                    .unwrap_or(0),
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -1607,12 +1623,11 @@ pub fn refresh() {
 fn refresh_inner() {
     reposition();
     crate::hover_preview::clear_invalid_target();
-    // Window handles are recycled, so a cached icon may belong to a window that
-    // has since been closed. Drop the cache before re-enumerating. Path icons
-    // are ours, so they are freed rather than merely forgotten.
-    crate::window_icon::begin_refresh();
+    // Pin/paint references retain owned icons while cache references reset.
+    // Window icon queries are coalesced off-thread for this fresh snapshot.
     crate::window_icon::clear_path_icons();
     let windows = crate::window_snapshot::taskbar_windows();
+    crate::window_icon_worker::request(&windows);
 
     // Notification icons first: their reserved strip width feeds the task
     // layout *and* the `when_full` overflow decision. Hidden entirely when the
@@ -2675,20 +2690,19 @@ unsafe fn paint(hwnd: HWND) {
             // Identity slot: the application icon. Drawn at its natural colors —
             // it is the one element allowed to be loud, because it answers
             // "which app" before the title is read.
-            let has_icon = item.icon != 0;
+            let has_icon = item.icon.raw() != 0;
 
             if density.is_icon_only() {
                 // No title: the icon grows to fill the square, dead-centre.
                 let cx = (r.left + r.right - icon_size) / 2;
                 let cy = (r.top + r.bottom - icon_size) / 2;
                 if has_icon {
-                    // SAFETY: the handle is owned by the target window or its
-                    // class and outlives the call; GDI only reads it.
+                    // SAFETY: the item owns this snapshot throughout paint.
                     let _ = DrawIconEx(
                         hdc,
                         cx,
                         cy,
-                        HICON(item.icon as *mut core::ffi::c_void),
+                        HICON(item.icon.raw() as *mut core::ffi::c_void),
                         icon_size,
                         icon_size,
                         0,
@@ -2734,14 +2748,12 @@ unsafe fn paint(hwnd: HWND) {
             }
 
             if has_icon {
-                // SAFETY: the handle belongs to the target window or its class
-                // and stays valid for the duration of the call; the icon cache
-                // never destroys what it hands out.
+                // SAFETY: this item retains the owned snapshot throughout paint.
                 let _ = DrawIconEx(
                     hdc,
                     r.left + icon_pad,
                     (r.top + r.bottom - ICON_W) / 2,
-                    HICON(item.icon as *mut core::ffi::c_void),
+                    HICON(item.icon.raw() as *mut core::ffi::c_void),
                     ICON_W,
                     ICON_W,
                     0,
@@ -2777,7 +2789,7 @@ unsafe fn paint(hwnd: HWND) {
         // Quick-launch pins: surface squares carrying the pinned app's icon, or
         // the label's initial when no icon could be extracted. The strip only
         // claims space when it is non-empty (see `refresh`).
-        let pin_items: Vec<(String, crate::window_icon::PathIcon)> = lock_or_recover(pins())
+        let pin_items: Vec<(String, crate::window_icon::SharedIcon)> = lock_or_recover(pins())
             .iter()
             .map(|p| (p.label.clone(), p.icon.clone()))
             .collect();
@@ -3382,7 +3394,7 @@ mod tests {
             hwnd: 0,
             members: Vec::new(),
             label: key.to_string(),
-            icon: 0,
+            icon: Default::default(),
         }
     }
 

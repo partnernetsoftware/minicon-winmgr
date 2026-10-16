@@ -49,6 +49,7 @@ mod win_util;
 mod window;
 mod window_events;
 mod window_icon;
+mod window_icon_worker;
 mod window_snapshot;
 
 /// Second-confirmation token required before any Shell-registry write. The

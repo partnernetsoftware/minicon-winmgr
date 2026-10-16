@@ -56,7 +56,7 @@
 
 ## 窗口管理
 - ✅ Snap 热键：`src/hotkeys.rs`，`Win+←/→/↑` → 回退 `Ctrl+Alt+←/→/↑`（纯几何 `snap_rect` + 单测）。
-- ✅ 悬停窗口预览：`src/hover_preview.rs`（`PrintWindow(PW_RENDERFULLCONTENT)` 缩略图，`WM_TIMER` 节流，单窗口复用）。**默认关闭**，`MINICON_HOVER_PREVIEW=1` 开启。
+- ✅ 悬停窗口预览：`src/hover_preview.rs`（0.1.10 开发切片已改为单个 DWM 缩略图关系；取消同步 PrintWindow，隐藏/换目标/销毁时释放，实测范围见[开发验收](validation_0_1_10.md)）。**默认关闭**，`MINICON_HOVER_PREVIEW=1` 开启。
 - ⬜ 堆叠窗口组。
 
 ## 设置

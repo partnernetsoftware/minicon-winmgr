@@ -7,7 +7,7 @@
 | 日志队列 | NonBlocking worker，退出由 WorkerGuard 交接 | 默认 128,000 改为 512 槽；饱和丢弃，阻塞 sink 测试通过；独立进程两种容量各测三次，debug/release 均测得约 3.92 MiB 私有提交差值 | 已改；格式化记录最多 16 KiB，固定四个文件各 8 MiB（不含历史 daily 日志）；UTF-8 截断、重启轮换、并发与占用验证通过 |
 | 预览 | hover_preview 拥有一个 DWM 关系；换目标、隐藏、销毁和配置失败释放 | 最大一个；不再缓存截图位图；停滞源窗口的 100 次注册/释放通过 | 已改，真实 hover 与关闭/最小化场景待验 |
 | 路径图标 | OwnedIcon 最后一个 Arc 引用释放时 DestroyIcon；缓存、pin、paint snapshot 各自持有引用 | 缓存 64 项 / 256 KiB 路径键；正常 pin 最多 8 项；native GetIconInfo 验证清缓存后快照仍有效、最后引用释放后句柄失效 | 已改；键字节上限不冒充 Windows 图像内部字节数 |
-| 窗口图标 | 借用目标窗口/类的 HICON，不 DestroyIcon；每次刷新清除映射防 HWND 复用 | 与本轮窗口数相关；每次 WM_GETICON 有 50ms 限制，最多三个查询 | 借用归属明确；累计刷新时间预算待处理 |
+| 窗口图标 | 一个固定 worker 查询；CopyImage 复制 32×32 owned 图像，缓存/任务项共享引用，最后引用 DestroyIcon；退出停止 worker 并清缓存/任务项 | 每轮最多 256 个；一个 pending/ready，消息合并；12ms 单次、64ms 批次消息等待预算；过期 generation 丢弃 | 隐藏窗口停滞/合并/关闭/所有权验证通过；新增线程与拥有图像的成本仍需整体对照 |
 | 更新清单 | helper worker 局部 Vec；解析结束释放 | 读取最多 16 KiB + 1 探测字节；超长流测试验证未先读 64 MiB | 已改 |
 | exe 下载与校验 | 下载/助手 worker 局部 Vec，网络句柄 Drop；暂存目录由事务持有 | 64 MiB 响应上限；可能同时持有旧/新 exe 和哈希输入 | 仍需流式写入/校验与失败峰值采样 |
 | Run 查询 | 固定 worker、单槽请求、最新 pending 与 generation；隐藏后丢弃过期回复 | 候选 20，历史 30；历史文件读取已有 1 MiB 上限；动作队列 32 加去重 Clear | 已有数量限制；字节归因、慢路径退出及缓存指标待验证 |

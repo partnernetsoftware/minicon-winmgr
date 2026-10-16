@@ -43,6 +43,21 @@ def main(release=False):
         if result.returncode or '1 passed' not in result.stdout:
             raise RuntimeError('Owned icon lifetime experiment failed; see local log')
         report['owned_icon_lifetime_passed'] = True
+        report['icon_worker_samples'] = []
+        for repetition in range(3):
+            result = subprocess.run([executable, '--exact',
+                'window_icon_worker::tests::stalled_windows_coalesce_and_owned_results_outlive_the_source',
+                '--ignored', '--nocapture'], cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=30)
+            (output/f'icon-worker-{repetition+1}-local.log').write_text(result.stdout+result.stderr, encoding='utf-8')
+            if result.returncode or '1 passed' not in result.stdout:
+                raise RuntimeError('Asynchronous icon worker experiment failed; see local log')
+            match = re.search(r'ICON_WORKER_SAMPLE (\{[^\n]+\})', result.stdout)
+            if not match:
+                raise RuntimeError('Missing asynchronous icon worker measurement')
+            sample = json.loads(match[1])
+            sample['repetition'] = repetition + 1
+            report['icon_worker_samples'].append(sample)
+        report['icon_worker_passed'] = True
         for repetition in range(3):
             # Fresh process per sample: allocator retention cannot bias the next capacity.
             for capacity in [128000, 512]:

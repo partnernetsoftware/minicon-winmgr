@@ -60,7 +60,7 @@ def main():
                 print('Samples saved; matplotlib is unavailable in this Python environment. Generate the plot later with --plot-only.',flush=True)
         if args.layer=='resources':
             import resources_probe
-            step('stalled source preview and isolated logging queue measurement',resources_probe.main)
+            step('stalled source preview, asynchronous owned icons, and isolated logging queue measurement',resources_probe.main)
         if args.layer=='fault':
             report['scope']=['pin-file corruption/size/replace failure/external edit/lock',
                              'handoff manifest bounds and confinement',
