@@ -32,6 +32,8 @@ const WINDOW_TITLE: &str = "minicon-winmgr (message-only)";
 const HEARTBEAT_TIMER_ID: usize = 1;
 const DEFAULT_HEARTBEAT_SECS: u64 = 30;
 const SETTINGS_MESSAGE: u32 = 0x8000 + 141;
+pub(crate) const STARTUP_READY_MESSAGE: u32 = 0x8000 + 142;
+thread_local! { static STARTUP_READY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 pub(crate) fn request_settings() -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
@@ -229,6 +231,7 @@ pub fn run(show_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
         if show_settings {
             crate::settings_ui::show();
         }
+        STARTUP_READY.set(true);
         loop {
             let ret = GetMessageW(&mut msg, None, 0, 0);
             match ret.0 {
@@ -271,6 +274,7 @@ unsafe extern "system" fn wndproc_inner(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        STARTUP_READY_MESSAGE => LRESULT(isize::from(STARTUP_READY.get())),
         SETTINGS_MESSAGE => {
             crate::settings_ui::show();
             LRESULT(1)

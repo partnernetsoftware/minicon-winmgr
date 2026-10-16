@@ -143,6 +143,37 @@ def metrics():
         return {'handles': count.value, 'gdi': u.GetGuiResources(process, 0), 'user': u.GetGuiResources(process, 1), 'working_bytes': memory.working, 'private_bytes': memory.private}
     finally: k.CloseHandle(process)
 
+def capture_settings(output):
+    # Render only our window: desktop crops can accidentally include another
+    # application if the user changes foreground while acceptance is running.
+    from PIL import Image
+    g = c.WinDLL('gdi32', use_last_error=True)
+    u.GetDC.argtypes = [w.HWND]; u.GetDC.restype = w.HDC
+    u.ReleaseDC.argtypes = [w.HWND, w.HDC]
+    u.PrintWindow.argtypes = [w.HWND, w.HDC, w.UINT]
+    g.CreateCompatibleDC.argtypes = [w.HDC]; g.CreateCompatibleDC.restype = w.HDC
+    g.CreateCompatibleBitmap.argtypes = [w.HDC, c.c_int, c.c_int]; g.CreateCompatibleBitmap.restype = w.HBITMAP
+    g.SelectObject.argtypes = [w.HDC, w.HGDIOBJ]; g.SelectObject.restype = w.HGDIOBJ
+    g.DeleteObject.argtypes = [w.HGDIOBJ]; g.DeleteDC.argtypes = [w.HDC]
+    g.GetDIBits.argtypes = [w.HDC, w.HBITMAP, w.UINT, w.UINT, c.c_void_p, c.c_void_p, w.UINT]
+    class HEADER(c.Structure):
+        _fields_ = [('size', w.DWORD), ('width', w.LONG), ('height', w.LONG), ('planes', w.WORD), ('bits', w.WORD), ('compression', w.DWORD), ('image_size', w.DWORD), ('x', w.LONG), ('y', w.LONG), ('used', w.DWORD), ('important', w.DWORD)]
+    rect = w.RECT(); assert u.GetClientRect(panel(), c.byref(rect))
+    width, height = rect.right, rect.bottom
+    dc = u.GetDC(panel()); assert dc
+    memory = g.CreateCompatibleDC(dc); bitmap = g.CreateCompatibleBitmap(dc, width, height)
+    assert memory and bitmap
+    old = g.SelectObject(memory, bitmap)
+    try:
+        assert u.PrintWindow(panel(), memory, 3), 'PrintWindow settings failed'
+        g.SelectObject(memory, old)
+        header = HEADER(c.sizeof(HEADER), width, -height, 1, 32)
+        buffer = c.create_string_buffer(width * height * 4)
+        assert g.GetDIBits(memory, bitmap, 0, height, buffer, c.byref(header), 0) == height
+        Image.frombytes('RGB', (width, height), buffer.raw, 'raw', 'BGRX').save(output)
+    finally:
+        g.SelectObject(memory, old); g.DeleteObject(bitmap); g.DeleteDC(memory); u.ReleaseDC(panel(), dc)
+
 def shell_settings():
     result = {}
     for name, hive in [('user', winreg.HKEY_CURRENT_USER), ('machine', winreg.HKEY_LOCAL_MACHINE)]:
@@ -212,9 +243,22 @@ def main(*, include_run_regression=True):
         sequence = []
         for _ in range(7):
             key('TAB'); time.sleep(.035); sequence.append(u.GetDlgCtrlID(focus()))
-        check('native_tab_sequence_skips_disabled_radio_basis', sequence == [6102, 6103, 6108, 6110, 6111, 6114, 6101], sequence)
+        check('native_tab_sequence_skips_disabled_radio_basis', sequence == [6102, 6103, 6108, 6120, 6205, 6114, 6101], sequence)
         key('SHIFT+TAB'); time.sleep(.05)
         check('reverse_tab', u.GetDlgCtrlID(focus()) == 6114)
+        focus_id(6120); key('ENTER')
+        info = wait(lambda: window('minicon_winmgr_settings_info'))
+        wait(lambda: u.IsWindowVisible(info))
+        edit = u.GetDlgItem(info, 1)
+        check('configuration_details_show_values_sources_and_save_path', '配置来源' in text(edit) and '下次启动' in text(edit) and str(CONFIG) in text(edit))
+        key('CTRL+A')
+        check('configuration_details_support_native_text_selection', u.SendMessageW(edit, 0xB0, 0, 0) != 0)
+        key('ESC'); wait(lambda: not u.IsWindowVisible(info))
+        wait(lambda: u.GetDlgCtrlID(focus()) == 6120)
+        check('configuration_details_close_restores_entry_focus', True)
+        key('ENTER'); wait(lambda: u.IsWindowVisible(info))
+        check('configuration_details_reuse_window', window('minicon_winmgr_settings_info') == info)
+        key('ESC'); wait(lambda: not u.IsWindowVisible(info))
         focus_id(6103); key('DOWN'); time.sleep(.15)
         check('radio_arrow_applies_and_enables_basis', checked(6104) and u.IsWindowEnabled(ctrl(6106)))
         saved()
@@ -226,6 +270,9 @@ def main(*, include_run_regression=True):
         check('preview_initially_disabled_can_initialize_on_enable', checked(6108) and window('minicon_winmgr_hover_preview'))
         key('SPACE'); saved()
         # Native Tab reaches controls outside a small viewport and auto-scrolls.
+        check('advanced_actions_initially_collapsed', not u.IsWindowVisible(ctrl(6110)))
+        focus_id(6205); key('ENTER')
+        check('advanced_actions_expand_from_keyboard', u.IsWindowVisible(ctrl(6110)))
         u.MoveWindow(panel(), 120, 100, 640, 480, True); time.sleep(.15)
         focus_id(6110); time.sleep(.15)
         viewport = controls()[0]; cr = rect(viewport); br = rect(ctrl(6110))
@@ -340,10 +387,8 @@ ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
             time.sleep(.3)
         check('uia_exposes_native_roles_names_and_patterns', accessible_ok, report['uia_controls'])
         try:
-            from PIL import ImageGrab
-            r = w.RECT(); u.GetClientRect(panel(), c.byref(r)); origin = w.POINT(); u.ClientToScreen(panel(), c.byref(origin))
             output = REPORT.parent / 'images/settings_0_1_6.png'; output.parent.mkdir(parents=True, exist_ok=True)
-            ImageGrab.grab((origin.x, origin.y, origin.x + r.right, origin.y + r.bottom)).save(output)
+            capture_settings(output)
             report['screenshot'] = 'images/settings_0_1_6.png'
         except ImportError: report['screenshot'] = 'Pillow unavailable'
         report['passed'] = True

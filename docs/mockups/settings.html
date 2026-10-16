@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>winmgr · 设置设计稿</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#e8ebef;color:#1c2430;font:14px/1.55 "Segoe UI","Microsoft YaHei UI",sans-serif}button,input{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #245fcc;outline-offset:3px}main{width:min(600px,100%);margin:36px auto 14px;background:#f5f6f8;border:1px solid #d4dae2;border-radius:12px;box-shadow:0 18px 55px #26364b16;overflow:hidden}.caption{height:36px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;color:#657080;font-size:12px;background:#fff}.caption span:last-child{font-size:17px}.content{padding:22px 28px 18px;max-height:calc(100vh - 190px);overflow:auto}h1{font-size:25px;line-height:1.3;margin:0 0 5px;font-weight:650;letter-spacing:-.5px}.intro{margin:0 0 24px;color:#5b6574}h2{font-size:13px;color:#596476;margin:20px 0 8px;font-weight:600}.group{background:#fff;border:1px solid #e1e5eb;border-radius:9px;padding:0 18px}.row{padding:15px 0;display:flex;justify-content:space-between;align-items:center;gap:18px}.row+.row{border-top:1px solid #edf0f3}.label{font-weight:550}.hint{display:block;font-size:12px;color:#5b6574;font-weight:400;margin-top:3px}.tag{font-size:11px;color:#687387;background:#eef0f4;border-radius:4px;padding:2px 5px;margin-left:7px;white-space:nowrap}.toggle{appearance:none;width:35px;height:21px;border:1px solid #9ca6b3;border-radius:20px;background:#aab2bd;position:relative;flex-shrink:0;cursor:pointer;margin:0}.toggle:before{content:"";position:absolute;left:3px;top:3px;width:13px;height:13px;border-radius:50%;background:white}.toggle:checked{background:#245fcc;border-color:#245fcc}.toggle:checked:before{left:17px}.stack{display:block}.options{display:flex;gap:3px;background:#f1f3f6;border-radius:6px;padding:3px;margin-top:10px}.option{position:relative;flex:1;text-align:center;cursor:pointer}.option input{position:absolute;opacity:0;width:100%;height:100%;inset:0;margin:0;cursor:pointer}.option span{display:block;border:1px solid transparent;padding:5px 9px;border-radius:4px;color:#5b6574;white-space:nowrap}.option input:checked+span{background:#fff;border-color:#dbe0e7;color:#245fcc;box-shadow:0 1px 2px #00000008}.option input:focus-visible+span{outline:2px solid #245fcc}.option input:focus-visible{outline:0}.link{border:0;padding:0;color:#245fcc;background:none}.aux{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:18px}details{margin-top:18px;border-top:1px solid #e1e5eb;padding-top:14px}summary{cursor:pointer;color:#5b6574;font-size:13px;list-style-position:inside}.advanced{padding-top:10px}.advanced p{font-size:12px;color:#5b6574;margin:0 0 10px}.button{padding:7px 14px;border:1px solid #d3d9e2;border-radius:5px;background:#fff;color:#283448;min-height:34px}.button:hover{background:#f5f7fa}.advanced .button{margin:0 8px 5px 0}footer{background:#fff;border-top:1px solid #e1e5eb;padding:14px 28px;display:flex;align-items:center;justify-content:space-between;gap:16px}.feedback{font-size:12px;color:#5b6574}.feedback:before{content:"✓";color:#508160;margin-right:6px}.feedback.error{color:#9d3b25}.feedback.error:before{content:"!";color:inherit}.retry{display:none;font-size:12px;margin-left:8px}.error~.retry{display:inline-block}.annotation{max-width:600px;margin:0 auto 26px;color:#637084;font-size:12px;padding:0 12px;display:flex;justify-content:space-between;gap:16px}dialog{border:1px solid #d4dae2;border-radius:10px;width:min(500px,90vw);padding:24px;color:#1c2430}dialog::backdrop{background:#19273b55}dialog h2{font-size:18px;margin:0 0 14px;color:inherit}dialog p{color:#5b6574}dialog dl{display:grid;grid-template-columns:auto 1fr;gap:10px 20px;font-size:13px}dialog dt{color:#5b6574}dialog dd{margin:0}dialog form{text-align:right;margin-top:24px}@media(max-width:620px){main{margin:0;border-radius:0}.content{padding:20px;max-height:calc(100dvh - 150px)}footer{padding:14px 20px}.annotation{margin-top:14px}.row{gap:12px}.option span{padding:5px}.tag{display:inline-block;margin-left:0}}
+</style>
+<main aria-label="winmgr 设置设计稿">
+ <div class="caption"><span>winmgr</span><span aria-hidden="true">− &nbsp; □ &nbsp; ×</span></div>
+ <div class="content">
+  <h1>设置</h1><p class="intro">让任务栏按你的习惯工作。</p>
+  <h2>任务栏</h2>
+  <section class="group" aria-label="任务栏">
+   <label class="row"><span class="label">显示任务栏 <span class="tag">重启后生效</span><span class="hint" id="restart">在屏幕底部显示任务与常用入口</span></span><input class="toggle" id="taskbar" type="checkbox" checked></label>
+   <label class="row"><span class="label">显示通知区域<span class="hint">伴随模式下，应用图标由 Windows 管理</span></span><input class="toggle" type="checkbox" checked></label>
+  </section>
+  <h2>窗口行为</h2>
+  <section class="group" aria-label="窗口行为">
+   <div class="row stack"><div class="label" id="merge-label">合并窗口</div><div class="options" role="radiogroup" aria-labelledby="merge-label">
+    <label class="option"><input type="radio" name="merge" value="never" checked><span>从不</span></label>
+    <label class="option"><input type="radio" name="merge" value="overflow"><span>放不下时</span></label>
+    <label class="option"><input type="radio" name="merge" value="always"><span>始终</span></label>
+   </div></div>
+   <div class="row stack"><div class="label" id="basis-label">合并依据</div><div class="options" role="radiogroup" aria-labelledby="basis-label">
+    <label class="option"><input type="radio" name="basis" checked><span>按应用</span></label>
+    <label class="option"><input type="radio" name="basis"><span>按进程</span></label>
+   </div></div>
+   <label class="row"><span class="label">悬停预览<span class="hint">鼠标停留时显示窗口缩略图</span></span><input class="toggle" type="checkbox"></label>
+  </section>
+  <div class="aux"><button class="link" id="about-open">配置与关于…</button></div>
+  <details><summary>桌面管理</summary><div class="advanced"><p>更改由哪个程序管理桌面。操作前会再次确认。</p><button class="button" data-action="接管桌面">接管桌面…</button><button class="button" data-action="还原系统桌面">还原系统桌面…</button></div></details>
+ </div>
+ <footer><div role="status" aria-live="polite"><span class="feedback" id="status">更改会自动保存</span><button class="link retry" id="retry">重试</button></div><button class="button" id="close">关闭</button></footer>
+</main>
+<div class="annotation"><span>交互设计稿 · 不修改系统或配置</span><button class="link" id="fail">演示保存失败</button></div>
+<dialog id="about"><h2>配置与关于</h2><p>这里集中展示有效配置及其来源。</p><dl><dt>版本</dt><dd>0.1.6 · 设计示意</dd><dt>运行权限</dt><dd>普通权限（示例）</dd><dt>显示任务栏</dt><dd id="about-taskbar">开启 · 默认值</dd><dt>通知区域</dt><dd>开启 · 默认值</dd><dt>合并窗口</dt><dd id="about-merge">从不 · 默认值</dd><dt>合并依据</dt><dd id="about-basis">按应用 · 默认值</dd><dt>悬停预览</dt><dd id="about-preview">关闭 · 默认值</dd></dl><p class="hint">产品实现会列出真实生效值、配置来源及路径，并支持复制。此处均为界面示例。</p><form method="dialog"><button class="button">关闭</button></form></dialog>
+<dialog id="confirmation"><h2 id="confirmation-title">操作预览</h2><p>这里只演示确认步骤，不执行桌面管理操作。</p><form method="dialog"><button class="button" autofocus>返回设置</button></form></dialog>
+<script>
+const status=document.querySelector('#status'),about=document.querySelector('#about');let timer,failed=false;
+function feedback(text,error=false){status.textContent=text;status.classList.toggle('error',error)}
+function save(){clearTimeout(timer);failed=false;feedback('正在保存…');timer=setTimeout(()=>feedback(document.querySelector('#taskbar').checked?'已生效并保存':'已保存，重启后生效'),500)}
+document.querySelectorAll('main input').forEach(el=>el.addEventListener('change',()=>{document.querySelector('#restart').textContent=document.querySelector('#taskbar').checked?'在屏幕底部显示任务与常用入口':'当前仍显示 · 下次启动关闭';save()}));
+document.querySelector('#fail').onclick=()=>{clearTimeout(timer);failed=true;feedback('本次已生效，但未保存',true)};
+document.querySelector('#retry').onclick=save;
+document.querySelector('#about-open').onclick=()=>{const toggles=document.querySelectorAll('.toggle');document.querySelector('#about-taskbar').textContent=(toggles[0].checked?'开启':'关闭')+' · 设计稿选择';document.querySelector('#about-preview').textContent=(toggles[2].checked?'开启':'关闭')+' · 设计稿选择';document.querySelector('#about-merge').textContent=document.querySelector('[name=merge]:checked+span').textContent+' · 设计稿选择';document.querySelector('#about-basis').textContent=document.querySelector('[name=basis]:checked+span').textContent+' · 设计稿选择';about.showModal()};
+document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>{document.querySelector('#confirmation-title').textContent=b.dataset.action;document.querySelector('#confirmation').showModal()});
+document.querySelector('#close').onclick=()=>{document.querySelector('#confirmation-title').textContent='关闭设置';document.querySelector('#confirmation p').textContent=failed?'产品将隐藏设置，并保留未保存提示；此处不关闭设计稿。':'产品将隐藏设置，winmgr 继续运行；此处不关闭设计稿。';document.querySelector('#confirmation').showModal()};
+</script>
+</html>

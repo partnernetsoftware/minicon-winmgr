@@ -17,11 +17,13 @@ mod logging;
 mod metrics;
 mod model;
 mod monitor;
+mod privilege;
 mod quick_launch;
 mod recents;
 mod run_dialog;
 mod run_history;
 mod session;
+mod settings_info;
 mod settings_panel;
 mod settings_store;
 mod settings_ui;
@@ -90,6 +92,23 @@ impl Cli {
 }
 
 fn main() {
+    match privilege::normalize() {
+        Ok(Some(_pid)) => return,
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("minicon-winmgr: {error}");
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                    None,
+                    windows::core::PCWSTR(win_util::wide(&error).as_ptr()),
+                    windows::core::PCWSTR(win_util::wide("无法以普通权限启动").as_ptr()),
+                    windows::Win32::UI::WindowsAndMessaging::MB_OK
+                        | windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+                );
+            }
+            std::process::exit(1);
+        }
+    }
     // CLI invocations may need a console for their output; the shell run must
     // stay console-free, so only attach when arguments are present.
     if std::env::args_os().nth(1).is_some() {

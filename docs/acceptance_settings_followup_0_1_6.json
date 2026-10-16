@@ -1,0 +1,340 @@
+{
+  "version": "0.1.6",
+  "tests": [
+    {
+      "name": "settings_cli_reuses_same_instance",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "native_tab_sequence_skips_disabled_radio_basis",
+      "passed": true,
+      "detail": [
+        6102,
+        6103,
+        6108,
+        6120,
+        6205,
+        6114,
+        6101
+      ]
+    },
+    {
+      "name": "reverse_tab",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "configuration_details_show_values_sources_and_save_path",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "configuration_details_support_native_text_selection",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "configuration_details_close_restores_entry_focus",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "configuration_details_reuse_window",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "radio_arrow_applies_and_enables_basis",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "pending_taskbar_hide_keeps_current_bar_and_dependencies",
+      "passed": true,
+      "detail": "重启后生效 · 当前显示 / 下次隐藏"
+    },
+    {
+      "name": "restore_next_start_taskbar",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preview_initially_disabled_can_initialize_on_enable",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "advanced_actions_initially_collapsed",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "advanced_actions_expand_from_keyboard",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "small_viewport_scrolls_focused_action_into_view",
+      "passed": true,
+      "detail": {
+        "viewport": [
+          156,
+          131,
+          707,
+          496
+        ],
+        "focused": [
+          156,
+          462,
+          425,
+          496
+        ]
+      }
+    },
+    {
+      "name": "small_viewport_footer_remains_reachable",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "cancel_returns_focus_to_original_settings_button",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "desktop_action_confirmation_cancel_preserves_shell",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "escape_hides_reused_settings",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reopen_same_window",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "save_failure_is_visible_and_session_value_applied",
+      "passed": true,
+      "detail": "本次修改已保留，1 项保存失败；下次启动尚未保存。请重试。"
+    },
+    {
+      "name": "save_failure_survives_hide_reopen",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "dirty_shutdown_default_returns_to_settings",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "failed_write_kept_original_bytes",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "retry_same_choice_persists_without_retoggling",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "100_settings_reopens_and_preview_cycles_no_resource_growth",
+      "passed": true,
+      "detail": [
+        {
+          "handles": 363,
+          "gdi": 44,
+          "user": 87,
+          "working_bytes": 39772160,
+          "private_bytes": 14479360
+        },
+        {
+          "handles": 363,
+          "gdi": 46,
+          "user": 91,
+          "working_bytes": 39862272,
+          "private_bytes": 14553088
+        },
+        {
+          "handles": 363,
+          "gdi": 44,
+          "user": 88,
+          "working_bytes": 39960576,
+          "private_bytes": 14626816
+        }
+      ]
+    },
+    {
+      "name": "saved_restart_preference",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "disabled_taskbar_start_still_has_settings_cli",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "settings_cli_without_taskbar_reuses_instance",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "valid_env_override_is_read_only_and_invalid_env_is_not",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "environment_did_not_rewrite_file_preference",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "run_expands_known_argument_variables_and_preserves_unknown",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "document_path_expands_or_explains_broken_association",
+      "passed": true,
+      "detail": "文件存在，但默认打开程序不可用。请在文件路径前指定程序（例如 notepad），或修复系统默认打开方式。"
+    },
+    {
+      "name": "notification_panel_retains_time_settings_entry",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "native_control_names_and_states",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "uia_exposes_native_roles_names_and_patterns",
+      "passed": true,
+      "detail": [
+        {
+          "id": "6101",
+          "name": "显示任务栏",
+          "role": "ControlType.CheckBox",
+          "enabled": true,
+          "patterns": [
+            "TogglePatternIdentifiers.Pattern"
+          ]
+        },
+        {
+          "id": "6103",
+          "name": "从不合并",
+          "role": "ControlType.RadioButton",
+          "enabled": true,
+          "patterns": [
+            "SelectionItemPatternIdentifiers.Pattern"
+          ]
+        },
+        {
+          "id": "6106",
+          "name": "按应用（可执行文件）",
+          "role": "ControlType.RadioButton",
+          "enabled": true,
+          "patterns": [
+            "SelectionItemPatternIdentifiers.Pattern"
+          ]
+        },
+        {
+          "id": "6114",
+          "name": "关闭",
+          "role": "ControlType.Button",
+          "enabled": true,
+          "patterns": [
+            "InvokePatternIdentifiers.Pattern"
+          ]
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Physical mixed-DPI monitors and monitor unplugging are not available in this session.",
+    "Screen-reader speech and system high-contrast appearance require separate environmental coverage.",
+    "Elevated cold start, no linked token on an elevated account, process-creation failure injection and hour-long sampling remain untested.",
+    "Full legacy Run history and IME regression not rerun; focused Run checks included."
+  ],
+  "synchronous_reopen_and_two_toggles_ms": {
+    "median": 95.9779005497694,
+    "p95": 140.93450084328651,
+    "max": 214.45250138640404,
+    "method": "SendMessage hide/show plus two native button clicks; excludes asynchronous disk completion"
+  },
+  "uia_controls": [
+    {
+      "id": "6101",
+      "name": "显示任务栏",
+      "role": "ControlType.CheckBox",
+      "enabled": true,
+      "patterns": [
+        "TogglePatternIdentifiers.Pattern"
+      ]
+    },
+    {
+      "id": "6103",
+      "name": "从不合并",
+      "role": "ControlType.RadioButton",
+      "enabled": true,
+      "patterns": [
+        "SelectionItemPatternIdentifiers.Pattern"
+      ]
+    },
+    {
+      "id": "6106",
+      "name": "按应用（可执行文件）",
+      "role": "ControlType.RadioButton",
+      "enabled": true,
+      "patterns": [
+        "SelectionItemPatternIdentifiers.Pattern"
+      ]
+    },
+    {
+      "id": "6114",
+      "name": "关闭",
+      "role": "ControlType.Button",
+      "enabled": true,
+      "patterns": [
+        "InvokePatternIdentifiers.Pattern"
+      ]
+    }
+  ],
+  "screenshot": "images/settings_followup_0_1_6.png",
+  "passed": true,
+  "normal_session_restored": true,
+  "shell_registration_unchanged": true,
+  "scope": "Post-release 0.1.6 settings follow-up; not the original release acceptance",
+  "privilege_existing_instance": {
+    "scenario": "elevated launcher --settings routes to existing ordinary instance",
+    "existing_pid": 76900,
+    "launcher_pid": 295688,
+    "launcher_elevated": 1,
+    "wait_result": 0,
+    "exit_code": 0,
+    "current_pid": 76900,
+    "current_elevated": 0,
+    "shell_registration_unchanged": true,
+    "passed": true,
+    "scope_note": "Elevated launch verified before final native environment-block preservation refinement; that refinement was unit-tested without requesting elevation again."
+  },
+  "source_sha256": {
+    "src/privilege.rs": "1ac8cc0537583ae06de0b7f50cb9249c2ce65a991738f8ad292b8b4317903dd9",
+    "src/window.rs": "d7c001b417644b86847f3861603c4173e22c1e0ae106baac0927c43520c4561c",
+    "src/settings_panel.rs": "7fdf03c954185ae17fe7641ad4795c68c4790dea8d35ce022bfeb996ba9491d0",
+    "src/settings_info.rs": "68a340648acae83c168fc4e3c9ad4d9b85d42ecaf5053e677a481a558337a546"
+  },
+  "final_source_sha256": {
+    "src/privilege.rs": "8977506eaef086877203ece48232deda650f2b779e256aab34acc4018f626726",
+    "src/window.rs": "d7c001b417644b86847f3861603c4173e22c1e0ae106baac0927c43520c4561c",
+    "src/settings_panel.rs": "7fdf03c954185ae17fe7641ad4795c68c4790dea8d35ce022bfeb996ba9491d0",
+    "src/settings_info.rs": "68a340648acae83c168fc4e3c9ad4d9b85d42ecaf5053e677a481a558337a546"
+  }
+}
