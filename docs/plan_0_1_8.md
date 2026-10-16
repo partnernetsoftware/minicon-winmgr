@@ -1,6 +1,6 @@
 # 0.1.8 设计与交付计划
 
-状态：实现及完整发布验收通过，准备 GitHub Release。基线为已发布的 [v0.1.7](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.7)。用户对当前设置暂基本接受；本轮保留紧凑、克制的暖色视觉方向。
+状态：[v0.1.8 已公开发布](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.8)，完整发布验收通过，下载附件 SHA-256 同时匹配校验文件与 GitHub 摘要。详见[发布核验](releases/v0.1.8-published.json)。基线为已发布的 [v0.1.7](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.7)。用户对当前设置暂基本接受；本轮保留紧凑、克制的暖色视觉方向。
 
 ## 产品定位：稳定优先，简约常驻
 
