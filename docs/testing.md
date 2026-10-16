@@ -23,3 +23,9 @@
 发布层构建目录为 `target/release-validation`，避免旧会话直接运行 `target/release` 时锁住 Cargo 硬链接产物。不会为释放构建文件而结束其他会话。桌面专项仍复制产物到 live 后运行。
 
 更新层会将当前源码回移到隔离的 0.1.8 测试构建，以验证真实 0.1.9 目标的两版本交接；该 fixture 不是历史公开版。服务仅监听 loopback，验收报告明确记录两份二进制 SHA-256。后台助手只允许本用户/本会话，并等旧进程退出后才修改本测试安装。成功后清理本轮自建用例目录，保留事务事实与截图。
+
+## 公开证据检查
+
+提交及发布前运行 `python scripts/check_public_docs.py`，CI 同样检查 Git 暂存区内容，拒绝原始验收 JSON 和工作站路径。可先运行 `python scripts/check_public_docs.py --self-test` 验证检查器。不要将原始报告复制到 docs；公开结果写入人工审阅的 Markdown，截图只使用无个人路径的隔离演示。该检查不能识别图片中的文字，图片必须目视检查。
+
+0.1.10 计划新增 memory/resources/fault/soak 层，当前尚未实现，不属于现有命令。

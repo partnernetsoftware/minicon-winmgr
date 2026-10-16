@@ -1,6 +1,6 @@
 # 0.1.9 需求：设置中的版本更新
 
-状态：开发及完整发布验收已完成，准备 GitHub Release。0.1.8 已发布并完成下载核验。
+状态：[v0.1.9 已公开发布](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.9)，完整验收、公开附件校验及实际下载重启交接已完成。详见[公开验收摘要](validation.md)。下一版见[0.1.10 设计](plan_0_1_10.md)。
 
 设置提供 **Check / Update / Restart**（中文：检查更新 / 更新 / 重启），不增加任务栏常驻入口。参考本地 `../minicon/src/update.rs`、`host_ui.rs` 的三按钮状态映射，以及 `main.rs::restart_into_staged`。
 
@@ -26,6 +26,6 @@ API 依据：[WinHTTP 超时](https://learn.microsoft.com/en-us/windows/win32/ap
 
 ## 发布验收
 
-完整 release 层通过：268 项单元测试、15 项更新/回滚、36 项设置、22 项 Run 回归、44 项按需交互、16 项布局、27 项主题/停靠和 8 项任务管理器检查。详见[原始验收记录](acceptance_release_0_1_9.json)。
+完整 release 层通过：268 项单元测试、15 项更新/回滚、36 项设置、22 项 Run 回归、44 项按需交互、16 项布局、27 项主题/停靠和 8 项任务管理器检查。详见[验收摘要](validation.md)。
 
 内部交接协议：`--apply-update plan.json` 运行暂存助手，`--after-update started` 启动新版并确认回执。后续版本须保留兼容；缺少回执或构建版本与目标版本不同会触发回滚。

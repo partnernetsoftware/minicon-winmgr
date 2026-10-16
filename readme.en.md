@@ -9,15 +9,15 @@ A lightweight Windows desktop shell built with Rust and Win32, designed as a rep
 ## Why minicon-winmgr
 
 - **Stability at the core.** Rust's ownership and type systems reduce memory-error risks, with explicit handle and resource-lifetime management at Win32 boundaries. Failed settings saves preserve the original file and support retries; shutdown restores the work area. Full release regression checks provide reproducible evidence of reliability.
-- **Low resident memory use.** Native Rust and Win32, without an embedded browser engine. A local v0.1.7 release sample across 40 theme/position switches measured approximately **13.5–13.9 MiB of private bytes** and **36 MiB of working set**. See the [measurements and scope](docs/acceptance_release_0_1_7.json). These are short-run, scenario-specific results; a long-term memory study is tentatively planned for 0.1.10.
+- **A lean native foundation.** Rust and Win32 without an embedded browser engine; optional features initialize on demand. [0.1.10](docs/plan_0_1_10.md) will measure long-term memory trends and investigate resource growth. Published results describe their actual test scope.
 - **Minimal by default, optional by choice.** Everyday paths stay focused on the taskbar and settings. Thumbnail previews are off by default and do not create a preview window; companion mode leaves Explorer's notification host in place. Optional capabilities remain a user choice, keeping extra controls and default overhead down.
 
-Product principle: **Optional features you do not need should not load by default.** In 0.1.8, the legacy menu is not initialized by default, previews do not create a window until enabled, and Run creates its window and workers on first use. The notification host initializes according to shell identity and explicit configuration. See the [0.1.8 design and acceptance](docs/plan_0_1_8.md).
+Product principle: **Optional features you do not need should not load by default.** In 0.1.8, the legacy menu is not initialized by default, previews do not create a window until enabled, and Run creates its window and workers on first use. The notification host initializes according to shell identity and explicit configuration. See the [0.1.8 design and acceptance](docs/archive/plan_0_1_8.md).
 
 
 Current release: **[0.1.9](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.9)**. See the [changelog](CHANGELOG.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_9.md). Linked design and specification documents are currently primarily in Chinese.
 
-Version 0.1.9 adds manual Check / Update / Restart controls in settings, with verified downloads and recovery on failed handoff. It retains on-demand initialization, taskbar Home/End and Space navigation, Esc to return to the previous window, and explicit Use/Run feedback for candidates. It retains compact settings, English/Chinese UI with English as the default, Light/Dark/Auto themes, and taskbar docking on all four edges. Desktop management stays collapsed, and configuration details can be selected and copied. If the process is already elevated, it restarts as the same user in the same session with standard privileges. Ordinary launches continue directly; the application does not request UAC elevation. See the [release acceptance record](docs/acceptance_release_0_1_9.json) for validation and coverage limits.
+Version 0.1.9 adds manual Check / Update / Restart controls in settings, with verified downloads and recovery on failed handoff. It retains on-demand initialization, taskbar Home/End and Space navigation, Esc to return to the previous window, and explicit Use/Run feedback for candidates. It retains compact settings, English/Chinese UI with English as the default, Light/Dark/Auto themes, and taskbar docking on all four edges. Desktop management stays collapsed, and configuration details can be selected and copied. If the process is already elevated, it restarts as the same user in the same session with standard privileges. Ordinary launches continue directly; the application does not request UAC elevation. See the [release acceptance record](docs/validation.md) for validation and coverage limits.
 
 ## Settings preview
 
@@ -33,12 +33,7 @@ Actual native Win32 windows, captured from 0.1.9. Language changes apply immedia
 
 Screenshots render only this application's windows.
 
-Run updates suggestions as you type and separates adopting a candidate from executing a command (actual windows with an isolated demo configuration):
-
-| Select a candidate / Use | Edit after adoption / Run |
-|---|---|
-| ![Run candidate selection](docs/images/run_0_1_8_en_use.png) | ![Run after adoption](docs/images/run_0_1_8_en_ready.png) |
- See the [UI design](docs/design_0_1_6_industrial.md) and [test layers](docs/testing.md).
+See the [UI design](docs/design.md) and [test layers](docs/testing.md).
 
 ## Capabilities
 
@@ -85,12 +80,12 @@ Shell takeover immediately closes the current session's desktop shell and change
 ## Development and documentation
 
 - [Code and documentation map](docs/code-map.md): module boundaries, gaps, and evidence.
-- [Implementation plan](docs/plan_0_1_6.md): settings usability and feedback, including the 0.1.7 release follow-up.
-- [0.1.8 design and delivery](docs/plan_0_1_8.md): on-demand startup and daily interactions.
+- [Implementation plan](docs/archive/plan_0_1_6.md): settings usability and feedback, including the 0.1.7 release follow-up.
+- [0.1.8 design and delivery](docs/archive/plan_0_1_8.md): on-demand startup and daily interactions.
 - [0.1.9 update design](docs/plan_0_1_9.md): Check / Update / Restart.
 - [Future capabilities](docs/prd_5_1.md): unscheduled requirements and prerequisites.
 - [Archive](docs/archive/README.md): historical plans, roadmaps, and documentation.
 
 Use `python scripts/test.py` for quick development checks. `--layer unit --filter config::tests` runs one test module; `--layer appearance` or `--layer settings` runs the corresponding desktop checks. Before a release, `--layer release` runs the full automated suite against an optimized build. See [test layers](docs/testing.md) for scope and environment requirements. Release validation builds in `target/release-validation` to avoid locks from older instances. Windows CI runs static `quality` checks; the release workflow additionally runs all unit tests and builds tagged releases. Code signing is not included. For custom toolchain locations, set `RUSTUP_HOME`/`CARGO_HOME` and add Cargo's bin directory to PATH.
 
-See the [0.1.9 release acceptance record](docs/acceptance_release_0_1_9.json). Historical 0.1.6 evidence remains in its [plan](docs/plan_0_1_6.md) and [acceptance data](docs/acceptance_0_1_6.json). Physical mixed-DPI monitors, monitor hot-plugging, screen-reader speech, high-contrast display, and hour-long stability remain outside the current coverage.
+See the [0.1.9 release acceptance record](docs/validation.md). Historical 0.1.6 evidence remains in its [plan](docs/archive/plan_0_1_6.md) and [acceptance data](docs/validation.md). Physical mixed-DPI monitors, monitor hot-plugging, screen-reader speech, high-contrast display, and hour-long stability remain outside the current coverage.

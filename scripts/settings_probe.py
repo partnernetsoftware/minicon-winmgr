@@ -22,7 +22,7 @@ LIVE = ROOT / 'target/debug/live/minicon-winmgr.exe'
 SOURCE = ROOT / 'target/debug/minicon-winmgr.exe'
 TEST = ROOT / 'target/settings-acceptance'
 CONFIG = TEST / 'settings.txt'
-REPORT = ROOT / 'docs/acceptance_0_1_6.json'
+REPORT = ROOT / 'target/test-reports/settings/settings.json'
 u = c.WinDLL('user32', use_last_error=True)
 k = c.WinDLL('kernel32', use_last_error=True)
 u.SetProcessDPIAware()
@@ -393,9 +393,9 @@ ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
             time.sleep(.3)
         check('uia_exposes_native_roles_names_and_patterns', accessible_ok, report['uia_controls'])
         try:
-            output = REPORT.parent / 'images/settings_0_1_6.png'; output.parent.mkdir(parents=True, exist_ok=True)
+            output = REPORT.parent / 'images/settings.png'; output.parent.mkdir(parents=True, exist_ok=True)
             capture_settings(output)
-            report['screenshot'] = 'images/settings_0_1_6.png'
+            report['screenshot'] = 'images/settings.png'
         except ImportError: report['screenshot'] = 'Pillow unavailable'
         report['passed'] = True
     except Exception as error:
@@ -417,6 +417,7 @@ ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
             report['normal_session_restored'] = bool(window('minicon_winmgr_taskbar'))
         finally:
             report['shell_registration_unchanged'] = shell_settings() == original_shell
+            REPORT.parent.mkdir(parents=True, exist_ok=True)
             REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
             print(json.dumps(report, ensure_ascii=True, indent=2))
 

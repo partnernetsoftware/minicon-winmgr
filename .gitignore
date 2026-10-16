@@ -11,3 +11,8 @@ scripts/*.py
 !scripts/test.py
 scripts/__pycache__/
 !scripts/update_probe.py
+
+# Raw workstation evidence stays local; publish reviewed Markdown summaries only.
+/docs/acceptance*.json
+/docs/releases/*-published.json
+!scripts/check_public_docs.py

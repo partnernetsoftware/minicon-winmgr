@@ -1,20 +1,20 @@
 # 代码与文档地图
 
-> 2026-10-15 · 0.1.6 实现地图；基线 0.1.5 / `2f1a470`。验收见 [版本计划](plan_0_1_6.md)。
+> 2026-10-16 · 当前实现 0.1.9；验证见[验收摘要](validation.md)，下一版见[0.1.10 设计](plan_0_1_10.md)。
 
 | 用户路径 | 主要实现 | 规格/证据 |
 |---|---|---|
 | 启动、消息循环、单实例、事件分发 | `main`、`window`、`single_instance`、`hub`、`window_events` | [可靠性约束](prd_2_1.md) |
-| 主题与四边布局 | `appearance`（原生主题）、`config`（调色板/来源）、`dock`（纯几何）、`taskbar`（横纵布局） | [工业风设计](design_0_1_6_industrial.md)、[测试分层](testing.md) |
+| 主题与四边布局 | `appearance`（原生主题）、`config`（调色板/来源）、`dock`（纯几何）、`taskbar`（横纵布局） | [工业风设计](design.md)、[测试分层](testing.md) |
 | 枚举窗口、分组与任务切换 | `window_snapshot`、`model`、`grouping`、`taskbar`、`task_list`、`monitor` | [任务栏策略](prd_6_1.md) |
 | 设置、配置来源与持久化 | `settings_ui`（桌面管理门面）、`settings_panel`（原生窗口）、`config`（状态/来源）、`settings_store`（串行 IO） | [0.1.6 需求](prd_6_1_1.md) |
 | 启动、Run、历史、路径建议 | `launcher`、`launcher_ui`、`run_dialog`、`run_history`、`shell_launch` | [Run 规格](prd_1_1_1.md) |
-| 通知宿主、图标、面板 | `tray_host`、`tray`、`tray_bar`、`tray_popup` | [通知规格](prd_1_1_2.md)、[验收数据](acceptance_0_1_5.json) |
-| 悬停标题/缩略图、图标 | `bar_tip`、`hover_preview`、`window_icon` | [当前限制与计划](plan_0_1_6.md) |
+| 通知宿主、图标、面板 | `tray_host`、`tray`、`tray_bar`、`tray_popup` | [通知规格](prd_1_1_2.md)、[验收数据](validation.md) |
+| 悬停标题/缩略图、图标 | `bar_tip`、`hover_preview`、`window_icon` | [当前限制与计划](archive/plan_0_1_6.md) |
 | 兼容的旧菜单、快捷固定项、文件夹 | `start_menu`、`quick_launch`、`folder_stack`、`recents` | [后续清单](prd_5_1.md)；默认 UI 入口已退役 |
 | 外壳接管、回滚、会话与观测 | `shell_registry`、`shell_swap`、`session`、`logging`、`metrics` | [外壳规格](prd_3_1.md) |
 
-## 0.1.6 落地与剩余边界
+## 已交付基础与覆盖边界
 
 - 原生控件、对话框键盘路由、滚动视口和固定反馈页脚替代设置行命中区域；窗口处理 DPI/工作区变化并释放替换字体。
 - 独立串行 IO worker 合并最新键值；读取、备份、临时文件与替换有分阶段错误；旧结果不清除新请求，失败可重试。
@@ -33,8 +33,10 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 - `src/i18n.rs`：English/中文界面目录、默认语言和自有窗口标题/控件本地化；不转换命令或用户输入。
 
-文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](plan_0_1_8.md)；本轮：[0.1.9 设置更新](plan_0_1_9.md)。
+文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；本轮：[0.1.9 设置更新](plan_0_1_9.md)。
 
 0.1.8：Run 快捷键路由在 `window`，窗口与 worker 在首次 `run_dialog::show` 创建；`run_history` 提供有界本地应用发现与路径/环境变量建议。主题化原生候选行保留完整 LB 字符串。`win_util::force_foreground` 处理跨权限 restore，`taskbar` 按点击坐标命中任务；专项脚本 `interaction_probe.py` / `taskmgr_probe.py` 纳入发布层。
 
 0.1.9：`update` 管理手动状态与一次性 worker；`update_http` 封装有界 WinHTTP/CNG；`update_install` 负责暂存、同版本助手、进程退出等待、备份替换、启动回执与回滚；`settings_panel` 呈现三按钮和双语状态，不在渲染路径联网。`scripts/update_probe.py` 为隔离真实交接层，并纳入 release。
+
+0.1.9：`update` 管理手动状态与短生命周期 worker，`update_http` 约束 WinHTTP 与哈希校验，`update_install` 管理独立助手、替换、启动回执及回滚；设置中的三按钮不在启动时联网。
