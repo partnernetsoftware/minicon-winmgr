@@ -69,4 +69,4 @@ python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <norm
 
 该入口会暂时正常关闭当前桌面的 winmgr，并在 finally 从原路径恢复，要求输入桌面可访问及普通用户权限，不使用全局鼠标/键盘，不修改注册或覆盖原二进制。当前真实生命周期尚待实机验证；先运行短测，再安排长观察，不能与其他桌面测试并发。控制器被强制结束时须参考本轮忽略目录内的恢复记录人工启动原实例。原始报告仅在 target；其中恢复记录有本地路径，禁止复制到公共文档。
 
-`python scripts/test_scenario_probe.py` 的 9 项模拟生命周期检查不需要桌面，也纳入 quality 和 release。模拟通过只证明驱动控制流，不能证明 native 恢复成功或应用资源稳定。曲线可用现有 memory_probe 的 `--plot-only` 从每个 run 目录生成；缺少 matplotlib 时保留数据后再生成。
+`python scripts/test_scenario_probe.py` 的 10 项模拟生命周期检查不需要桌面，也纳入 quality 和 release。模拟通过只证明驱动控制流，不能证明 native 恢复成功或应用资源稳定。曲线可用现有 memory_probe 的 `--plot-only` 从每个 run 目录生成；缺少 matplotlib 时保留数据后再生成。

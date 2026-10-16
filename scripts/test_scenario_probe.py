@@ -19,7 +19,7 @@ def arguments(root,**changes):
 
 class Fixture:
     def __init__(self,root):
-        self.root=root
+        self.root=root.resolve()
         (root/'normal.exe').write_bytes(b'original fixture executable')
         (root/'candidate.exe').write_bytes(b'candidate fixture executable')
         self.current=10;self.paths={10:root/'normal.exe'};self.children={};self.events=[]
@@ -124,6 +124,14 @@ class DriverTests(unittest.TestCase):
             report=self.report(root)
             self.assertFalse(report['restored']);self.assertFalse(report['passed'])
             self.assertTrue((root/'normal.exe').exists())
+
+    def test_restore_failure_is_detected_with_a_noncanonical_temporary_root(self):
+        with tempfile.TemporaryDirectory(prefix='winmgr-scenario-test-') as folder:
+            root=Path(folder);alias=root/'..'/root.name
+            fixture=Fixture(alias);fixture.fail_restore=True
+            with self.assertRaisesRegex(RuntimeError,'restore failed'):
+                self.run_case(alias,fixture,arguments(alias,fail_at='after-stop'))
+            self.assertFalse(self.report(root)['restored'])
 
     def test_original_refusing_exit_is_not_killed_or_restarted(self):
         with tempfile.TemporaryDirectory(prefix='winmgr-scenario-test-') as folder:
