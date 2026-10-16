@@ -83,6 +83,8 @@ def main():
         if args.layer=='check': command('cargo','check')
         if args.layer in ['quality','release']:
             command('cargo','clippy','--all-targets','--','-D','warnings')
+        if args.layer=='quality':
+            command('cargo','test','logging::tests')
         if args.layer in ['unit','release']:
             command('cargo','test','--all',*(['--release'] if args.layer=='release' else []),*([args.filter] if args.filter else []))
         if args.layer in ['side-resize','layout','appearance','interaction','taskmgr','update','settings','release']:

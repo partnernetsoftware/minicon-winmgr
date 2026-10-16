@@ -1,6 +1,5 @@
 //! Observability foundation: rolling file + stderr logging, and a panic hook
-//! that records panics through the same pipeline before delegating to the
-//! default hook.
+//! that withholds private text in fields, spans and panic output.
 
 use std::path::PathBuf;
 
@@ -65,6 +64,78 @@ where
     }
 }
 
+/// Text fields can contain paths, commands, window titles or error chains.
+/// Keep event messages (audited static literals) and primitive counters only.
+/// This applies at every verbosity, to both sinks and to span fields.
+#[derive(Clone, Copy)]
+struct PrivateFields;
+struct PrivateVisitor<'a> {
+    writer: fmt::format::Writer<'a>,
+    result: std::fmt::Result,
+}
+impl PrivateVisitor<'_> {
+    fn value(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if self.result.is_ok() {
+            self.result = if field.name() == "message" {
+                write!(self.writer, "{value:?}")
+            } else {
+                write!(self.writer, " {}={value:?}", field.name())
+            };
+        }
+    }
+}
+impl tracing::field::Visit for PrivateVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.value(field, value);
+        } else {
+            self.value(field, &"[redacted]");
+        }
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, _: &str) {
+        self.value(field, &"[redacted]");
+    }
+    fn record_error(
+        &mut self,
+        field: &tracing::field::Field,
+        _: &(dyn std::error::Error + 'static),
+    ) {
+        self.value(field, &"[redacted]");
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.value(field, &value);
+    }
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.value(field, &value);
+    }
+    fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
+        self.value(field, &value);
+    }
+    fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
+        self.value(field, &value);
+    }
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        self.value(field, &value);
+    }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.value(field, &value);
+    }
+}
+impl<'writer> fmt::FormatFields<'writer> for PrivateFields {
+    fn format_fields<R: tracing_subscriber::field::RecordFields>(
+        &self,
+        writer: fmt::format::Writer<'writer>,
+        fields: R,
+    ) -> std::fmt::Result {
+        let mut visitor = PrivateVisitor {
+            writer,
+            result: Ok(()),
+        };
+        fields.record(&mut visitor);
+        visitor.result
+    }
+}
+
 // The dependency default reserves 128,000 queue slots. A desktop shell needs
 // a small burst buffer, not a server-sized backlog. Saturation must never
 // apply disk backpressure to the message thread.
@@ -87,12 +158,14 @@ pub fn init() -> WorkerGuard {
 
     let file_layer = fmt::layer()
         .with_writer(file_writer)
+        .fmt_fields(PrivateFields)
         .event_format(BoundedFormat(
             fmt::format().with_ansi(false).with_target(true),
         ));
 
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
+        .fmt_fields(PrivateFields)
         .event_format(BoundedFormat(fmt::format().with_ansi(true)));
 
     let subscriber = tracing_subscriber::registry()
@@ -122,33 +195,21 @@ fn log_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("logs"))
 }
 
-/// Records panics (location + payload) via tracing, then runs the previous
-/// hook so default behavior (unwind / abort) is preserved. Also mirrors to
-/// stderr because the non-blocking writer may not flush before abort.
+/// Panic payloads and source paths may contain private data. Replacing the
+/// output hook does not change Rust's unwind/abort behavior. Never delegate to
+/// the default hook, which prints the payload and may print an absolute path.
 fn install_panic_hook() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let location = info
-            .location()
-            .map(|l| l.to_string())
-            .unwrap_or_else(|| "<unknown>".to_string());
-        let payload = payload_str(info.payload());
-
-        tracing::error!(location = %location, payload = %payload, "panic");
-        eprintln!("minicon-winmgr panic at {location}: {payload}");
-
-        previous(info);
+    std::panic::set_hook(Box::new(|info| {
+        let line = info.location().map_or(0, |location| location.line());
+        let column = info.location().map_or(0, |location| location.column());
+        tracing::error!(
+            line,
+            column,
+            "panic; private payload and source path withheld"
+        );
+        // The nonblocking queue may not flush before abort.
+        eprintln!("minicon-winmgr panic at source line {line}:{column}; private details withheld");
     }));
-}
-
-fn payload_str(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "<non-string panic payload>".to_string()
-    }
 }
 
 #[cfg(test)]
@@ -194,6 +255,137 @@ mod tests {
             assert!(text.contains("next event"));
             assert!(!text.contains("truncated"));
         });
+    }
+
+    #[test]
+    fn event_messages_are_static_literals_without_interpolation() {
+        use syn::visit::Visit;
+        struct Audit;
+        impl<'ast> Visit<'ast> for Audit {
+            fn visit_macro(&mut self, node: &'ast syn::Macro) {
+                let name = node.path.segments.last().unwrap().ident.to_string();
+                if name == "span" || name.ends_with("_span") {
+                    let tokens: Vec<_> = node.tokens.clone().into_iter().collect();
+                    assert!(
+                        !tokens
+                            .windows(2)
+                            .any(|pair| pair[0].to_string() == "message"
+                                && pair[1].to_string() == "="),
+                        "message is reserved for static event text"
+                    );
+                }
+                if ["trace", "debug", "info", "warn", "error", "event"].contains(&name.as_str()) {
+                    let tokens: Vec<_> = node.tokens.clone().into_iter().collect();
+                    assert!(
+                        !tokens
+                            .windows(2)
+                            .any(|pair| pair[0].to_string() == "message"
+                                && pair[1].to_string() == "="),
+                        "message is reserved for static event text"
+                    );
+                    let last = tokens.iter().rev().find(|t| t.to_string() != ",").unwrap();
+                    let text = syn::parse_str::<syn::LitStr>(&last.to_string()).expect(
+                        "log messages must end with a static string literal; put values in fields",
+                    );
+                    assert!(
+                        !text.value().contains(['{', '}']),
+                        "log messages must not interpolate private values"
+                    );
+                }
+                syn::visit::visit_macro(self, node);
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|s| s == "rs") {
+                let source = std::fs::read_to_string(&path).unwrap();
+                Audit.visit_file(&syn::parse_file(&source).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "private child fixture; invoked by privacy test with an isolated log directory"]
+    fn private_log_fixture() {
+        assert!(std::env::var_os("WINMGR_TEST_PRIVATE_LOG").is_some());
+        let guard = init();
+        let secret = "LOG_PRIVATE_SENTINEL";
+        struct NeverFormat;
+        impl std::fmt::Debug for NeverFormat {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("redacted Debug must not run");
+            }
+        }
+        impl std::fmt::Display for NeverFormat {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("redacted Display must not run");
+            }
+        }
+        let span = tracing::info_span!("synthetic_operation", path = secret, input = %secret);
+        let _entered = span.enter();
+        tracing::info!(path = secret, title = ?NeverFormat, error = %NeverFormat, count = 17u64, ready = true, "synthetic operation succeeded");
+        let error = std::io::Error::other(secret);
+        tracing::error!(
+            error = &error as &(dyn std::error::Error + 'static),
+            "synthetic operation failed"
+        );
+        tracing::trace!(input = %secret, query = ?secret, "synthetic verbose event");
+        assert!(std::panic::catch_unwind(|| panic!("{secret}")).is_err());
+        drop(guard);
+    }
+
+    #[test]
+    fn file_stderr_spans_and_panic_do_not_emit_private_text_even_at_trace_level() {
+        let directory = std::env::temp_dir()
+            .join("minicon-winmgr-test-reports/log-privacy")
+            .join(format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "logging::tests::private_log_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("WINMGR_TEST_PRIVATE_LOG", "1")
+            .env("MINICON_LOG_DIR", &directory)
+            .env("RUST_LOG", "trace")
+            .env("RUST_BACKTRACE", "full")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "private child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let file = std::fs::read_to_string(directory.join("minicon-winmgr.current.log")).unwrap();
+        for text in [&stderr, &file] {
+            assert!(text.contains("synthetic operation succeeded"));
+            assert!(text.contains("synthetic operation failed"));
+            assert!(text.contains("synthetic verbose event"));
+            assert!(text.contains("count=17"));
+            assert!(text.contains("ready=true"));
+            assert!(text.contains("panic; private payload"));
+            assert!(!text.contains("LOG_PRIVATE_SENTINEL"));
+            assert!(!text.contains(env!("CARGO_MANIFEST_DIR")));
+            assert!(!text.contains("redacted Debug must not run"));
+            assert!(!text.contains("redacted Display must not run"));
+        }
+        assert!(
+            !String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("LOG_PRIVATE_SENTINEL")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

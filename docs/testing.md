@@ -51,3 +51,5 @@
 0.1.10 的 update 层会根据 Cargo 当前版本构造上一补丁的回移 fixture，替换/回滚仍在自建 case 目录；finally 恢复测试开始时备份的原 live 二进制，并检查其摘要，避免把开发候选误留为正常运行版本。错误报告显式按 UTF-8 读取。
 
 `python scripts/test.py --layer diagnostics` 运行有界数据/导出测试，再从真实“关于”入口打开独立原生诊断窗口，覆盖中英 × 明暗主题、默认不采样、停止/关闭/重开、新记录确认、原生保存取消和实际导出，以及窄宽布局。不替换 live、不使用全局输入，也不修改 Shell；依赖当前可用桌面和 Pillow。`python scripts/diagnostics_probe.py --case zh-dark` 可仅复查一个组合。该专项也纳入 release 入口；原生 fixture 当前使用 debug 测试构建，不能冒充优化版全应用内存验收。真实长跑和整应用资源对照仍是另外的发布要求。
+
+`quality` 层另跑 `logging::tests`，用 AST 约束无插值的静态日志文案，并在独立子进程验证文件、stderr、span 及 panic 的文本保护；不需要桌面输入，不跑完整桌面套件。`unit --filter logging::tests` 可单独运行。原生数值与布尔值保留，文本、Debug/Display 和错误链在格式化前屏蔽，即使设置 trace 也不输出；显式 CLI 查询结果和用户错误对话框不属于后台日志。该组测试使用系统临时目录，不修改正常会话日志。
