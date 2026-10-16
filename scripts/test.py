@@ -11,13 +11,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'memory', 'soak', 'resources', 'update-memory', 'diagnostics', 'fault', 'side-resize', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
+    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'memory', 'soak', 'resources', 'resource-gate', 'update-memory', 'diagnostics', 'fault', 'side-resize', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
     parser.add_argument('--filter', help='Rust test name/module filter; only with --layer unit')
     parser.add_argument('--pid', type=int, help='Existing test process; only memory/soak')
     parser.add_argument('--duration', type=float, help='Observation seconds; required for soak')
     parser.add_argument('--interval', type=float, default=5, help='Memory observation sample period')
+    parser.add_argument('--release-binary', type=Path, help='Exact optimized artifact to accept; resource-gate/release only')
+    parser.add_argument('--baseline', type=Path, help='Comparison baseline artifact; resource-gate/release only')
+    parser.add_argument('--campaign', type=Path, action='append', help='Local resource campaign summary; repeat for each campaign')
+    parser.add_argument('--restore-exe', type=Path, help='Explicit original shell executable to restore after release desktop checks')
     args = parser.parse_args()
     if args.filter and args.layer != 'unit': parser.error('--filter requires --layer unit')
+    if args.layer=='release' and not args.restore_exe:parser.error('release requires --restore-exe')
+    if args.layer!='release' and args.restore_exe:parser.error('--restore-exe only applies to release')
+    if args.layer in ['resource-gate','release']:
+        if not args.release_binary or not args.baseline or not args.campaign:
+            parser.error('resource-gate/release requires --release-binary, --baseline and repeated --campaign')
+        args.release_binary=args.release_binary.resolve(strict=True)
+    elif args.release_binary or args.baseline or args.campaign:
+        parser.error('--release-binary/--baseline/--campaign only apply to resource-gate/release')
     if args.layer in ['memory','soak']:
         if not args.pid or args.pid <= 0: parser.error('memory/soak requires --pid')
         if args.layer=='soak' and args.duration is None: parser.error('soak requires explicit --duration')
@@ -40,6 +52,13 @@ def main():
             cmd=(*cmd[:2],'--target-dir',str(ROOT/'target/release-validation'),*cmd[2:])
         step(' '.join(cmd),lambda:subprocess.run(cmd,cwd=ROOT,check=True))
     try:
+        if args.layer in ['resource-gate','release']:
+            import resource_gate
+            def resources():
+                result=resource_gate.evaluate(args.release_binary,args.baseline,args.campaign)
+                report['resource_prerequisites']=result
+                report['tested_binary_sha256']=result['candidate_sha256']
+            step('controlled resource prerequisites (not complete release acceptance)',resources)
         if args.layer in ['memory','soak']:
             import sys
             import importlib.util
@@ -64,7 +83,7 @@ def main():
         if args.layer=='update-memory':
             import update_memory_probe
             step('bounded update staging memory comparison',update_memory_probe.main)
-        if args.layer in ['diagnostics','release']:
+        if args.layer=='diagnostics':
             import diagnostics_probe
             command('cargo','test','diagnostic')
             step('opt-in diagnostics native language and theme matrix',diagnostics_probe.main)
@@ -90,32 +109,51 @@ def main():
         if args.layer in ['quality','release']:
             import sys
             command(sys.executable,'scripts/test_scenario_probe.py')
+            command(sys.executable,'scripts/test_resource_gate.py')
         if args.layer in ['unit','release']:
             command('cargo','test','--all',*(['--release'] if args.layer=='release' else []),*([args.filter] if args.filter else []))
+        if args.layer=='release':
+            import resources_probe
+            import update_memory_probe
+            step('component resource ownership and stalled-source regressions',resources_probe.main)
+            step('bounded update staging memory comparison',update_memory_probe.main)
         if args.layer in ['side-resize','layout','appearance','interaction','taskmgr','update','settings','release']:
             command('cargo','build',*(['--release'] if args.layer=='release' else []))
             import settings_probe as settings
-            if args.layer=='release':settings.SOURCE=ROOT/'target/release-validation/release/minicon-winmgr.exe'
-            if args.layer=='side-resize':
-                import side_resize_probe
-                step('side taskbar drag resize and persistence',side_resize_probe.main)
-            if args.layer in ['update','release']:
-                import update_probe
-                step('manual update and rollback handoff',lambda:update_probe.main(release=args.layer=='release'))
-            if args.layer in ['taskmgr','release']:
-                import taskmgr_probe
-                step('existing Task Manager activation',taskmgr_probe.main)
-            if args.layer in ['interaction','release']:
-                import interaction_probe
-                step('on-demand startup and daily interactions',interaction_probe.main)
-            if args.layer in ['settings','release']:
-                settings.REPORT=output/'settings.json'
-                step('native settings'+(' + full Run regression' if args.layer=='release' else ''),lambda:settings.main(build=False,include_run_regression=args.layer=='release'))
-            if args.layer in ['layout','appearance','release']:
-                import appearance_probe
-                if args.layer=='release':step('compact layout',lambda:appearance_probe.main(layout_only=True))
-                step('compact layout' if args.layer=='layout' else 'native themes and four-edge docking',lambda:appearance_probe.main(layout_only=args.layer=='layout'))
-                report['appearance_report']='target/industrial-acceptance/'+('layout.json' if args.layer=='layout' else 'appearance.json')
+            def desktop_checks():
+                if args.layer=='release':
+                    import diagnostics_probe
+                    command('cargo','test','diagnostic')
+                    step('diagnostic fixture language/theme matrix (separate test executable)',diagnostics_probe.main)
+                if args.layer in ['side-resize','release']:
+                    import side_resize_probe
+                    step('side taskbar drag resize and persistence',side_resize_probe.main)
+                if args.layer in ['update','release']:
+                    import update_probe
+                    step('manual update and rollback handoff',lambda:update_probe.main(release=args.layer=='release'))
+                if args.layer in ['taskmgr','release']:
+                    import taskmgr_probe
+                    step('existing Task Manager activation',taskmgr_probe.main)
+                if args.layer in ['interaction','release']:
+                    import interaction_probe
+                    step('on-demand startup and daily interactions',interaction_probe.main)
+                if args.layer in ['settings','release']:
+                    settings.REPORT=output/'settings.json'
+                    step('native settings'+(' + full Run regression' if args.layer=='release' else ''),lambda:settings.main(build=False,include_run_regression=args.layer=='release'))
+                if args.layer in ['layout','appearance','release']:
+                    import appearance_probe
+                    if args.layer=='release':step('compact layout',lambda:appearance_probe.main(layout_only=True))
+                    step('compact layout' if args.layer=='layout' else 'native themes and four-edge docking',lambda:appearance_probe.main(layout_only=args.layer=='layout'))
+                    report['appearance_report']='target/industrial-acceptance/'+('layout.json' if args.layer=='layout' else 'appearance.json')
+            if args.layer=='release':
+                import desktop_session
+                with desktop_session.isolated(args.release_binary,args.restore_exe):desktop_checks()
+                import resource_gate
+                if resource_gate.digest(args.release_binary)!=report['tested_binary_sha256']:
+                    raise RuntimeError('Candidate changed during acceptance')
+                report['full_release_accepted']=False
+                report['remaining']='Review raw results, screenshots, coverage limits and exact draft asset before publication.'
+            else:desktop_checks()
         report['passed']=True
     except Exception as error:
         report['error']=repr(error)

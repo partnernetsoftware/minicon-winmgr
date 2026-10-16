@@ -1,8 +1,7 @@
 name: Release
 
-# A git tag alone does not show up on the Releases page — GitHub needs an
-# explicit release object. Create one automatically for every `v*` tag, with
-# the release binary attached.
+# Tags produce a draft with immutable assets. Publish the exact tested artifact
+# only after desktop/resource acceptance and review; a build is not acceptance.
 on:
   push:
     tags: ["v*"]
@@ -46,22 +45,25 @@ jobs:
              "dist/minicon-winmgr-${GITHUB_REF_NAME}-x86_64-windows.exe"
           (cd dist && sha256sum *.exe > SHA256SUMS.txt)
 
-      - name: Create GitHub Release
+      - name: Stage draft GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Skip if the release already exists (e.g. created by hand).
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; uploading assets only"
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != "true" ]; then
+              echo "Refusing to replace assets of a published release"
+              exit 1
+            fi
+            # No --clobber: do not silently replace an artifact under validation.
+            gh release upload "$GITHUB_REF_NAME" dist/*
           else
             notes="docs/releases/${GITHUB_REF_NAME}.md"
             if [ -f "$notes" ]; then
               gh release create "$GITHUB_REF_NAME" dist/* \
-                --title "$GITHUB_REF_NAME" --notes-file "$notes" --latest
+                --title "$GITHUB_REF_NAME" --notes-file "$notes" --draft --verify-tag --latest=false
             else
               gh release create "$GITHUB_REF_NAME" dist/* \
-                --title "$GITHUB_REF_NAME" --generate-notes --latest
+                --title "$GITHUB_REF_NAME" --generate-notes --draft --verify-tag --latest=false
             fi
           fi

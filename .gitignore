@@ -24,3 +24,6 @@ scripts/__pycache__/
 !scripts/diagnostics_probe.py
 !scripts/scenario_probe.py
 !scripts/test_scenario_probe.py
+!scripts/resource_gate.py
+!scripts/test_resource_gate.py
+!scripts/desktop_session.py
