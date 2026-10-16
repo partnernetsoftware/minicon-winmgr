@@ -32,3 +32,6 @@ scripts/__pycache__/
 !scripts/release_artifact.py
 !scripts/test_release_artifact.py
 !scripts/test_desktop_layers.py
+
+!scripts/run_probe.py
+!scripts/run_probe_input.py

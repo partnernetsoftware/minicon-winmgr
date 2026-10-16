@@ -13,7 +13,7 @@
 | `python scripts/test.py --layer taskmgr --restore-exe <normal-running-exe>` | 当前会话既有任务管理器的普通权限恢复/激活/最小化循环；无窗口则记录跳过，不自动启动或提权 |
 | `python scripts/test.py --layer interaction --restore-exe <normal-running-exe>` | 冷启动按需初始化、Run 双语候选采用与窗口复用、四边任务栏焦点返回、设置重启提示；0.1.8 专项 |
 | `python scripts/test.py --layer update --restore-exe <normal-running-exe>` | 本地 HTTP 故障、双语按钮、禁止启动联网、校验失败、暂存篡改、保存阻止重启、两版本真实交接、文件占用和启动失败回滚；独立目录，不替换用户安装 |
-| `python scripts/test.py --layer settings --restore-exe <normal-running-exe>` | 构建 debug；设置原生交互、来源、保存故障、UIA 与窗口复用；省略完整 Run 历史/IME 回归 |
+| `python scripts/test.py --layer settings --restore-exe <normal-running-exe>` | 构建 debug；设置原生交互、来源、保存故障、UIA 与窗口复用；省略完整 Run 历史/引号/中文参数回归 |
 | `python scripts/test.py --layer resource-gate --release-binary <candidate> --baseline <baseline> --campaign <local-summary> ...` | 只读核对三轮对照和先 2h 后 8h 原始证据；不等于完整验收 |
 | `python scripts/test.py --layer release --release-binary <candidate> --restore-exe <normal-running-exe> --legacy-exe <official-v0.1.4-exe> --baseline <baseline>` | 格式、严格 Clippy、release 全部单元、组件资源/更新内存、诊断 fixture 及实际候选的侧栏/更新/交互/设置/Run/布局/主题/换边/回收站回归 |
 
@@ -107,3 +107,5 @@ python scripts/test.py --layer settings --restore-exe <normal-running-exe> --can
 
 
 发布功能层与扩展资源认证分离：`release` 不要求等待小时级 campaign，但仍要求准确候选、公开基线（用于真实历史更新）、官方 0.1.4 及原实例恢复路径，并跑全部自动化功能项。不传 `--campaign` 时报告明确记录 `long_observation_completed=false`；不等于长期资源认证。若提供 campaign 则仍调用原严格资源门槛，缺失/不完整证据照常拒绝。`resource-gate` 的三轮、2h/8h、原始 CSV 核对标准未降低。公开内存结论只引用实际完成的场景与时长。
+
+Run 的既有 22 项桌面回归现由 `scripts/run_probe.py`、`run_probe_input.py` 和版本化 Rust 小程序 fixture 提供，所有输出进入忽略的 target；发布层强制调用，不再因本机忽略目录缺脚本而静默跳过。它验证 Unicode 参数，不等同于真实 IME 组合输入矩阵。路径候选按有限超时等候异步就绪，不以固定短睡眠代替条件检查。

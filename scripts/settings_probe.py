@@ -338,13 +338,12 @@ def main(*, include_run_regression=True, build=True):
         check('environment_did_not_rewrite_file_preference', 'taskbar.show = true' in CONFIG.read_text(encoding='utf-8'))
         stop(); start(environment, ['--settings']); show()
         # Keep the established Run acceptance in its isolated LOCALAPPDATA.
-        existing_regression = ROOT / '.workbuddy/acceptance.py'
-        if include_run_regression and existing_regression.exists():
+        if include_run_regression:
             u.SendMessageW(panel(), 16, 0, 0)
-            result = subprocess.run([sys.executable, str(existing_regression)], cwd=ROOT, env=environment, capture_output=True, timeout=60)
-            details = json.loads((ROOT / '.workbuddy/acceptance-results.json').read_text(encoding='utf-8'))
+            import run_probe
+            details=run_probe.main(environment)
             report['run_regression'] = [{'name': entry.get('test'), 'passed': entry.get('passed', False)} for entry in details]
-            check('established_run_dialog_regression', result.returncode == 0 and all(entry['passed'] for entry in report['run_regression']))
+            check('established_run_dialog_regression',bool(details) and all(entry.get('passed',False) for entry in details))
         # Actual Run execution expands argument variables, retaining quoted spacing.
         profile = TEST / 'profile'; profile.mkdir(exist_ok=True)
         source = TEST / 'run_probe.rs'
