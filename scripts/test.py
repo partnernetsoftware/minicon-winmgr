@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+DESKTOP_LAYERS={'side-resize','layout','appearance','interaction','taskmgr','update','settings','release'}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -19,15 +20,22 @@ def main():
     parser.add_argument('--release-binary', type=Path, help='Exact optimized artifact to accept; resource-gate/release only')
     parser.add_argument('--baseline', type=Path, help='Comparison baseline artifact; resource-gate/release only')
     parser.add_argument('--campaign', type=Path, action='append', help='Local resource campaign summary; repeat for each campaign')
-    parser.add_argument('--restore-exe', type=Path, help='Explicit original shell executable to restore after release desktop checks')
+    parser.add_argument('--restore-exe', type=Path, help='Required for desktop layers: actual running shell executable to restore')
+    parser.add_argument('--candidate-exe', type=Path, help='Existing binary for a development desktop layer; skips rebuilding')
     parser.add_argument('--legacy-exe', type=Path, help='Official historical 0.1.4 executable; required for release compatibility checks')
     args = parser.parse_args()
     if args.filter and args.layer != 'unit': parser.error('--filter requires --layer unit')
+    if args.layer in DESKTOP_LAYERS:
+        if not args.restore_exe:parser.error('desktop layers require --restore-exe matching the actual running instance')
+        args.restore_exe=args.restore_exe.resolve(strict=True)
+    elif args.restore_exe:parser.error('--restore-exe only applies to desktop layers')
+    if args.candidate_exe:
+        if args.layer not in DESKTOP_LAYERS or args.layer=='release':parser.error('--candidate-exe only applies to development desktop layers')
+        args.candidate_exe=args.candidate_exe.resolve(strict=True)
     if args.layer=='release' and (not args.restore_exe or not args.legacy_exe):parser.error('release requires --restore-exe and --legacy-exe')
     if args.legacy_exe:
         if args.layer!='release':parser.error('--legacy-exe only applies to release')
         args.legacy_exe=args.legacy_exe.resolve(strict=True)
-    if args.layer!='release' and args.restore_exe:parser.error('--restore-exe only applies to release')
     if args.layer in ['resource-gate','release']:
         if not args.release_binary or not args.baseline or not args.campaign:
             parser.error('resource-gate/release requires --release-binary, --baseline and repeated --campaign')
@@ -115,6 +123,7 @@ def main():
             command(sys.executable,'scripts/test_scenario_probe.py')
             command(sys.executable,'scripts/test_resource_gate.py')
             command(sys.executable,'scripts/test_release_artifact.py')
+            command(sys.executable,'scripts/test_desktop_layers.py')
         if args.layer in ['unit','release']:
             command('cargo','test','--all',*(['--release'] if args.layer=='release' else []),*([args.filter] if args.filter else []))
         if args.layer=='release':
@@ -122,8 +131,16 @@ def main():
             import update_memory_probe
             step('optimized component resource ownership and stalled-source regressions',lambda:resources_probe.main(release=True))
             step('optimized bounded update staging memory comparison',lambda:update_memory_probe.main(release=True))
-        if args.layer in ['side-resize','layout','appearance','interaction','taskmgr','update','settings','release']:
-            command('cargo','build',*(['--release'] if args.layer=='release' else []))
+        if args.layer in DESKTOP_LAYERS:
+            if args.layer=='release':
+                command('cargo','build','--release')
+                candidate=args.release_binary
+            elif args.candidate_exe:
+                candidate=args.candidate_exe
+            else:
+                target=ROOT/'target/desktop-validation'
+                command('cargo','build','--target-dir',str(target))
+                candidate=target/'debug/minicon-winmgr.exe'
             import settings_probe as settings
             def desktop_checks():
                 if args.layer=='release':
@@ -161,9 +178,19 @@ def main():
                             baseline=args.release_binary,subject='candidate',profile='release',scenario=scenario,
                             repetitions=1,warmup=0,observe=1,recovery=0,interval=.2,iterations=1,fail_at=None)
                         step('exact candidate native '+scenario,lambda options=options:scenario_probe.main(options))
+            import desktop_session
+            import release_artifact
+            tested_hash=release_artifact.digest(candidate)
+            if report.get('tested_binary_sha256',tested_hash)!=tested_hash:
+                raise RuntimeError('Selected candidate differs from resource acceptance')
+            report['tested_binary_sha256']=tested_hash
+            report['original_shell_restored']=False
+            isolation=None
+            try:
+                with desktop_session.isolated(candidate,args.restore_exe) as isolation:desktop_checks()
+            finally:
+                if isolation is not None:report['original_shell_restored']=isolation.get('restored',False)
             if args.layer=='release':
-                import desktop_session
-                with desktop_session.isolated(args.release_binary,args.restore_exe):desktop_checks()
                 import instance_switch_probe
                 for language in ['en','zh']:
                     step('historical instance switch '+language,lambda language=language:instance_switch_probe.main(args.release_binary,args.legacy_exe,args.restore_exe,language))
@@ -172,7 +199,8 @@ def main():
                     raise RuntimeError('Candidate changed during acceptance')
                 report['full_release_accepted']=False
                 report['remaining']='Review raw results, screenshots, coverage limits and exact draft asset before publication.'
-            else:desktop_checks()
+            if release_artifact.digest(candidate)!=tested_hash:
+                raise RuntimeError('Candidate changed during desktop checks')
         report['passed']=True
     except Exception as error:
         report['error']=repr(error)

@@ -184,4 +184,5 @@ def main(*,release=False,previous_artifact=None):
                           'original_binary_restored':report['original_binary_restored']}),flush=True)
         if not report['passed']:raise RuntimeError('Update acceptance or restoration failed; inspect the local report')
 
-if __name__=='__main__':main()
+if __name__ == "__main__":
+    raise SystemExit("Use scripts/test.py --layer update --restore-exe <normal-running-exe> for isolated desktop checks.")

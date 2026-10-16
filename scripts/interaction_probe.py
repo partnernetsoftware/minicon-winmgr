@@ -179,4 +179,4 @@ def main():
 
 if __name__=='__main__':
     if '--fixture' in sys.argv:fixture()
-    else:main()
+    else:raise SystemExit("Use scripts/test.py --layer interaction --restore-exe <normal-running-exe> for isolated desktop checks.")

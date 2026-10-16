@@ -31,3 +31,4 @@ scripts/__pycache__/
 !scripts/native_feature_probe.py
 !scripts/release_artifact.py
 !scripts/test_release_artifact.py
+!scripts/test_desktop_layers.py

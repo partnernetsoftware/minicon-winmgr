@@ -8,22 +8,22 @@
 | `python scripts/test.py --layer unit --filter config::tests` | 指定 Rust 模块或测试名；只跑相关测试 |
 | `python scripts/test.py --layer unit` | 全部单元测试；跨模块调整时使用 |
 | `python scripts/test.py --layer quality` | 格式、严格 Clippy；提交前与 CI 静态检查 |
-| `python scripts/test.py --layer layout` | 构建 debug；默认英文/中英切换与持久化、双语明暗截图、标签与选项同行、窄宽恢复、页脚可达；只改设置布局时使用 |
-| `python scripts/test.py --layer appearance` | 构建 debug；明暗 × 四边原生窗口、工作区、保存读回、环境只读与切换资源专项 |
-| `python scripts/test.py --layer taskmgr` | 当前会话既有任务管理器的普通权限恢复/激活/最小化循环；无窗口则记录跳过，不自动启动或提权 |
-| `python scripts/test.py --layer interaction` | 冷启动按需初始化、Run 双语候选采用与窗口复用、四边任务栏焦点返回、设置重启提示；0.1.8 专项 |
-| `python scripts/test.py --layer update` | 本地 HTTP 故障、双语按钮、禁止启动联网、校验失败、暂存篡改、保存阻止重启、两版本真实交接、文件占用和启动失败回滚；独立目录，不替换用户安装 |
-| `python scripts/test.py --layer settings` | 构建 debug；设置原生交互、来源、保存故障、UIA 与窗口复用；省略完整 Run 历史/IME 回归 |
+| `python scripts/test.py --layer layout --restore-exe <normal-running-exe>` | 构建 debug；默认英文/中英切换与持久化、双语明暗截图、标签与选项同行、窄宽恢复、页脚可达；只改设置布局时使用 |
+| `python scripts/test.py --layer appearance --restore-exe <normal-running-exe>` | 构建 debug；明暗 × 四边原生窗口、工作区、保存读回、环境只读与切换资源专项 |
+| `python scripts/test.py --layer taskmgr --restore-exe <normal-running-exe>` | 当前会话既有任务管理器的普通权限恢复/激活/最小化循环；无窗口则记录跳过，不自动启动或提权 |
+| `python scripts/test.py --layer interaction --restore-exe <normal-running-exe>` | 冷启动按需初始化、Run 双语候选采用与窗口复用、四边任务栏焦点返回、设置重启提示；0.1.8 专项 |
+| `python scripts/test.py --layer update --restore-exe <normal-running-exe>` | 本地 HTTP 故障、双语按钮、禁止启动联网、校验失败、暂存篡改、保存阻止重启、两版本真实交接、文件占用和启动失败回滚；独立目录，不替换用户安装 |
+| `python scripts/test.py --layer settings --restore-exe <normal-running-exe>` | 构建 debug；设置原生交互、来源、保存故障、UIA 与窗口复用；省略完整 Run 历史/IME 回归 |
 | `python scripts/test.py --layer resource-gate --release-binary <candidate> --baseline <baseline> --campaign <local-summary> ...` | 只读核对三轮对照和先 2h 后 8h 原始证据；不等于完整验收 |
 | `python scripts/test.py --layer release --release-binary <candidate> --restore-exe <normal-running-exe> --legacy-exe <official-v0.1.4-exe> --baseline <baseline> --campaign <local-summary> ...` | 资源证据门槛、格式、严格 Clippy、release 全部单元、组件资源/更新内存、诊断 fixture 及实际候选的侧栏/更新/交互/设置/Run/布局/主题/换边/回收站回归 |
 
-桌面层需要当前 Windows 输入桌面可用，依赖 Python Pillow（截图）、PowerShell 7（UIA）。测试先构建，再正常关闭当前会话实例，复制至 live 路径；使用独立配置，结束后恢复正常会话。不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
+会替换实例的桌面层均要求显式 `--restore-exe`，指向当前实际运行文件，并由隔离上下文先核对同用户/会话、文件路径和摘要；依赖当前可用的 Windows 输入桌面、Python Pillow（截图）和 PowerShell 7（UIA）。开发层默认构建到 `target/desktop-validation`，只在忽略目录内的副本上运行，正常退出后从原路径恢复并核对工作区及 Shell。不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
 
 `release` 表示当前自动化全套，不代表所有物理环境已覆盖。混合 DPI、多屏热插拔、高对比度实屏、屏幕阅读器语音、特殊管理员令牌以及小时级常驻观察仍需独立环境验收。CI 没有当前交互桌面，执行 `quality` 与独立 `fault` 层，release workflow 另外执行全部单元测试；发布前在可用桌面运行 `release` 并审阅报告。仅构建优化二进制不会自动声称完成发布验收。
 
 发布层构建目录为 `target/release-validation`，避免旧会话直接运行 `target/release` 时锁住 Cargo 硬链接产物。实际候选来自显式指定的 `--release-binary`（如已下载的草稿资产），不会用重建结果替换它。桌面探针的 live 路径隔离在忽略目录，结束恢复显式指定的原运行路径、摘要、工作区与 Shell 登记，不覆盖原外壳文件，也不结束其他会话。
 
-更新层会将当前源码回移到隔离的 0.1.8 测试构建，以验证真实 0.1.9 目标的两版本交接；该 fixture 不是历史公开版。服务仅监听 loopback，验收报告明确记录两份二进制 SHA-256。后台助手只允许本用户/本会话，并等旧进程退出后才修改本测试安装。成功后清理本轮自建用例目录，保留事务事实与截图。
+更新层会将当前源码回移到上一补丁的隔离测试构建（0.1.10 候选对应 0.1.9 fixture），以验证当前实际候选的两版本交接；该 fixture 不是历史公开版。服务仅监听 loopback，验收报告明确记录两份二进制 SHA-256。后台助手只允许本用户/本会话，并等旧进程退出后才修改本测试安装。成功后清理本轮自建用例目录，保留事务事实与截图。
 
 ## 公开证据检查
 
@@ -95,3 +95,12 @@ python scripts/instance_switch_probe.py --candidate <candidate-exe> --legacy <of
 
 
 发布层显式以 `release=True` 执行资源所有权/停滞源实验、流式更新准备内存对照和诊断 fixture，记录对应 profile；开发层继续默认 debug，可单独选优化构建。诊断 fixture 只说明专项窗口行为，实际候选入口仍由 native_feature_probe 另验。全发布已有优化 Rust 单元，诊断专项不再次重复跑同一组普通单元。
+
+
+开发桌面层可加 `--candidate-exe <existing-exe>` 跳过构建，直接测试已有文件；记录实际摘要，不推断预构建文件一定来自当前源码。示例：
+
+```powershell
+python scripts/test.py --layer settings --restore-exe <normal-running-exe> --candidate-exe <debug-or-candidate-exe>
+```
+
+各旧桌面探针脚本的直接 CLI 已改为指向此受保护入口；模块函数仍供隔离上下文调用，interaction 的独立测试窗口子进程入口保留。缺少恢复路径或非法参数时，在构建和窗口操作前退出。6 项无桌面模拟检查验证缺少/无效恢复参数、独立构建目录、预构建跳过编译、测试异常后的恢复与报告，以及禁止预构建参数绕过发布资源门槛；它们不是实际桌面验收。

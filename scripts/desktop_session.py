@@ -34,7 +34,7 @@ def isolated(candidate,restore):
         (folder/'restore-local.json').write_text(json.dumps(dict(executable=str(restore),sha256=expected)),encoding='utf-8')
         desktop.close(original);closed=True
         p.LIVE,p.SOURCE=live,candidate
-        yield
+        yield report
         report['passed']=True
     finally:
         try:

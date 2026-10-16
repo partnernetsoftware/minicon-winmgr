@@ -175,5 +175,5 @@ def main():
     return report
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    raise SystemExit("Use scripts/test.py --layer side-resize --restore-exe <normal-running-exe> for isolated desktop checks.")

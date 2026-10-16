@@ -421,4 +421,5 @@ ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
             REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
             print(json.dumps(report, ensure_ascii=True, indent=2))
 
-if __name__ == '__main__': main()
+if __name__ == "__main__":
+    raise SystemExit("Use scripts/test.py --layer settings --restore-exe <normal-running-exe> for isolated desktop checks.")
