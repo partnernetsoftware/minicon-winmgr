@@ -6,5 +6,7 @@ scripts/*.py
 !scripts/notification_probe.py
 !scripts/settings_probe.py
 !scripts/appearance_probe.py
+!scripts/interaction_probe.py
+!scripts/taskmgr_probe.py
 !scripts/test.py
 scripts/__pycache__/

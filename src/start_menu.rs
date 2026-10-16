@@ -469,6 +469,9 @@ fn power_at(index: i32) -> Option<&'static PowerAction> {
 
 /// Registers the start-menu window class and prepares (hidden) UI.
 pub fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
+    if !crate::config::current().start_menu {
+        return Ok(());
+    }
     if orb().is_some() {
         return Ok(()); // already initialised
     }

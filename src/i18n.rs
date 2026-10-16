@@ -69,6 +69,16 @@ macro_rules! ui_format {
     ($zh:literal,$en:literal $(,$($args:tt)*)?)=>{if $crate::i18n::language()==$crate::i18n::Language::En {format!($en $(,$($args)*)?)}else{format!($zh $(,$($args)*)?)}};
 }
 const CATALOG: &[(&str, &str)] = &[
+    ("应用", "App"),
+    ("采用", "Use"),
+    (
+        "↑↓ 选择 · Enter 采用 · Esc 收起候选",
+        "↑↓ Select · Enter Use · Esc Dismiss",
+    ),
+    (
+        "运行窗口初始化失败，请重试。详情见日志。",
+        "Cannot initialize Run. Please retry; details are in the log.",
+    ),
     ("读取", "read"),
     ("备份", "backup"),
     ("写入临时文件", "temporary write"),
@@ -404,6 +414,7 @@ const CATALOG: &[(&str, &str)] = &[
         "由环境变量 {name} 控制",
         "Controlled by environment variable {name}",
     ),
+    ("此项由启动配置固定", "Fixed by startup configuration"),
     ("启动来源：{}", "Startup source: {}"),
     (
         "启动失败（错误码 {code}），请修改输入后重试。",

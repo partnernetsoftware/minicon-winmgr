@@ -65,7 +65,7 @@ def main(*, layout_only=False):
             p.click(6151);p.saved();p.stop();p.start(env,['--settings'])
             check('restart_preserves_language',p.checked(6151) and p.text(p.panel()).startswith('设置'))
             p.stop();env['MINICON_LANGUAGE']='en';p.start(env,['--settings'])
-            check('environment_language_is_read_only',p.checked(6150) and not p.u.IsWindowEnabled(p.ctrl(6151)))
+            check('environment_language_is_read_only',p.checked(6150) and not p.u.IsWindowEnabled(p.ctrl(6151)) and p.text(p.ctrl(6312)) == 'Fixed by startup configuration')
             report['passed']=True
             return
         states = {}
@@ -104,8 +104,8 @@ def main(*, layout_only=False):
             p.wait(lambda:p.u.IsWindowVisible(notification));time.sleep(.15)
             p.capture_settings(OUT/(theme+'_notifications.png'),notification)
             p.u.SendMessageW(notification,16,0,0)
-            run=p.window('minicon_winmgr_run_dialog')
-            p.u.SendMessageW(run,0x312,3,0)
+            p.u.SendMessageW(p.message(),0x312,3,0)
+            run=p.wait(lambda:p.window('minicon_winmgr_run_dialog'))
             p.wait(lambda:p.u.IsWindowVisible(run));time.sleep(.15)
             p.capture_settings(OUT/(theme+'_run.png'),run)
             p.u.SendMessageW(run,16,0,0)

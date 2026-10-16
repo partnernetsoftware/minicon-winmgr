@@ -8,7 +8,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use windows::Win32::Foundation::{COLORREF, CloseHandle, HWND, POINT, RECT};
+use windows::Win32::Foundation::{COLORREF, CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, HBRUSH, HGDIOBJ};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
@@ -17,9 +17,10 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow,
     GetWindowThreadProcessId, HWND_TOP, IsIconic, MF_GRAYED, MF_MENUBARBREAK, MF_SEPARATOR,
-    MF_STRING, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SetForegroundWindow, SetWindowPos, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TRACK_POPUP_MENU_FLAGS, TrackPopupMenu,
+    MF_STRING, PostMessageW, SC_RESTORE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow, ShowWindowAsync,
+    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS, TrackPopupMenu,
+    WM_SYSCOMMAND,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -355,7 +356,8 @@ impl Drop for Brush {
 /// 3. last resort: `SW_MINIMIZE` then `SW_RESTORE`, which reliably activates a
 ///    window even when the foreground lock would otherwise refuse.
 ///
-/// Returns whether `hwnd` ended up as the foreground window.
+/// Returns whether foreground activation was accepted. Restoring a foreign
+/// window is asynchronous; callers verifying visibility must also check IsIconic.
 ///
 /// # Safety
 /// `hwnd` must be a valid window handle; call on the message thread.
@@ -363,8 +365,18 @@ pub(crate) unsafe fn force_foreground(hwnd: HWND) -> bool {
     // SAFETY: pure window/thread queries plus the documented foreground
     // workarounds; all handles come from Win32.
     unsafe {
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+        if IsIconic(hwnd).as_bool() && !ShowWindowAsync(hwnd, SW_RESTORE).as_bool() {
+            // A medium-integrity caller cannot directly change Task Manager's
+            // show state. Let the target process its standard system command.
+            // SetForegroundWindow alone can report success while it stays iconic.
+            if let Err(error) = PostMessageW(
+                Some(hwnd),
+                WM_SYSCOMMAND,
+                WPARAM(SC_RESTORE as usize),
+                LPARAM(0),
+            ) {
+                tracing::warn!(%error, ?hwnd, "window restore request was refused");
+            }
         }
 
         // 1) Raise in z-order (allowed without foreground rights) + try to focus.

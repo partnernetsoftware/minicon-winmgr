@@ -4,7 +4,7 @@ use crate::{
     win_util::wide,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     sync::mpsc::{self, Receiver, SyncSender},
     time::{Duration, Instant},
 };
@@ -12,7 +12,7 @@ use windows::Win32::{
     System::Com::{
         COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
     },
-    UI::Controls::{EM_SETLIMITTEXT, EM_SETSEL},
+    UI::Controls::{DRAWITEMSTRUCT, EM_SETLIMITTEXT, EM_SETSEL, ODS_SELECTED},
 };
 use windows::{
     Win32::{
@@ -32,6 +32,8 @@ const LIST: u16 = 2006;
 const HELP: u16 = 2007;
 const STATUS: u16 = 2008;
 const LABEL: u16 = 2009;
+pub(crate) const HOTKEY_ID: usize = 3;
+thread_local! { static INSTANCE: Cell<HINSTANCE> = const { Cell::new(HINSTANCE(core::ptr::null_mut())) }; }
 enum Job {
     Query(u64, String),
     Record(String),
@@ -115,17 +117,55 @@ fn send(hwnd: HWND, msg: u32, w: usize, l: isize) -> LRESULT {
 fn enabled() {
     let (busy, history) =
         with(|s| (s.busy || s.actions.len() >= 32, s.history || s.clear_retry)).unwrap_or_default();
+    let choosing = with(|s| s.expanded && !s.candidates.is_empty()).unwrap_or(false)
+        && send(control(LIST), LB_GETCURSEL, 0, 0).0 >= 0;
+    set_text(
+        control(RUN),
+        crate::i18n::text(if choosing { "采用" } else { "运行" }),
+    );
+    set_text(
+        control(HELP),
+        crate::i18n::text(if choosing {
+            "↑↓ 选择 · Enter 采用 · Esc 收起候选"
+        } else {
+            "输入程序、文件夹、文档或网址"
+        }),
+    );
     unsafe {
         let _ = EnableWindow(
             control(RUN),
-            !busy && !text(control(EDIT)).trim().is_empty(),
+            !busy && (choosing || !text(control(EDIT)).trim().is_empty()),
         );
         let _ = EnableWindow(control(CLEAR), history);
         let _ = ShowWindow(control(CLEAR), if history { SW_SHOW } else { SW_HIDE });
     }
 }
 
+/// Register only the shortcut. No window, history IO, workers or timer until first use.
 pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
+    INSTANCE.set(instance);
+    let owner = crate::hub::shell_hwnd().ok_or("Run hotkey owner is unavailable")?;
+    for (modifiers, label) in [(MOD_WIN, "Win+R"), (MOD_CONTROL | MOD_ALT, "Ctrl+Alt+R")] {
+        if unsafe {
+            RegisterHotKey(
+                Some(owner),
+                HOTKEY_ID as i32,
+                modifiers | MOD_NOREPEAT,
+                VK_R.0 as u32,
+            )
+        }
+        .is_ok()
+        {
+            tracing::info!(
+                hotkey = label,
+                "Run hotkey registered; UI deferred until first use"
+            );
+            return Ok(());
+        }
+    }
+    Err("Run hotkey registration failed".into())
+}
+fn prepare(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
     if !window().is_invalid() {
         return Ok(());
     }
@@ -137,8 +177,14 @@ pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
     std::thread::Builder::new()
         .name("run-path".into())
         .spawn(move || {
+            let mut applications = None;
             while let Ok((id, input, entries)) = query_rx.recv() {
-                let items = merge_candidates(&entries, &input);
+                let mut items = merge_candidates(&entries, &input);
+                if crate::run_history::application_query(&input) {
+                    let apps =
+                        applications.get_or_insert_with(crate::run_history::discover_applications);
+                    items = crate::run_history::with_applications(items, &input, apps);
+                }
                 let _ = query_reply.send(Reply::Query(id, items));
             }
         })?;
@@ -299,10 +345,11 @@ pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                 "LISTBOX",
                 "",
                 LBS_NOTIFY as u32
+                    | LBS_OWNERDRAWFIXED as u32
+                    | LBS_HASSTRINGS as u32
                     | LBS_NOINTEGRALHEIGHT as u32
                     | WS_BORDER.0
-                    | WS_VSCROLL.0
-                    | WS_HSCROLL.0,
+                    | WS_VSCROLL.0,
             ),
             (
                 STATUS,
@@ -355,12 +402,6 @@ pub fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         send(control(EDIT), EM_SETLIMITTEXT, 32767, 0);
         let _ = ShowWindow(control(LIST), SW_HIDE);
         let _ = SetTimer(Some(hwnd), 1, 30, None);
-        for (modifiers, label) in [(MOD_WIN, "Win+R"), (MOD_CONTROL | MOD_ALT, "Ctrl+Alt+R")] {
-            if RegisterHotKey(Some(hwnd), 3, modifiers, VK_R.0 as u32).is_ok() {
-                tracing::info!(hotkey = label, "run dialog hotkey registered");
-                break;
-            }
-        }
     }
     enabled();
     Ok(())
@@ -411,12 +452,16 @@ fn geometry(work: RECT, dpi: u32, count: usize, status_height: i32, caption: i32
     let input_y = if compact { scale(4) } else { scale(42) };
     let fixed = input_y + scale(if compact { 76 } else { 94 });
     // Reserve input and buttons first; candidates consume only the remaining space.
-    let status_height = status_height.max(scale(22)).min((available - fixed).max(0));
+    let status_height = if status_height > 0 {
+        status_height.max(scale(22)).min((available - fixed).max(0))
+    } else {
+        0
+    };
     let list_budget = (available - fixed - status_height).max(0);
-    let overhead = scale(20); // list border and horizontal scrollbar
-    let rows = ((list_budget - overhead).max(0) / scale(24).max(1)).min(count.min(6) as i32);
+    let overhead = scale(4); // native list border; full values remain accessible
+    let rows = ((list_budget - overhead).max(0) / scale(44).max(1)).min(count.min(6) as i32);
     let list_height = if rows > 0 {
-        rows * scale(24) + overhead
+        rows * scale(44) + overhead
     } else {
         0
     };
@@ -547,7 +592,11 @@ fn layout() {
             work,
             dpi,
             count,
-            measured + scale(4),
+            if measured == 0 {
+                0
+            } else {
+                measured + scale(4)
+            },
             frame.bottom - frame.top,
         );
         let list_height = g.list_height;
@@ -598,6 +647,16 @@ fn layout() {
             };
             let _ = MoveWindow(child, x, y, w, h, true);
             send(child, WM_SETFONT, font.0 as usize, 1);
+            if id == STATUS {
+                let _ = ShowWindow(
+                    child,
+                    if g.status_height > 0 {
+                        SW_SHOW
+                    } else {
+                        SW_HIDE
+                    },
+                );
+            }
             if id == HELP {
                 let _ = ShowWindow(
                     child,
@@ -609,7 +668,7 @@ fn layout() {
                 );
             }
             if id == LIST {
-                send(child, LB_SETITEMHEIGHT, 0, scale(24) as isize);
+                send(child, LB_SETITEMHEIGHT, 0, scale(44) as isize);
             }
         }
         with(|s| {
@@ -642,8 +701,30 @@ fn expand(value: bool) {
     if changed || value {
         layout();
     }
+    enabled();
 }
-fn show() {
+pub(crate) fn show() {
+    if window().is_invalid()
+        && let Err(error) = prepare(INSTANCE.get())
+    {
+        tracing::error!(%error, "Run first-use initialization failed");
+        shutdown();
+        let _ = install(INSTANCE.get());
+        unsafe {
+            MessageBoxW(
+                crate::hub::shell_hwnd(),
+                PCWSTR(
+                    wide(crate::i18n::text(
+                        "运行窗口初始化失败，请重试。详情见日志。",
+                    ))
+                    .as_ptr(),
+                ),
+                PCWSTR(wide(crate::i18n::text("运行")).as_ptr()),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+        return;
+    }
     let already = with(|s| s.visible).unwrap_or(false);
     if !already {
         position();
@@ -800,15 +881,7 @@ fn poll() {
                 let old = unsafe { SelectObject(dc, font.into()) };
                 let mut extent = 0;
                 for item in &items {
-                    let label = format!(
-                        "[{}] {}",
-                        if item.source == CandidateSource::History {
-                            crate::i18n::text("最近")
-                        } else {
-                            crate::i18n::text("路径")
-                        },
-                        item.text
-                    );
+                    let label = format!("[{}] {}", source_label(item.source), item.text);
                     let mut size = SIZE::default();
                     unsafe {
                         let _ = GetTextExtentPoint32W(
@@ -1027,6 +1100,7 @@ fn key(hwnd: HWND, msg: u32, w: WPARAM) -> bool {
                         }
                     };
                     send(control(LIST), LB_SETCURSEL, next as usize, 0);
+                    enabled();
                 }
             }
             return true;
@@ -1073,11 +1147,85 @@ fn clear() {
     status(crate::i18n::text("正在清空历史…"));
 }
 
+fn source_label(source: CandidateSource) -> &'static str {
+    crate::i18n::text(match source {
+        CandidateSource::History => "最近",
+        CandidateSource::Path => "路径",
+        CandidateSource::Application => "应用",
+    })
+}
+fn paint_candidate(item: &DRAWITEMSTRUCT) {
+    let Some(candidate) = with(|s| s.candidates.get(item.itemID as usize).cloned()).flatten()
+    else {
+        return;
+    };
+    let dpi = with(|s| s.dpi).unwrap_or(96);
+    let scale = |n: i32| n * dpi as i32 / 96;
+    let theme = crate::config::theme();
+    let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
+    let primary = candidate.label.as_deref().unwrap_or(&candidate.text);
+    let detail = if candidate.source == CandidateSource::History {
+        source_label(candidate.source).to_string()
+    } else {
+        format!("{} · {}", source_label(candidate.source), candidate.text)
+    };
+    unsafe {
+        let dc = item.hDC;
+        let stock = HBRUSH(GetStockObject(DC_BRUSH).0);
+        SetDCBrushColor(
+            dc,
+            COLORREF(if selected { theme.hover } else { theme.surface }),
+        );
+        FillRect(dc, &item.rcItem, stock);
+        if selected {
+            SetDCBrushColor(dc, COLORREF(theme.accent));
+            FrameRect(dc, &item.rcItem, stock);
+        }
+        SetBkMode(dc, TRANSPARENT);
+        let font = with(|s| s.font).unwrap_or_default();
+        let old = SelectObject(dc, font.into());
+        let mut top = item.rcItem;
+        top.left += scale(10);
+        top.right -= scale(10);
+        top.top += scale(4);
+        top.bottom = top.top + scale(20);
+        SetTextColor(dc, COLORREF(theme.text));
+        let mut title: Vec<u16> = primary.encode_utf16().collect();
+        if !title.is_empty() {
+            DrawTextW(
+                dc,
+                &mut title,
+                &mut top,
+                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+            );
+        }
+        let mut bottom = top;
+        bottom.top = item.rcItem.top + scale(24);
+        bottom.bottom = item.rcItem.bottom - scale(3);
+        SetTextColor(dc, COLORREF(theme.muted));
+        let mut subtitle: Vec<u16> = detail.encode_utf16().collect();
+        DrawTextW(
+            dc,
+            &mut subtitle,
+            &mut bottom,
+            DT_SINGLELINE | DT_VCENTER | DT_PATH_ELLIPSIS | DT_NOPREFIX,
+        );
+        SelectObject(dc, old);
+    }
+}
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     crate::win_util::guard_abi(
         "run_dialog::wndproc",
         || unsafe {
             match msg {
+                WM_DRAWITEM if l.0 != 0 => {
+                    let item = &*(l.0 as *const DRAWITEMSTRUCT);
+                    if item.CtlID == LIST as u32 {
+                        paint_candidate(item);
+                        return LRESULT(1);
+                    }
+                    return DefWindowProcW(hwnd, msg, w, l);
+                }
                 WM_HOTKEY if w.0 == 3 => show(),
                 WM_CLOSE => hide(),
                 WM_TIMER => poll(),
@@ -1135,7 +1283,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                     }
                 }
                 WM_DESTROY => {
-                    let _ = UnregisterHotKey(Some(hwnd), 3);
                     let _ = KillTimer(Some(hwnd), 1);
                 }
                 _ => return DefWindowProcW(hwnd, msg, w, l),
@@ -1201,6 +1348,9 @@ unsafe extern "system" fn child_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
     )
 }
 pub fn shutdown() {
+    if let Some(owner) = crate::hub::shell_hwnd() {
+        let _ = unsafe { UnregisterHotKey(Some(owner), HOTKEY_ID as i32) };
+    }
     let hwnd = window();
     if !hwnd.is_invalid() {
         unsafe {
@@ -1269,10 +1419,14 @@ mod tests {
             bottom: 500,
             ..Default::default()
         };
+        let quiet = geometry(work, 96, 0, 0, 24);
+        let failure = geometry(work, 96, 0, 44, 24);
+        assert_eq!(quiet.status_height, 0);
+        assert!(failure.height > quiet.height);
         let one = geometry(work, 96, 1, 22, 24);
         let many = geometry(work, 96, 20, 22, 24);
-        assert_eq!(one.list_height, 44);
-        assert_eq!(many.list_height, 164);
+        assert_eq!(one.list_height, 48);
+        assert_eq!(many.list_height, 268);
         let long_error = geometry(work, 96, 20, 220, 24);
         assert_eq!(long_error.status_height, 220);
         assert!(long_error.list_height < many.list_height);

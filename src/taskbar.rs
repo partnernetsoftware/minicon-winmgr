@@ -34,7 +34,7 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, RegisterHotKey, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     UnregisterHotKey, VIRTUAL_KEY, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_DOWN,
-    VK_ESCAPE, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT, VK_UP,
+    VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{
     ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
@@ -504,6 +504,8 @@ struct BarEntry {
     tray_pressed: Option<crate::tray::TrayItem>,
     tray_right_pressed: Option<crate::tray::TrayItem>,
     selected: Option<usize>,
+    /// Foreground window before keyboard navigation; cleared when focus leaves.
+    keyboard_return: isize,
 }
 
 fn bars() -> &'static Mutex<Vec<BarEntry>> {
@@ -1925,7 +1927,12 @@ unsafe extern "system" fn wndproc_inner(
             let (pin_rects, overflow, hidden_from, hover) = {
                 let bars = lock_or_recover(bars());
                 match bars.iter().find(|b| b.hwnd == key) {
-                    Some(b) => (b.pin_rects.clone(), b.overflow, b.hidden_from, b.hover),
+                    Some(b) => (
+                        b.pin_rects.clone(),
+                        b.overflow,
+                        b.hidden_from,
+                        b.rects.iter().position(|r| contains(*r)),
+                    ),
                     None => (Vec::new(), None, 0, None),
                 }
             };
@@ -2086,6 +2093,14 @@ unsafe extern "system" fn wndproc_inner(
             // Summon: focus the primary bar and start the keyboard cursor at 0.
             // `force_foreground` (not a bare `SetForegroundWindow`) because a
             // top-most tool window is routinely refused the foreground.
+            let previous = unsafe { GetForegroundWindow() }.0 as isize;
+            if previous != key
+                && let Some(bar) = lock_or_recover(bars())
+                    .iter_mut()
+                    .find(|bar| bar.hwnd == key)
+            {
+                bar.keyboard_return = previous;
+            }
             let _ = unsafe { crate::win_util::force_foreground(hwnd) };
             let _ = unsafe { SetFocus(Some(hwnd)) };
             let changed = {
@@ -2110,6 +2125,26 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         WM_KEYDOWN => {
+            if wparam.0 as u16 == VK_ESCAPE.0 {
+                let previous = {
+                    let mut all = lock_or_recover(bars());
+                    all.iter_mut()
+                        .find(|bar| bar.hwnd == key)
+                        .map(|bar| {
+                            bar.selected = None;
+                            std::mem::take(&mut bar.keyboard_return)
+                        })
+                        .unwrap_or(0)
+                };
+                if previous != 0
+                    && previous != key
+                    && unsafe { IsWindow(Some(hwnd_from(previous))).as_bool() }
+                {
+                    activate(hwnd_from(previous));
+                }
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                return LRESULT(0);
+            }
             let vk = wparam.0 as u16;
             let n = lock_or_recover(tasks()).len();
             let mut changed = false;
@@ -2139,7 +2174,16 @@ unsafe extern "system" fn wndproc_inner(
                                 );
                                 changed = true;
                             }
-                            k if k == VK_RETURN.0 => {
+                            k if k == VK_HOME.0 || k == VK_END.0 => {
+                                let count = bar.rects.len() + usize::from(bar.overflow.is_some());
+                                bar.selected = (count > 0).then_some(if k == VK_HOME.0 {
+                                    0
+                                } else {
+                                    count.saturating_sub(1)
+                                });
+                                changed = true;
+                            }
+                            k if k == VK_RETURN.0 || k == VK_SPACE.0 => {
                                 if bar.overflow.is_some() && bar.selected == Some(bar.hidden_from) {
                                     let from = bar.hidden_from;
                                     bar.selected = None;
@@ -2159,9 +2203,6 @@ unsafe extern "system" fn wndproc_inner(
                                     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
                                     return LRESULT(0);
                                 }
-                            }
-                            k if k == VK_ESCAPE.0 => {
-                                changed = bar.selected.take().is_some();
                             }
                             _ => {}
                         }
@@ -2196,9 +2237,10 @@ unsafe extern "system" fn wndproc_inner(
             crate::bar_tip::hide();
             let changed = {
                 let mut bars = lock_or_recover(bars());
-                bars.iter_mut()
-                    .find(|b| b.hwnd == key)
-                    .is_some_and(|b| b.selected.take().is_some())
+                bars.iter_mut().find(|b| b.hwnd == key).is_some_and(|b| {
+                    b.keyboard_return = 0;
+                    b.selected.take().is_some()
+                })
             };
             if changed {
                 let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -2320,7 +2362,12 @@ unsafe fn paint(hwnd: HWND) {
                 DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
             );
         }
-        let fg = GetForegroundWindow().0 as isize;
+        let mut fg = GetForegroundWindow().0 as isize;
+        if fg == hwnd.0 as isize
+            && let Some(bar) = lock_or_recover(bars()).iter().find(|bar| bar.hwnd == fg)
+        {
+            fg = bar.keyboard_return;
+        }
         let tasks = lock_or_recover(tasks());
         let (rects, overflow, pin_rects, hover, pin_hover, selected, density) = {
             let bars = lock_or_recover(bars());
@@ -2455,7 +2502,7 @@ unsafe fn paint(hwnd: HWND) {
 
             SetTextColor(
                 hdc,
-                if active || is_selected {
+                if active || is_selected || hover == Some(i) {
                     COLORREF(theme().text)
                 } else {
                     COLORREF(theme().muted)
@@ -2959,7 +3006,16 @@ fn toggle_or_activate(target: HWND) {
         );
         if fg == target && !IsIconic(target).as_bool() {
             tracing::debug!(?target, "click: minimizing active window (toggle)");
-            let _ = ShowWindow(target, SW_MINIMIZE);
+            if !windows::Win32::UI::WindowsAndMessaging::ShowWindowAsync(target, SW_MINIMIZE)
+                .as_bool()
+            {
+                let _ = PostMessageW(
+                    Some(target),
+                    windows::Win32::UI::WindowsAndMessaging::WM_SYSCOMMAND,
+                    WPARAM(windows::Win32::UI::WindowsAndMessaging::SC_MINIMIZE as usize),
+                    LPARAM(0),
+                );
+            }
         } else {
             crate::win_util::force_foreground(target);
         }

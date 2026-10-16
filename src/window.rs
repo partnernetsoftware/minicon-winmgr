@@ -281,6 +281,12 @@ unsafe extern "system" fn wndproc_inner(
 ) -> LRESULT {
     match msg {
         STARTUP_READY_MESSAGE => LRESULT(isize::from(STARTUP_READY.get())),
+        windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY
+            if wparam.0 == crate::run_dialog::HOTKEY_ID =>
+        {
+            crate::run_dialog::show();
+            LRESULT(0)
+        }
         SETTINGS_MESSAGE => {
             crate::settings_ui::show();
             LRESULT(1)

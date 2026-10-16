@@ -276,6 +276,7 @@ def main(*, include_run_regression=True, build=True):
         # Native Tab reaches controls outside a small viewport and auto-scrolls.
         check('advanced_actions_initially_collapsed', not u.IsWindowVisible(ctrl(6110)))
         focus_id(6205); key('ENTER')
+        wait(lambda:u.IsWindowVisible(ctrl(6110)))
         check('advanced_actions_expand_from_keyboard', u.IsWindowVisible(ctrl(6110)))
         u.MoveWindow(panel(), 120, 100, 640, 480, True); time.sleep(.15)
         focus_id(6110); time.sleep(.15)
@@ -333,7 +334,7 @@ def main(*, include_run_regression=True, build=True):
         click(6101); saved(); stop()
         overridden = environment | {'MINICON_TASKBAR': 'true', 'MINICON_NO_TASKBAR': '1', 'MINICON_GROUP_TASKS': 'false', 'MINICON_TRAY': 'not-a-bool'}
         start(overridden, ['--settings']); show()
-        check('valid_env_override_is_read_only_and_invalid_env_is_not', not u.IsWindowEnabled(ctrl(6101)) and checked(6101) and 'MINICON_TASKBAR' in text(ctrl(6301)) and not u.IsWindowEnabled(ctrl(6103)) and u.IsWindowEnabled(ctrl(6102)))
+        check('valid_env_override_is_read_only_and_invalid_env_is_not', not u.IsWindowEnabled(ctrl(6101)) and checked(6101) and '固定' in text(ctrl(6301)) and all('MINICON_' not in text(ctrl(cid)) and '环境变量' not in text(ctrl(cid)) for cid in [6301, 6303, 6312]) and not u.IsWindowEnabled(ctrl(6103)) and u.IsWindowEnabled(ctrl(6102)))
         check('environment_did_not_rewrite_file_preference', 'taskbar.show = true' in CONFIG.read_text(encoding='utf-8'))
         stop(); start(environment, ['--settings']); show()
         # Keep the established Run acceptance in its isolated LOCALAPPDATA.
@@ -367,7 +368,8 @@ def main(*, include_run_regression=True, build=True):
         if u.IsWindowVisible(run): key('ESC')
         key('WIN+B'); notifications = wait(lambda: window('minicon_winmgr_notification_panel'))
         wait(lambda: u.IsWindowVisible(notifications))
-        check('notification_panel_retains_time_settings_entry', text(u.GetDlgItem(notifications, 6)) == '时间设置')
+        wait(lambda:text(u.GetDlgItem(notifications, 6)) == '时间设置')
+        check('notification_panel_retains_time_settings_entry', text(u.GetDlgItem(notifications, 6)) == '时间设置', text(u.GetDlgItem(notifications, 6)))
         u.SendMessageW(notifications, 16, 0, 0)
         show()
         # Accessible names/roles are provided by genuine native controls.
@@ -398,6 +400,7 @@ ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
         report['passed'] = True
     except Exception as error:
         report['passed'] = False; report['error'] = repr(error)
+        report['failure_ui']={'settings_title':text(panel()),'notification_time':text(u.GetDlgItem(window('minicon_winmgr_notification_panel'),6))}
         raise
     finally:
         # Recover an interrupted fault-injection before asking the test instance to exit.

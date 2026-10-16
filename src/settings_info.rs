@@ -66,10 +66,11 @@ pub(crate) fn show(owner: HWND, value: &str) -> Result<(), windows::core::Error>
         let mut hwnd = WINDOW.get();
         if !IsWindow(Some(hwnd)).as_bool() {
             let instance = HINSTANCE(GetWindowLongPtrW(owner, GWLP_HINSTANCE) as *mut _);
+            let class_name = wide(CLASS);
             let class = WNDCLASSW {
                 lpfnWndProc: Some(wndproc),
                 hInstance: instance,
-                lpszClassName: PCWSTR(wide(CLASS).as_ptr()),
+                lpszClassName: PCWSTR(class_name.as_ptr()),
                 hCursor: LoadCursorW(None, IDC_ARROW)?,
                 hbrBackground: GetSysColorBrush(COLOR_WINDOW),
                 ..Default::default()

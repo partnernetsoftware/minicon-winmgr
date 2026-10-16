@@ -33,4 +33,6 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 - `src/i18n.rs`：English/中文界面目录、默认语言和自有窗口标题/控件本地化；不转换命令或用户输入。
 
-文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。下一轮：[0.1.8 产品设计讨论稿](plan_0_1_8.md)。
+文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。本轮：[0.1.8 设计与交付](plan_0_1_8.md)；下一轮：[0.1.9 设置更新](plan_0_1_9.md)。
+
+0.1.8：Run 快捷键路由在 `window`，窗口与 worker 在首次 `run_dialog::show` 创建；`run_history` 提供有界本地应用发现与路径/环境变量建议。主题化原生候选行保留完整 LB 字符串。`win_util::force_foreground` 处理跨权限 restore，`taskbar` 按点击坐标命中任务；专项脚本 `interaction_probe.py` / `taskmgr_probe.py` 纳入发布层。

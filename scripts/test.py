@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'layout', 'appearance', 'settings', 'release'], default='check')
+    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'layout', 'appearance', 'interaction', 'taskmgr', 'settings', 'release'], default='check')
     parser.add_argument('--filter', help='Rust test name/module filter; only with --layer unit')
     args = parser.parse_args()
     if args.filter and args.layer != 'unit': parser.error('--filter requires --layer unit')
@@ -39,10 +39,16 @@ def main():
             command('cargo','clippy','--all-targets','--','-D','warnings')
         if args.layer in ['unit','release']:
             command('cargo','test','--all',*(['--release'] if args.layer=='release' else []),*([args.filter] if args.filter else []))
-        if args.layer in ['layout','appearance','settings','release']:
+        if args.layer in ['layout','appearance','interaction','taskmgr','settings','release']:
             command('cargo','build',*(['--release'] if args.layer=='release' else []))
             import settings_probe as settings
             if args.layer=='release':settings.SOURCE=ROOT/'target/release-validation/release/minicon-winmgr.exe'
+            if args.layer in ['taskmgr','release']:
+                import taskmgr_probe
+                step('existing Task Manager activation',taskmgr_probe.main)
+            if args.layer in ['interaction','release']:
+                import interaction_probe
+                step('on-demand startup and daily interactions',interaction_probe.main)
             if args.layer in ['settings','release']:
                 settings.REPORT=output/'settings.json'
                 step('native settings'+(' + full Run regression' if args.layer=='release' else ''),lambda:settings.main(build=False,include_run_regression=args.layer=='release'))

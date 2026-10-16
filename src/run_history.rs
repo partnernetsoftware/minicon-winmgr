@@ -20,10 +20,12 @@ const HISTORY_BYTES_LIMIT: u64 = 1024 * 1024;
 pub enum CandidateSource {
     History,
     Path,
+    Application,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
+    pub label: Option<String>,
     pub text: String,
     pub source: CandidateSource,
 }
@@ -166,6 +168,7 @@ fn history_candidates(history: &[String], input: &str) -> Vec<Candidate> {
         .filter(|entry| entry.to_lowercase().starts_with(&prefix))
         .take(CANDIDATE_LIMIT)
         .map(|text| Candidate {
+            label: None,
             text: text.clone(),
             source: CandidateSource::History,
         })
@@ -194,6 +197,98 @@ pub fn merge_candidates(history: &[String], input: &str) -> Vec<Candidate> {
                 break;
             }
         }
+    }
+    result
+}
+
+/// App discovery is requested only for a bare name, never for paths or arguments.
+pub fn application_query(input: &str) -> bool {
+    let query = input.trim();
+    query.chars().count() >= 2
+        && !query
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '\\' | '/' | ':' | '"' | '%'))
+}
+
+/// Bounded local Start Menu discovery. No recursive symlinks, remote drives or startup scan.
+pub fn discover_applications() -> Vec<crate::model::Shortcut> {
+    let started = Instant::now();
+    let mut pending = Vec::new();
+    for key in ["APPDATA", "ProgramData"] {
+        if let Some(root) = std::env::var_os(key) {
+            let root = Path::new(&root).join("Microsoft/Windows/Start Menu/Programs");
+            let value = root.to_string_lossy();
+            if value.len() >= 3 && value.as_bytes()[1] == b':' {
+                let drive: Vec<u16> = value[..3].encode_utf16().chain(Some(0)).collect();
+                if unsafe { GetDriveTypeW(PCWSTR(drive.as_ptr())) } == 3 {
+                    pending.push((root, 0));
+                }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    let mut visited = 0;
+    while let Some((directory, depth)) = pending.pop() {
+        if started.elapsed() > Duration::from_millis(200) || visited >= 4096 {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited >= 4096 || started.elapsed() > Duration::from_millis(200) {
+                break;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if kind.is_dir() && depth < 12 {
+                pending.push((path, depth + 1));
+            } else if kind.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
+                && let (Some(name), Some(path)) =
+                    (path.file_stem().and_then(|s| s.to_str()), path.to_str())
+            {
+                found.push(crate::model::Shortcut {
+                    name: name.into(),
+                    path: path.into(),
+                });
+            }
+        }
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    found.dedup_by(|a, b| a.path == b.path);
+    found
+}
+
+pub fn with_applications(
+    mut result: Vec<Candidate>,
+    input: &str,
+    apps: &[crate::model::Shortcut],
+) -> Vec<Candidate> {
+    if !application_query(input) {
+        return result;
+    }
+    for app in crate::launcher::search(apps, input, CANDIDATE_LIMIT) {
+        let text = format!("\"{}\"", app.path);
+        if result.len() == CANDIDATE_LIMIT {
+            break;
+        }
+        if result.iter().any(|item| item.text == text) {
+            continue;
+        }
+        result.push(Candidate {
+            label: Some(app.name.clone()),
+            text,
+            source: CandidateSource::Application,
+        });
     }
     result
 }
@@ -252,9 +347,17 @@ fn replace_target(target: &Target<'_>, path: &str) -> String {
 
 /// No UNC, mapped or removable drives. Caps enumeration work as well as output.
 pub fn path_candidates(input: &str) -> Vec<Candidate> {
+    path_candidates_with(input, &|key| std::env::var(key).ok())
+}
+fn path_candidates_with(input: &str, lookup: &impl Fn(&str) -> Option<String>) -> Vec<Candidate> {
     let started = Instant::now();
     let Some(target) = target_span(input) else {
         return Vec::new();
+    };
+    let expanded = crate::shell_launch::expand_target(target.text, lookup);
+    let target = Target {
+        text: &expanded,
+        ..target
     };
     let bytes = target.text.as_bytes();
     if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
@@ -300,6 +403,7 @@ pub fn path_candidates(input: &str) -> Vec<Candidate> {
         .map(|(file, _, name)| {
             let path = format!("{parent}{name}{}", if file { "" } else { "\\" });
             Candidate {
+                label: Some(name),
                 text: replace_target(&target, &path),
                 source: CandidateSource::Path,
             }
@@ -310,6 +414,31 @@ pub fn path_candidates(input: &str) -> Vec<Candidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn application_suggestions_preserve_commands_and_only_scan_bare_names() {
+        for input in [
+            "",
+            "n",
+            "notepad file.txt",
+            r"C:\Windows\",
+            "%USERPROFILE%",
+            "https://example.com",
+        ] {
+            assert!(!application_query(input), "{input}");
+        }
+        let apps = vec![crate::model::Shortcut {
+            name: "Notepad".into(),
+            path: r"C:\Program Files\Notepad.lnk".into(),
+        }];
+        let input = "note";
+        let found = with_applications(Vec::new(), input, &apps);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label.as_deref(), Some("Notepad"));
+        assert_eq!(found[0].text, r#""C:\Program Files\Notepad.lnk""#);
+        assert_eq!(found[0].source, CandidateSource::Application);
+        let again = with_applications(found.clone(), input, &apps);
+        assert_eq!(again.len(), 1);
+    }
     #[test]
     fn exact_dedup_keeps_case_and_parameters() {
         let entries = normalize(vec![
@@ -444,6 +573,11 @@ mod tests {
         let input = format!("\"{}\\\"  --name \"张 三\"  ", root.display());
         let suggestions = path_candidates(&input);
         assert_eq!(suggestions.len(), 20);
+        let variable = path_candidates_with(r#""%ROOT%\"  --name "张 三"  "#, &|key| {
+            (key == "ROOT").then(|| root.to_string_lossy().into_owned())
+        });
+        assert_eq!(variable, suggestions);
+        assert!(path_candidates_with(r"%UNKNOWN%\", &|_| None).is_empty());
         assert_eq!(
             suggestions[0].text,
             format!("\"{}\\a directory\\\"  --name \"张 三\"  ", root.display())

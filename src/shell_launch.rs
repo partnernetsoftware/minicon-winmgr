@@ -65,7 +65,7 @@ impl LaunchError {
 }
 
 /// Expand known environment variables once. Unknown names remain visible.
-fn expand_target(target: &str, lookup: &impl Fn(&str) -> Option<String>) -> String {
+pub(crate) fn expand_target(target: &str, lookup: &impl Fn(&str) -> Option<String>) -> String {
     let mut result = String::new();
     let mut rest = target;
     while let Some(start) = rest.find('%') {

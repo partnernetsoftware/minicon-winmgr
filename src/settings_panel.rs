@@ -402,10 +402,11 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
                 Some(viewproc as unsafe extern "system" fn(_, _, _, _) -> _),
             ),
         ] {
+            let class_name = wide(name);
             let wc = WNDCLASSW {
                 lpfnWndProc: proc,
                 hInstance: instance,
-                lpszClassName: PCWSTR(wide(name).as_ptr()),
+                lpszClassName: PCWSTR(class_name.as_ptr()),
                 hCursor: LoadCursorW(None, IDC_ARROW)?,
                 hbrBackground: GetSysColorBrush(COLOR_BTNFACE),
                 ..Default::default()
@@ -418,7 +419,14 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
         let result = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             PCWSTR(wide(CLASS).as_ptr()),
-            PCWSTR(wide(crate::i18n::text("设置 — minicon-winmgr")).as_ptr()),
+            PCWSTR(
+                wide(&crate::ui_format!(
+                    "设置 — minicon-winmgr {}",
+                    "Settings — minicon-winmgr {}",
+                    env!("CARGO_PKG_VERSION")
+                ))
+                .as_ptr(),
+            ),
             WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -697,13 +705,23 @@ fn enabled(id: u16, on: bool) {
 }
 fn source_note(key: &'static str, reason: Option<&str>) -> String {
     match (config::env_source(key), reason) {
-        (Some(_), Some(reason)) => format!("{}；{reason}", config::source(key)),
-        (Some(_), None) => config::source(key),
+        (Some(_), Some(reason)) => {
+            format!("{} · {reason}", crate::i18n::text("此项由启动配置固定"))
+        }
+        (Some(_), None) => crate::i18n::text("此项由启动配置固定").to_string(),
         (None, Some(reason)) => reason.to_string(),
         (None, None) => String::new(),
     }
 }
 fn refresh() {
+    label(
+        handle(),
+        &crate::ui_format!(
+            "设置 — minicon-winmgr {}",
+            "Settings — minicon-winmgr {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
     let cfg = config::current();
     let controls = with(|p| p.controls.clone()).unwrap_or_default();
     for c in controls {
@@ -849,7 +867,7 @@ fn refresh() {
         )
     } else if status.pending > 0 {
         crate::i18n::text("本次修改已保留，正在保存…").into()
-    } else if status.saved && config::preferred_taskbar() != cfg.show_taskbar {
+    } else if status.saved && pending {
         crate::i18n::text("已保存，任务栏显示设置重启后生效。").into()
     } else if status.saved {
         crate::i18n::text("已保存").into()
