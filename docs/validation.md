@@ -1,6 +1,10 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.9](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.9)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.10](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.10)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.10
+
+准确 CI 文件的功能发布层、补齐的设置/Run 集成、三组窗口资源对照、实际截图和草稿附件核验通过；发布后使用公开 0.1.9 完成真实 GitHub 下载/校验/重启，原实例恢复。数值、覆盖范围及失败记录见[详细验收](validation_0_1_10.md)。2h/8h 扩展观察未完成，不据短测宣称长期稳定。
 
 ## 0.1.9
 
