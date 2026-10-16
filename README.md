@@ -2,13 +2,13 @@
 
 轻量 Windows 外壳与会话管理器，Rust + Win32。默认作为 companion 与 Explorer 共存；受控接管模式可替换当前用户的桌面外壳。
 
-当前版本 **0.1.6**。版本事实见 [CHANGELOG](CHANGELOG.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.6 计划](docs/plan_0_1_6.md)。
+当前版本 **[0.1.7](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.7)**。版本事实见 [CHANGELOG](CHANGELOG.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.6 计划](docs/plan_0_1_6.md)。
 
-main 的发布后改进包括紧凑暖色设置、中英文切换（默认英文）、白天/黑夜/自动主题、四边任务栏停靠、设置分组、折叠桌面管理、可复制的配置详情，以及检测到自身提升权限后自动以普通权限重启。普通启动直接继续，不主动请求 UAC。实现与覆盖限制见[后续验收](docs/plan_0_1_6.md#10-后续实现与验证2026-10-16)；公开 v0.1.6 安装包尚不包含这些改进。
+0.1.7 包括紧凑暖色设置、中英文切换（默认英文）、白天/黑夜/自动主题、四边任务栏停靠、设置分组、折叠桌面管理、可复制的配置详情，以及检测到自身提升权限后自动以普通权限重启。普通启动直接继续，不主动请求 UAC。实现与覆盖限制见[后续验收](docs/plan_0_1_6.md#10-后续实现与验证2026-10-16)；发布验证见 [0.1.7 验收](docs/acceptance_release_0_1_7.json)。
 
 ## 设置预览
 
-真实 Win32 设置窗口截图，来自当前 main 开发版。默认 **English**，可在设置中即时切换 **中文**并保存；提供白天、黑夜和跟随 Windows 的自动主题。公开 v0.1.6 安装包尚未包含本轮改进。
+真实 Win32 设置窗口截图，界面已包含在 0.1.7 中。默认 **English**，可在设置中即时切换 **中文**并保存；提供白天、黑夜和跟随 Windows 的自动主题。
 
 | English · Light | English · Dark |
 |---|---|
@@ -57,4 +57,4 @@ Alt+反引号聚焦任务栏，方向键选择、Enter 激活；Win+B 打开通�
 
 开发期使用 `python scripts/test.py` 快速检查；`--layer unit --filter config::tests` 只跑指定模块，`--layer appearance` / `settings` 运行对应桌面专项。准备发布时用 `--layer release` 跑全部自动化，并测试 release 产物。分层内容与环境要求见[测试说明](docs/testing.md)。Windows CI 执行 `quality` 静态检查，release workflow 另跑完整单元测试。打 tag 的 release workflow 已支持构建并发布产物；代码签名尚未纳入。构建工具链如在自定义位置，设置对应 `RUSTUP_HOME` / `CARGO_HOME` 并把 Cargo bin 加入 PATH。
 
-0.1.6 的自动化与桌面证据见 [版本计划](docs/plan_0_1_6.md) 和 [验收数据](docs/acceptance_0_1_6.json)。物理混合 DPI、多屏热插拔、屏幕阅读器语音、高对比度和小时级长跑未覆盖。
+0.1.7 发布验收见 [完整发布记录](docs/acceptance_release_0_1_7.json)；0.1.6 的历史自动化与桌面证据见 [版本计划](docs/plan_0_1_6.md) 和 [验收数据](docs/acceptance_0_1_6.json)。物理混合 DPI、多屏热插拔、屏幕阅读器语音、高对比度和小时级长跑未覆盖。

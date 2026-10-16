@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 import winreg
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -208,7 +209,7 @@ def main(*, include_run_regression=True, build=True):
     if not desktop:
         raise RuntimeError('Input desktop unavailable; unlock/reconnect this session before interactive acceptance. Existing report preserved.')
     u.CloseDesktop(desktop)
-    report = {'version': '0.1.6', 'tests': [], 'limits': [
+    report = {'version': tomllib.loads((ROOT/'Cargo.toml').read_text(encoding='utf-8'))['package']['version'], 'tests': [], 'limits': [
         'Physical mixed-DPI monitors and monitor unplugging are not available in this session.',
         'Screen-reader speech and system high-contrast appearance require separate environmental coverage.',
     ]}

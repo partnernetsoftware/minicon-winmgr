@@ -26,6 +26,10 @@ def main():
         try: action();item['passed']=True
         finally: item['seconds']=round(time.monotonic()-started,3)
     def command(*cmd):
+        # Legacy/current instances may still lock target/release through a hard link.
+        # Keep release validation outputs separate without stopping other sessions.
+        if args.layer=='release' and cmd[0]=='cargo' and cmd[1] in ('test','build'):
+            cmd=(*cmd[:2],'--target-dir',str(ROOT/'target/release-validation'),*cmd[2:])
         step(' '.join(cmd),lambda:subprocess.run(cmd,cwd=ROOT,check=True))
     try:
         if args.layer in ['check','quality','release']:
@@ -38,7 +42,7 @@ def main():
         if args.layer in ['layout','appearance','settings','release']:
             command('cargo','build',*(['--release'] if args.layer=='release' else []))
             import settings_probe as settings
-            if args.layer=='release':settings.SOURCE=ROOT/'target/release/minicon-winmgr.exe'
+            if args.layer=='release':settings.SOURCE=ROOT/'target/release-validation/release/minicon-winmgr.exe'
             if args.layer in ['settings','release']:
                 settings.REPORT=output/'settings.json'
                 step('native settings'+(' + full Run regression' if args.layer=='release' else ''),lambda:settings.main(build=False,include_run_regression=args.layer=='release'))

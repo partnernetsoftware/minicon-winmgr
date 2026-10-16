@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.7 — 2026-10-16
 
 - 紧凑暖色设置布局；English / 中文即时切换并保存，默认 English；README 新增真实明暗主题设置截图。
 

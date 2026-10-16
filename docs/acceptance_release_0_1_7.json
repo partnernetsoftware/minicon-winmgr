@@ -1,0 +1,865 @@
+{
+  "version": "0.1.7",
+  "date": "2026-10-16",
+  "profile": "release",
+  "unit_tests_passed": 261,
+  "local_binary_sha256": "fbd7e5034bf00dd60f76dc32ded1987a705837f7036d20b10dd8a8f6431336d6",
+  "note": "Local release build validated below; GitHub Actions builds the downloadable artifact separately and publishes its SHA256SUMS.txt.",
+  "runner": {
+    "utc": "2026-10-16T02:10:46.399102+00:00",
+    "source_sha256": "0d12fa3c86e8e2199671fccac46cb6fb957d2bf7239c9184b65382233b723450",
+    "layer": "release",
+    "filter": null,
+    "steps": [
+      {
+        "name": "cargo fmt --all -- --check",
+        "passed": true,
+        "seconds": 0.953
+      },
+      {
+        "name": "cargo clippy --all-targets -- -D warnings",
+        "passed": true,
+        "seconds": 6.531
+      },
+      {
+        "name": "cargo test --target-dir D:\\dev\\partnernetsoftware\\minicon-winmgr\\target\\release-validation --all --release",
+        "passed": true,
+        "seconds": 166.36
+      },
+      {
+        "name": "cargo build --target-dir D:\\dev\\partnernetsoftware\\minicon-winmgr\\target\\release-validation --release",
+        "passed": true,
+        "seconds": 27.312
+      },
+      {
+        "name": "native settings + full Run regression",
+        "passed": true,
+        "seconds": 38.547
+      },
+      {
+        "name": "compact layout",
+        "passed": true,
+        "seconds": 7.375
+      },
+      {
+        "name": "native themes and four-edge docking",
+        "passed": true,
+        "seconds": 22.969
+      }
+    ],
+    "passed": true,
+    "appearance_report": "target/industrial-acceptance/appearance.json"
+  },
+  "settings": {
+    "version": "0.1.7",
+    "tests": [
+      {
+        "name": "settings_cli_reuses_same_instance",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "native_tab_sequence_skips_disabled_radio_basis",
+        "passed": true,
+        "detail": [
+          6102,
+          6103,
+          6108,
+          6120,
+          6205,
+          6114,
+          6132,
+          6141,
+          6101
+        ]
+      },
+      {
+        "name": "reverse_tab",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "configuration_details_show_values_sources_and_save_path",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "configuration_details_support_native_text_selection",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "configuration_details_close_restores_entry_focus",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "configuration_details_reuse_window",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "radio_arrow_applies_and_enables_basis",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "pending_taskbar_hide_keeps_current_bar_and_dependencies",
+        "passed": true,
+        "detail": "重启后隐藏；本次仍显示任务栏"
+      },
+      {
+        "name": "restore_next_start_taskbar",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "preview_initially_disabled_can_initialize_on_enable",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "advanced_actions_initially_collapsed",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "advanced_actions_expand_from_keyboard",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "small_viewport_scrolls_focused_action_into_view",
+        "passed": true,
+        "detail": {
+          "viewport": [
+            152,
+            131,
+            711,
+            508
+          ],
+          "focused": [
+            152,
+            474,
+            427,
+            508
+          ]
+        }
+      },
+      {
+        "name": "small_viewport_footer_remains_reachable",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "cancel_returns_focus_to_original_settings_button",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "desktop_action_confirmation_cancel_preserves_shell",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "escape_hides_reused_settings",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "reopen_same_window",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "save_failure_is_visible_and_session_value_applied",
+        "passed": true,
+        "detail": "本次修改已保留，1 项保存失败；下次启动尚未保存。请重试。"
+      },
+      {
+        "name": "save_failure_survives_hide_reopen",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "dirty_shutdown_default_returns_to_settings",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "failed_write_kept_original_bytes",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "retry_same_choice_persists_without_retoggling",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "100_settings_reopens_and_preview_cycles_no_resource_growth",
+        "passed": true,
+        "detail": [
+          {
+            "handles": 364,
+            "gdi": 39,
+            "user": 103,
+            "working_bytes": 36749312,
+            "private_bytes": 14434304
+          },
+          {
+            "handles": 366,
+            "gdi": 39,
+            "user": 107,
+            "working_bytes": 36904960,
+            "private_bytes": 14594048
+          },
+          {
+            "handles": 365,
+            "gdi": 39,
+            "user": 103,
+            "working_bytes": 36921344,
+            "private_bytes": 14602240
+          }
+        ]
+      },
+      {
+        "name": "saved_restart_preference",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "disabled_taskbar_start_still_has_settings_cli",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "settings_cli_without_taskbar_reuses_instance",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "valid_env_override_is_read_only_and_invalid_env_is_not",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "environment_did_not_rewrite_file_preference",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "established_run_dialog_regression",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "run_expands_known_argument_variables_and_preserves_unknown",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "document_path_expands_or_explains_broken_association",
+        "passed": true,
+        "detail": "文件存在，但默认打开程序不可用。请在文件路径前指定程序（例如 notepad），或修复系统默认打开方式。"
+      },
+      {
+        "name": "notification_panel_retains_time_settings_entry",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "native_control_names_and_states",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "uia_exposes_native_roles_names_and_patterns",
+        "passed": true,
+        "detail": [
+          {
+            "id": "6101",
+            "name": "显示任务栏",
+            "role": "ControlType.CheckBox",
+            "enabled": true,
+            "patterns": [
+              "TogglePatternIdentifiers.Pattern"
+            ]
+          },
+          {
+            "id": "6103",
+            "name": "从不合并",
+            "role": "ControlType.RadioButton",
+            "enabled": true,
+            "patterns": [
+              "SelectionItemPatternIdentifiers.Pattern"
+            ]
+          },
+          {
+            "id": "6106",
+            "name": "按应用",
+            "role": "ControlType.RadioButton",
+            "enabled": true,
+            "patterns": [
+              "SelectionItemPatternIdentifiers.Pattern"
+            ]
+          },
+          {
+            "id": "6114",
+            "name": "关闭",
+            "role": "ControlType.Button",
+            "enabled": true,
+            "patterns": [
+              "InvokePatternIdentifiers.Pattern"
+            ]
+          }
+        ]
+      }
+    ],
+    "limits": [
+      "Physical mixed-DPI monitors and monitor unplugging are not available in this session.",
+      "Screen-reader speech and system high-contrast appearance require separate environmental coverage."
+    ],
+    "synchronous_reopen_and_two_toggles_ms": {
+      "median": 102.31490060687065,
+      "p95": 163.94640132784843,
+      "max": 205.11550083756447,
+      "method": "SendMessage hide/show plus two native button clicks; excludes asynchronous disk completion"
+    },
+    "run_regression": [
+      {
+        "name": "hotkey_focus",
+        "passed": true
+      },
+      {
+        "name": "empty_disabled",
+        "passed": true
+      },
+      {
+        "name": "failure_retains_input",
+        "passed": true
+      },
+      {
+        "name": "repeat_hotkey_retains_input",
+        "passed": true
+      },
+      {
+        "name": "unclosed_quote_feedback",
+        "passed": true
+      },
+      {
+        "name": "escape_hides",
+        "passed": true
+      },
+      {
+        "name": "draft_restored",
+        "passed": true
+      },
+      {
+        "name": "successful_launch_produced_file",
+        "passed": true
+      },
+      {
+        "name": "quoted_unicode_arguments",
+        "passed": true
+      },
+      {
+        "name": "explicit_user_directory",
+        "passed": true
+      },
+      {
+        "name": "success_hides",
+        "passed": true
+      },
+      {
+        "name": "successful_command_recalled",
+        "passed": true
+      },
+      {
+        "name": "history_dropdown",
+        "passed": true
+      },
+      {
+        "name": "adoption_does_not_execute",
+        "passed": true
+      },
+      {
+        "name": "tab_cycle",
+        "passed": true
+      },
+      {
+        "name": "local_path_suggestions",
+        "passed": true
+      },
+      {
+        "name": "escape_closes_only_candidates",
+        "passed": true
+      },
+      {
+        "name": "second_escape_hides",
+        "passed": true
+      },
+      {
+        "name": "alt_f4_hides_reusable",
+        "passed": true
+      },
+      {
+        "name": "reopen_after_close",
+        "passed": true
+      },
+      {
+        "name": "clear_history",
+        "passed": true
+      },
+      {
+        "name": "clear_disk_history",
+        "passed": true
+      }
+    ],
+    "uia_controls": [
+      {
+        "id": "6101",
+        "name": "显示任务栏",
+        "role": "ControlType.CheckBox",
+        "enabled": true,
+        "patterns": [
+          "TogglePatternIdentifiers.Pattern"
+        ]
+      },
+      {
+        "id": "6103",
+        "name": "从不合并",
+        "role": "ControlType.RadioButton",
+        "enabled": true,
+        "patterns": [
+          "SelectionItemPatternIdentifiers.Pattern"
+        ]
+      },
+      {
+        "id": "6106",
+        "name": "按应用",
+        "role": "ControlType.RadioButton",
+        "enabled": true,
+        "patterns": [
+          "SelectionItemPatternIdentifiers.Pattern"
+        ]
+      },
+      {
+        "id": "6114",
+        "name": "关闭",
+        "role": "ControlType.Button",
+        "enabled": true,
+        "patterns": [
+          "InvokePatternIdentifiers.Pattern"
+        ]
+      }
+    ],
+    "screenshot": "images/settings_0_1_6.png",
+    "passed": true,
+    "normal_session_restored": true,
+    "shell_registration_unchanged": true
+  },
+  "layout": {
+    "binary_sha256": "fbd7e5034bf00dd60f76dc32ded1987a705837f7036d20b10dd8a8f6431336d6",
+    "checks": [
+      {
+        "name": "default_language_is_english",
+        "passed": true,
+        "detail": "Settings — minicon-winmgr"
+      },
+      {
+        "name": "light_inline_theme_label",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "light_inline_position_label",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "light_parallel_visibility_controls",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "light_parallel_secondary_entries",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "dark_inline_theme_label",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "dark_inline_position_label",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "dark_parallel_visibility_controls",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "dark_parallel_secondary_entries",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "zh_live_language_switch",
+        "passed": true,
+        "detail": "设置 — minicon-winmgr"
+      },
+      {
+        "name": "en_live_language_switch",
+        "passed": true,
+        "detail": "Settings — minicon-winmgr"
+      },
+      {
+        "name": "wide_layout_restored_after_resize",
+        "passed": true,
+        "detail": {
+          "expected": [
+            140,
+            163,
+            286,
+            193
+          ],
+          "actual": [
+            140,
+            163,
+            286,
+            193
+          ]
+        }
+      },
+      {
+        "name": "wide_layout_restored_after_resize",
+        "passed": true,
+        "detail": {
+          "expected": [
+            140,
+            163,
+            286,
+            193
+          ],
+          "actual": [
+            140,
+            163,
+            286,
+            193
+          ]
+        }
+      },
+      {
+        "name": "preview_and_secondary_entries_fit_default_viewport",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "restart_preserves_language",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "environment_language_is_read_only",
+        "passed": true,
+        "detail": null
+      }
+    ],
+    "limits": [
+      "Single physical DPI/session; no active UAC or system theme changes."
+    ],
+    "baseline_work_area": [
+      0,
+      0,
+      1680,
+      989
+    ],
+    "passed": true,
+    "normal_session_restored": true,
+    "shell_registration_unchanged": true
+  },
+  "appearance": {
+    "binary_sha256": "fbd7e5034bf00dd60f76dc32ded1987a705837f7036d20b10dd8a8f6431336d6",
+    "checks": [
+      {
+        "name": "light_bottom_geometry",
+        "passed": true,
+        "detail": [
+          0,
+          1014,
+          1680,
+          1050
+        ]
+      },
+      {
+        "name": "light_bottom_selection",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "light_top_geometry",
+        "passed": true,
+        "detail": [
+          0,
+          0,
+          1680,
+          36
+        ]
+      },
+      {
+        "name": "light_top_selection",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "light_left_geometry",
+        "passed": true,
+        "detail": [
+          0,
+          0,
+          180,
+          1050
+        ]
+      },
+      {
+        "name": "light_left_selection",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "light_right_geometry",
+        "passed": true,
+        "detail": [
+          1500,
+          0,
+          1680,
+          1050
+        ]
+      },
+      {
+        "name": "light_right_selection",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "dark_bottom_geometry",
+        "passed": true,
+        "detail": [
+          0,
+          1014,
+          1680,
+          1050
+        ]
+      },
+      {
+        "name": "dark_bottom_selection",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "dark_top_geometry",
+        "passed": true,
+        "detail": [
+          0,
+          0,
+          1680,
+          36
+        ]
+      },
+      {
+        "name": "dark_top_selection",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "dark_left_geometry",
+        "passed": true,
+        "detail": [
+          0,
+          0,
+          180,
+          1050
+        ]
+      },
+      {
+        "name": "dark_left_selection",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "dark_right_geometry",
+        "passed": true,
+        "detail": [
+          1500,
+          0,
+          1680,
+          1050
+        ]
+      },
+      {
+        "name": "dark_right_selection",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "auto_palette_matches_windows_application_setting",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "footer_close_remains_visible",
+        "passed": true,
+        "detail": [
+          948,
+          723,
+          1038,
+          755
+        ]
+      },
+      {
+        "name": "same_instance_for_live_changes",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "no_gdi_growth_after_switches",
+        "passed": true,
+        "detail": [
+          42,
+          40
+        ]
+      },
+      {
+        "name": "bottom_work_area_does_not_accumulate",
+        "passed": true,
+        "detail": [
+          0,
+          0,
+          1680,
+          953
+        ]
+      },
+      {
+        "name": "top_work_area_does_not_accumulate",
+        "passed": true,
+        "detail": [
+          0,
+          36,
+          1680,
+          989
+        ]
+      },
+      {
+        "name": "left_work_area_does_not_accumulate",
+        "passed": true,
+        "detail": [
+          180,
+          0,
+          1680,
+          989
+        ]
+      },
+      {
+        "name": "right_work_area_does_not_accumulate",
+        "passed": true,
+        "detail": [
+          0,
+          0,
+          1500,
+          989
+        ]
+      },
+      {
+        "name": "exit_restores_original_work_area",
+        "passed": true,
+        "detail": {
+          "before": [
+            0,
+            0,
+            1680,
+            989
+          ],
+          "after": [
+            0,
+            0,
+            1680,
+            989
+          ]
+        }
+      },
+      {
+        "name": "restart_reads_saved_theme_and_position",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "valid_environment_overrides_are_read_only",
+        "passed": true,
+        "detail": null
+      }
+    ],
+    "limits": [
+      "Single physical DPI/session; no active UAC or system theme changes."
+    ],
+    "baseline_work_area": [
+      0,
+      0,
+      1680,
+      989
+    ],
+    "edge_work_areas": {
+      "bottom": [
+        0,
+        0,
+        1680,
+        953
+      ],
+      "top": [
+        0,
+        36,
+        1680,
+        989
+      ],
+      "left": [
+        180,
+        0,
+        1680,
+        989
+      ],
+      "right": [
+        0,
+        0,
+        1500,
+        989
+      ]
+    },
+    "resources": {
+      "before": {
+        "handles": 376,
+        "gdi": 42,
+        "user": 103,
+        "working_bytes": 37756928,
+        "private_bytes": 14123008
+      },
+      "after": {
+        "handles": 376,
+        "gdi": 40,
+        "user": 101,
+        "working_bytes": 37609472,
+        "private_bytes": 14536704
+      }
+    },
+    "passed": true,
+    "normal_session_restored": true,
+    "shell_registration_unchanged": true
+  },
+  "limits": [
+    "No new active UAC tests. Cold administrator/no-filtered-token environment remains unverified.",
+    "Physical mixed DPI/multiple displays, screen-reader speech, system high-contrast display and hour-long observation remain unverified.",
+    "Fallback work-area path covered in this session; Explorer AppBar broker needs separate environment."
+  ]
+}
