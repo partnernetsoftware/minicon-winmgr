@@ -32,7 +32,7 @@
 
 | 命令 | 行为 |
 |---|---|
-| `python scripts/test.py --layer memory --pid <test-pid> --duration 60` | 只读观察现有测试实例，记录数值与本地曲线，不重启、不修改配置；默认 5 秒采样 |
+| `python scripts/test.py --layer memory --pid <test-pid> --duration 60` | 只读观察现有测试实例，记录数值；有 matplotlib 时生成本地曲线，不重启、不修改配置；默认 5 秒采样 |
 | `python scripts/test.py --layer soak --pid <test-pid> --duration 28800` | 显式 8 小时观察；提前退出记为不完整，不自动判定没有泄漏 |
 | `python scripts/test.py --layer resources` | 创建本测试的隐藏窗口并停滞源消息线程，验证 DWM 100 次注册/释放；另用 6 个全新子进程对照两种日志队列容量，不替换正常外壳 |
 
@@ -43,3 +43,5 @@
 `python scripts/test.py --layer side-resize` 构建 debug，使用隔离偏好操作本会话任务栏内边缘，检查左右拖宽、取消、提交与重启持久化；finally 恢复原 live 二进制与环境。该层使用真实鼠标输入，不能与其他桌面层或长跑同时执行。
 
 `python scripts/memory_probe.py --export-summary --output <local-observation-directory>` 只把白名单数值、场景代号和二进制摘要写成本地 Markdown 草稿，未知字段不导出，字段中出现路径字符串会拒绝；经人工检查后才提交公开摘要。
+
+无 matplotlib 的环境可先完成采样，再用带该模块的 Python 执行 `--plot-only`。采样报告明确记录是否已生成曲线，不把缺失曲线隐藏为已生成。

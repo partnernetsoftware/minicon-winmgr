@@ -76,6 +76,7 @@ fn thickness(hwnd: Option<HWND>, span: i32) -> i32 {
 }
 
 const SIDE_RESIZE_TIMER: usize = 84;
+const SIDE_RESIZE_ESCAPE: usize = 85;
 #[derive(Clone, Copy)]
 struct SideDrag {
     hwnd: isize,
@@ -139,6 +140,15 @@ fn begin_side_resize(hwnd: HWND, x: i32, y: i32) -> bool {
     SIDE_DRAG.with(|state| *state.borrow_mut() = Some(drag));
     unsafe {
         SetCapture(hwnd);
+        // Escape belongs to this temporary mouse interaction, without moving
+        // foreground focus away from the user's application. Polling remains
+        // a fallback if another application already registered this key.
+        let _ = RegisterHotKey(
+            Some(hwnd),
+            SIDE_RESIZE_ESCAPE as i32,
+            windows::Win32::UI::Input::KeyboardAndMouse::MOD_NOREPEAT,
+            VK_ESCAPE.0 as u32,
+        );
     }
     if unsafe { SetTimer(Some(hwnd), SIDE_RESIZE_TIMER, 16, None) } == 0 {
         finish_side_resize(hwnd, false);
@@ -163,6 +173,7 @@ fn finish_side_resize(hwnd: HWND, commit: bool) {
     };
     unsafe {
         let _ = KillTimer(Some(hwnd), SIDE_RESIZE_TIMER);
+        let _ = UnregisterHotKey(Some(hwnd), SIDE_RESIZE_ESCAPE as i32);
         if GetCapture() == hwnd {
             let _ = ReleaseCapture();
         }
@@ -1911,6 +1922,10 @@ unsafe extern "system" fn wndproc_inner(
 ) -> LRESULT {
     let key = hwnd.0 as isize;
     match msg {
+        WM_HOTKEY if wparam.0 == SIDE_RESIZE_ESCAPE => {
+            finish_side_resize(hwnd, false);
+            LRESULT(0)
+        }
         WM_TIMER if wparam.0 == SIDE_RESIZE_TIMER => {
             poll_side_resize(hwnd);
             LRESULT(0)
@@ -2478,6 +2493,7 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         WM_DESTROY => {
+            let _ = unsafe { UnregisterHotKey(Some(hwnd), SIDE_RESIZE_ESCAPE as i32) };
             SIDE_DRAG.with(|state| {
                 if state.borrow().is_some_and(|drag| drag.hwnd == key) {
                     state.borrow_mut().take();

@@ -97,6 +97,16 @@ def main():
         rect = p.rect(bar()); p.u.SetCursorPos(rect[2]-2,rect[1]+120); mouse(4)
         check('cancel_restores_width_without_saving', preference() == 260)
         check('cancel_preserves_work_area', work_area()[0] == baseline_work[0]+width())
+        drag_start('left', scaled(340))
+        escape = p.INPUT(1, p.UNION(key=p.KEY(27,0,0,0,0)))
+        assert p.u.SendInput(1,c.byref(escape),c.sizeof(escape)) == 1
+        time.sleep(.08)
+        escape = p.INPUT(1, p.UNION(key=p.KEY(27,0,2,0,0)))
+        assert p.u.SendInput(1,c.byref(escape),c.sizeof(escape)) == 1
+        p.wait(lambda: abs(width()-scaled(260)) <= 2)
+        rect = p.rect(bar()); p.u.SetCursorPos(rect[2]-2,rect[1]+120); mouse(4)
+        check('escape_cancels_drag_and_preserves_settings_window',
+              preference() == 260 and p.u.IsWindowVisible(p.panel()))
         p.click(6143); p.saved()
         p.wait(lambda: p.checked(6143) and abs(width()-scaled(260)) <= 2)
         drag_start('right', scaled(320)); mouse(4)
@@ -104,9 +114,22 @@ def main():
         check('right_inner_edge_drags_in_reverse_direction', abs(width()-scaled(320)) <= 2, width())
         check('right_resize_restores_old_edge_and_reserves_new_width',
               work_area()[0] == baseline_work[0] and work_area()[2] == baseline_work[2]-width())
+        drag_start('right', scaled(80))
+        check('minimum_width_is_enforced_while_dragging', abs(width()-scaled(160)) <= 2)
+        mouse(4); p.wait(lambda: preference() == 160)
+        drag_start('right', scaled(10000))
+        expected_max = min(scaled(480), (baseline_work[2]-baseline_work[0])//3)
+        check('maximum_width_leaves_desktop_space', abs(width()-expected_max) <= 2, width())
+        mouse(4); time.sleep(.1)
+        drag_start('right', scaled(320)); mouse(4)
+        p.wait(lambda: preference() == 320)
         p.stop(); p.start(environment, ['--settings']); p.show()
         p.wait(lambda: p.checked(6143) and abs(width()-scaled(320)) <= 2)
         check('restart_preserves_side_and_width', preference() == 320)
+        p.key('ESC')
+        p.wait(lambda: not p.u.IsWindowVisible(p.panel()))
+        check('resize_does_not_leave_escape_registered', preference() == 320)
+        p.show()
         check('shell_registration_unchanged', p.shell_settings() == shell)
         report['passed'] = True
     finally:
@@ -120,9 +143,14 @@ def main():
         with p.LIVE.open('rb') as live:
             report['original_binary_restored'] = hashlib.file_digest(live,'sha256').hexdigest() == original_hash
         report['shell_registration_unchanged'] = p.shell_settings() == shell
+        report['passed'] = report['passed'] and all(report[key] for key in
+            ['normal_session_restored', 'original_binary_restored',
+             'shell_registration_unchanged', 'exit_restores_work_area'])
         (OUT/'summary.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
         print(json.dumps({'passed': report['passed'], 'checks': len(report['checks']),
                           'normal_session_restored': report['normal_session_restored']}),flush=True)
+        if not report['passed']:
+            raise RuntimeError('Side-resize acceptance or restoration failed; inspect the local report')
     return report
 
 

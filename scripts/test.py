@@ -42,6 +42,7 @@ def main():
     try:
         if args.layer in ['memory','soak']:
             import sys
+            import importlib.util
             import memory_probe
             observation=output/('observation-'+str(time.time_ns()))
             report['subject']='external process identified by binary hash in observation summary'
@@ -51,7 +52,12 @@ def main():
                                         args.interval,observation,'soak' if args.layer=='soak' else 'idle')
             report['observation_summary']=str((observation/'summary.json').relative_to(ROOT))
             if result['stop_reason']!='duration_completed':raise RuntimeError('Observation ended before requested duration')
-            memory_probe.plot(observation)
+            if importlib.util.find_spec('matplotlib') is not None:
+                memory_probe.plot(observation)
+                report['plot_generated']=True
+            else:
+                report['plot_generated']=False
+                print('Samples saved; matplotlib is unavailable in this Python environment. Generate the plot later with --plot-only.',flush=True)
         if args.layer=='resources':
             import resources_probe
             step('stalled source preview and isolated logging queue measurement',resources_probe.main)
