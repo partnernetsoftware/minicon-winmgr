@@ -15,13 +15,13 @@
 产品原则：**用不上的可选功能，默认不加载。** 0.1.8 中，旧菜单默认不初始化，缩略预览默认不创建窗口，Run 的窗口和工作线程首次使用时才创建；通知宿主按外壳身份和显式配置决定初始化。详见 [0.1.8 设计与验收](docs/plan_0_1_8.md)。
 
 
-当前版本 **[0.1.8](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.8)**。版本事实见 [CHANGELOG](CHANGELOG.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.6 计划](docs/plan_0_1_6.md)。
+当前版本 **[0.1.9](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.9)**。版本事实见 [CHANGELOG](CHANGELOG.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.9 计划](docs/plan_0_1_9.md)。
 
-0.1.8 新增按需初始化、任务栏 Home/End 与 Space 导航、Esc 返回原窗口，以及 Run 的“采用/运行”明确反馈。沿用紧凑暖色设置、中英文切换（默认英文）、白天/黑夜/自动主题、四边任务栏停靠、设置分组、折叠桌面管理、可复制的配置详情，以及检测到自身提升权限后自动以普通权限重启。普通启动直接继续，不主动请求 UAC。实现与覆盖限制见[后续验收](docs/plan_0_1_6.md#10-后续实现与验证2026-10-16)；发布验证见 [0.1.8 验收](docs/acceptance_release_0_1_8.json)。
+0.1.9 新增设置内“检查更新 / 更新 / 重启”，下载校验后单独重启，交接失败时尝试恢复旧版。保留按需初始化、任务栏 Home/End 与 Space 导航、Esc 返回原窗口，以及 Run 的“采用/运行”明确反馈。沿用紧凑暖色设置、中英文切换（默认英文）、白天/黑夜/自动主题、四边任务栏停靠、设置分组、折叠桌面管理、可复制的配置详情，以及检测到自身提升权限后自动以普通权限重启。普通启动直接继续，不主动请求 UAC。实现与覆盖限制见[后续验收](docs/plan_0_1_6.md#10-后续实现与验证2026-10-16)；发布验证见 [0.1.9 验收](docs/acceptance_release_0_1_9.json)。
 
 ## 设置预览
 
-真实 Win32 设置窗口截图，界面已包含在 0.1.7 中。默认 **English**，可在设置中即时切换 **中文**并保存；提供白天、黑夜和跟随 Windows 的自动主题。
+真实 Win32 设置窗口截图，截图来自 0.1.9。默认 **English**，可在设置中即时切换 **中文**并保存；提供白天、黑夜和跟随 Windows 的自动主题。
 
 | English · Light | English · Dark |
 |---|---|
@@ -53,6 +53,14 @@ Run 在输入时更新建议，区分采用候选和执行命令（真实窗口�
 
 从 [GitHub Releases](https://github.com/partnernetsoftware/minicon-winmgr/releases/latest) 下载 Windows x64 可执行文件与 `SHA256SUMS.txt`。普通运行无需管理员权限；升级前正常退出旧实例并保留个人配置。二进制尚未代码签名。
 
+## 在设置中更新
+
+按 **检查更新 → 更新 → 重启** 操作。检查由用户点击触发，启动程序、打开设置都不会访问更新服务。更新会下载并校验正式 Windows x64 版本，当前程序继续运行；下载验证完成、设置保存后才启用“重启”。只重启 winmgr，其他应用继续保留。
+
+程序所在目录需允许当前普通用户写入。目录只读时，请下载发布文件并手动替换；更新过程不请求 UAC。临时助手等待旧实例正常退出，再保留备份、替换文件并核对新版启动回执；文件占用或启动失败时，在文件系统允许的情况下恢复旧版。
+
+暂存及备份位于程序旁的 `.winmgr-update-*` 目录。确认新版工作正常后，可手动删除旧的已完成备份目录；普通启动不扫描这些目录，也不会自动恢复待安装更新。技术失败详情保留在“配置与关于”和日志中。
+
 ## 使用与配置
 
 ```powershell
@@ -83,4 +91,4 @@ Alt+反引号聚焦任务栏，方向键选择、Home/End 到首尾、Enter/Spac
 
 开发期使用 `python scripts/test.py` 快速检查；`--layer unit --filter config::tests` 只跑指定模块，`--layer appearance` / `settings` 运行对应桌面专项。准备发布时用 `--layer release` 跑全部自动化，并测试 release 产物。分层内容与环境要求见[测试说明](docs/testing.md)。Windows CI 执行 `quality` 静态检查，release workflow 另跑完整单元测试。打 tag 的 release workflow 已支持构建并发布产物；代码签名尚未纳入。构建工具链如在自定义位置，设置对应 `RUSTUP_HOME` / `CARGO_HOME` 并把 Cargo bin 加入 PATH。
 
-0.1.8 发布验收见 [完整发布记录](docs/acceptance_release_0_1_8.json)；0.1.6 的历史自动化与桌面证据见 [版本计划](docs/plan_0_1_6.md) 和 [验收数据](docs/acceptance_0_1_6.json)。物理混合 DPI、多屏热插拔、屏幕阅读器语音、高对比度和小时级长跑未覆盖。
+0.1.9 发布验收见 [完整发布记录](docs/acceptance_release_0_1_9.json)；0.1.6 的历史自动化与桌面证据见 [版本计划](docs/plan_0_1_6.md) 和 [验收数据](docs/acceptance_0_1_6.json)。物理混合 DPI、多屏热插拔、屏幕阅读器语音、高对比度和小时级长跑未覆盖。

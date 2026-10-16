@@ -245,9 +245,9 @@ def main(*, include_run_regression=True, build=True):
         check('settings_cli_reuses_same_instance', result.returncode == 0 and pid(message()) == first_pid)
         activate(); focus_id(6101)
         sequence = []
-        for _ in range(9):
+        for _ in range(10):
             key('TAB'); time.sleep(.035); sequence.append(u.GetDlgCtrlID(focus()))
-        check('native_tab_sequence_skips_disabled_radio_basis', sequence == [6102, 6103, 6108, 6120, 6205, 6114, 6132, 6141, 6101], sequence)
+        check('native_tab_sequence_skips_disabled_radio_basis', sequence == [6102, 6103, 6108, 6401, 6120, 6205, 6114, 6132, 6141, 6101], sequence)
         key('SHIFT+TAB'); time.sleep(.05)
         check('reverse_tab', u.GetDlgCtrlID(focus()) == 6141)
         focus_id(6120); key('ENTER')

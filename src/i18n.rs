@@ -69,6 +69,30 @@ macro_rules! ui_format {
     ($zh:literal,$en:literal $(,$($args:tt)*)?)=>{if $crate::i18n::language()==$crate::i18n::Language::En {format!($en $(,$($args)*)?)}else{format!($zh $(,$($args)*)?)}};
 }
 const CATALOG: &[(&str, &str)] = &[
+    (
+        "此处无法更新，请下载发布文件后手动替换。",
+        "Cannot update here. Download the release and replace manually.",
+    ),
+    (
+        "已恢复旧版本，可重新检查更新。",
+        "Previous version restored. Check to retry.",
+    ),
+    ("检查更新", "Check"),
+    ("更新", "Update"),
+    ("版本 {}", "Version {}"),
+    ("正在检查更新…", "Checking for updates…"),
+    ("{} · 已是最新版本", "{} · Up to date"),
+    ("正在下载… {:.1} MiB", "Downloading… {:.1} MiB"),
+    ("{} 已就绪，重启后更新", "{} ready to restart"),
+    ("正在重启…", "Restarting…"),
+    (
+        "重启未完成，请重试。",
+        "Restart did not complete. Please retry.",
+    ),
+    (
+        "更新未完成，请重试。",
+        "Update did not complete. Please retry.",
+    ),
     ("应用", "App"),
     ("采用", "Use"),
     (

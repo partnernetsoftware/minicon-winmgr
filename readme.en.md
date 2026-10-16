@@ -15,13 +15,13 @@ A lightweight Windows desktop shell built with Rust and Win32, designed as a rep
 Product principle: **Optional features you do not need should not load by default.** In 0.1.8, the legacy menu is not initialized by default, previews do not create a window until enabled, and Run creates its window and workers on first use. The notification host initializes according to shell identity and explicit configuration. See the [0.1.8 design and acceptance](docs/plan_0_1_8.md).
 
 
-Current release: **[0.1.8](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.8)**. See the [changelog](CHANGELOG.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_8.md). Linked design and specification documents are currently primarily in Chinese.
+Current release: **[0.1.9](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.9)**. See the [changelog](CHANGELOG.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_9.md). Linked design and specification documents are currently primarily in Chinese.
 
-Version 0.1.8 adds on-demand initialization, taskbar Home/End and Space navigation, Esc to return to the previous window, and explicit Use/Run feedback for candidates. It retains compact settings, English/Chinese UI with English as the default, Light/Dark/Auto themes, and taskbar docking on all four edges. Desktop management stays collapsed, and configuration details can be selected and copied. If the process is already elevated, it restarts as the same user in the same session with standard privileges. Ordinary launches continue directly; the application does not request UAC elevation. See the [release acceptance record](docs/acceptance_release_0_1_8.json) for validation and coverage limits.
+Version 0.1.9 adds manual Check / Update / Restart controls in settings, with verified downloads and recovery on failed handoff. It retains on-demand initialization, taskbar Home/End and Space navigation, Esc to return to the previous window, and explicit Use/Run feedback for candidates. It retains compact settings, English/Chinese UI with English as the default, Light/Dark/Auto themes, and taskbar docking on all four edges. Desktop management stays collapsed, and configuration details can be selected and copied. If the process is already elevated, it restarts as the same user in the same session with standard privileges. Ordinary launches continue directly; the application does not request UAC elevation. See the [release acceptance record](docs/acceptance_release_0_1_9.json) for validation and coverage limits.
 
 ## Settings preview
 
-Actual native Win32 windows, captured from 0.1.8. Language changes apply immediately and are saved. Auto theme follows the Windows application theme.
+Actual native Win32 windows, captured from 0.1.9. Language changes apply immediately and are saved. Auto theme follows the Windows application theme.
 
 | English · Light | English · Dark |
 |---|---|
@@ -52,6 +52,14 @@ Settings is the remaining entry on the leading side of the taskbar. The start-me
 ## Download
 
 Download the Windows x64 executable and `SHA256SUMS.txt` from [GitHub Releases](https://github.com/partnernetsoftware/minicon-winmgr/releases/latest). Normal use does not require administrator privileges. Exit the old instance normally before upgrading, and retain your personal configuration. Binaries are not yet code-signed.
+
+## Update from settings
+
+Use **Check → Update → Restart**. Checking is manual; startup and opening settings do not contact an update service. Update downloads and verifies the stable Windows x64 release while your current version keeps running. Restart becomes available after verification and after settings are saved. It restarts winmgr only; your applications remain open.
+
+Keep winmgr in a folder your normal account can write. If that folder is read-only, download a release and replace the executable manually. Updates do not request UAC. A temporary helper keeps the previous executable as a backup, waits for the old instance to exit, then checks the new instance's startup receipt. Failed replacement/startup attempts restore the old executable when the filesystem permits it.
+
+Staging and backups are kept in `.winmgr-update-*` folders beside the executable. After confirming the new version works, older completed backup folders can be removed manually. Normal launches do not scan these folders or resume a pending update. Technical failure details are available in Configuration & about and logs.
 
 ## Build, use, and configure
 
@@ -85,4 +93,4 @@ Shell takeover immediately closes the current session's desktop shell and change
 
 Use `python scripts/test.py` for quick development checks. `--layer unit --filter config::tests` runs one test module; `--layer appearance` or `--layer settings` runs the corresponding desktop checks. Before a release, `--layer release` runs the full automated suite against an optimized build. See [test layers](docs/testing.md) for scope and environment requirements. Release validation builds in `target/release-validation` to avoid locks from older instances. Windows CI runs static `quality` checks; the release workflow additionally runs all unit tests and builds tagged releases. Code signing is not included. For custom toolchain locations, set `RUSTUP_HOME`/`CARGO_HOME` and add Cargo's bin directory to PATH.
 
-See the [0.1.8 release acceptance record](docs/acceptance_release_0_1_8.json). Historical 0.1.6 evidence remains in its [plan](docs/plan_0_1_6.md) and [acceptance data](docs/acceptance_0_1_6.json). Physical mixed-DPI monitors, monitor hot-plugging, screen-reader speech, high-contrast display, and hour-long stability remain outside the current coverage.
+See the [0.1.9 release acceptance record](docs/acceptance_release_0_1_9.json). Historical 0.1.6 evidence remains in its [plan](docs/plan_0_1_6.md) and [acceptance data](docs/acceptance_0_1_6.json). Physical mixed-DPI monitors, monitor hot-plugging, screen-reader speech, high-contrast display, and hour-long stability remain outside the current coverage.

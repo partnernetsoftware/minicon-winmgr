@@ -65,6 +65,16 @@ def main():
         assert condition,name
     def resource():return dict(**p.metrics(),threads=threads())
     def run_control(ident):return p.u.GetDlgItem(p.window('minicon_winmgr_run_dialog'),ident)
+    # Deliver native edit keyboard messages to our window, never global keys to
+    # an application that happened to become foreground during automation.
+    report['run_input_method']='native edit WM_KEYDOWN/WM_CHAR; global hotkey coverage remains in full Run regression'
+    def run_key(code):
+        p.u.SendMessageW(run_control(2001),0x100,code,0)
+        p.u.SendMessageW(run_control(2001),0x101,code,0)
+    def run_text(value):
+        buffer=c.create_unicode_buffer(value)
+        p.u.SendMessageW(run_control(2001),0xC,0,c.addressof(buffer))
+
     try:
         p.stop();shutil.copy2(p.SOURCE,p.LIVE);p.start(env)
         check('cold_start_defers_optional_and_run_windows',not p.window('minicon_winmgr_start_menu') and not p.window('minicon_winmgr_run_dialog') and not p.window('minicon_winmgr_hover_preview'))
@@ -82,17 +92,18 @@ def main():
             p.u.SendMessageW(run,16,0,0);p.show();p.click(language_id);p.saved()
             p.u.SendMessageW(p.message(),0x312,3,0);p.wait(lambda:p.u.IsWindowVisible(run))
             check(language+'_same_window_reused',p.window('minicon_winmgr_run_dialog')==run)
-            p.key('CTRL+A');p.key('BACK');time.sleep(.25)
-            p.wait(lambda:p.u.IsWindowVisible(run_control(2006)));p.key('DOWN')
+            run_text('');time.sleep(.25)
+            p.wait(lambda:p.u.IsWindowVisible(run_control(2006)));run_key(40)
             p.wait(lambda:p.text(run_control(2002))==use)
             check(language+'_empty_input_can_adopt',p.u.IsWindowEnabled(run_control(2002)) and not p.text(run_control(2001)))
             check(language+'_candidate_hint_visible','Enter' in p.text(run_control(2007)))
             p.capture_settings(OUT/('run_'+language+'_use.png'),run)
-            p.key('ENTER');p.wait(lambda:p.text(run_control(2001))==candidate and p.text(run_control(2002))==run_label and not p.text(run_control(2008)))
+            run_key(13);p.wait(lambda:p.text(run_control(2001))==candidate and p.text(run_control(2002))==run_label and not p.text(run_control(2008)))
             check(language+'_empty_status_area_hidden',not p.u.IsWindowVisible(run_control(2008)))
             check(language+'_adoption_keeps_dialog_and_command',p.u.IsWindowVisible(run) and p.text(run_control(2001))==candidate and p.text(run_control(2002))==run_label,dict(visible=bool(p.u.IsWindowVisible(run)),input=p.text(run_control(2001)),button=p.text(run_control(2002)),status=p.text(run_control(2008)),foreground=p.u.GetForegroundWindow()))
             p.capture_settings(OUT/('run_'+language+'_ready.png'),run)
-            p.key('CTRL+A');p.key('BACK');p.typing('mini')
+            run_text('')
+            for char in 'mini':p.u.SendMessageW(run_control(2001),0x102,ord(char),0)
             p.wait(lambda:p.u.IsWindowVisible(run_control(2006)) and p.u.SendMessageW(run_control(2006),0x18B,0,0)>=2)
             def suggestions():
                 result=[]
@@ -102,9 +113,9 @@ def main():
             items=suggestions()
             check(language+'_typing_shows_history_and_apps',any('Minicon Test Editor' in item for item in items) and any(candidate in item for item in items))
             check(language+'_suggestions_do_not_change_typed_input',p.text(run_control(2001))=='mini')
-            p.key('DOWN');p.key('DOWN');p.wait(lambda:p.text(run_control(2002))==use)
+            run_key(40);run_key(40);p.wait(lambda:p.text(run_control(2002))==use)
             p.capture_settings(OUT/('run_'+language+'_apps.png'),run)
-            p.key('ENTER');p.wait(lambda:'Minicon Test Editor.lnk' in p.text(run_control(2001)))
+            run_key(13);p.wait(lambda:'Minicon Test Editor.lnk' in p.text(run_control(2001)))
             check(language+'_app_adoption_preserves_quoted_full_path',p.text(run_control(2001)).startswith('"') and p.text(run_control(2001)).endswith('"') and p.u.IsWindowVisible(run))
             p.capture_settings(OUT/('run_'+language+'_app_ready.png'),run)
             p.u.SendMessageW(run,0x312,3,0)

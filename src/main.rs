@@ -41,6 +41,9 @@ mod tray;
 mod tray_bar;
 mod tray_host;
 mod tray_popup;
+mod update;
+mod update_http;
+mod update_install;
 mod win_util;
 mod window;
 mod window_events;
@@ -126,6 +129,28 @@ fn main() {
         "minicon-winmgr starting (companion mode)"
     );
 
+    let mut update_args = std::env::args_os().skip(1);
+    match update_args.next().as_deref().and_then(|v| v.to_str()) {
+        Some("--apply-update") => {
+            let result = update_args
+                .next()
+                .ok_or_else(|| "missing update manifest".to_string())
+                .and_then(|path| update_install::helper(std::path::Path::new(&path)));
+            if let Err(error) = result {
+                tracing::error!(%error,"update handoff failed");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--after-update") => {
+            if let Some(path) = update_args.next() {
+                update_install::set_receipt(path.into());
+                run_companion(true);
+            }
+            return;
+        }
+        _ => {}
+    }
     match Cli::parse(std::env::args().skip(1)) {
         Cli::RunShell => run_companion(false),
         Cli::Settings => run_companion(true),

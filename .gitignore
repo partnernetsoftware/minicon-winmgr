@@ -10,3 +10,4 @@ scripts/*.py
 !scripts/taskmgr_probe.py
 !scripts/test.py
 scripts/__pycache__/
+!scripts/update_probe.py

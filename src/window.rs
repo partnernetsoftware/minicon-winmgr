@@ -228,6 +228,9 @@ pub fn run(show_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         window_snapshot::log_snapshot();
+        if crate::settings_panel::owner().is_some() {
+            crate::update_install::confirm_startup();
+        }
         if show_settings {
             crate::settings_ui::show();
         }

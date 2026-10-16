@@ -21,6 +21,10 @@ use windows::{
 
 const CLASS: &str = "minicon_winmgr_settings";
 const VIEW: &str = "minicon_winmgr_settings_view";
+const UPDATE_STATUS: u16 = 6400;
+const CHECK_UPDATE: u16 = 6401;
+const DOWNLOAD_UPDATE: u16 = 6402;
+const RESTART_UPDATE: u16 = 6403;
 const SHOW: u16 = 6101;
 const TRAY: u16 = 6102;
 const NEVER: u16 = 6103;
@@ -133,7 +137,7 @@ fn high_contrast() -> bool {
 fn in_card(id: u16) -> bool {
     matches!(
         id,
-        SHOW | TRAY
+        UPDATE_STATUS..=RESTART_UPDATE | SHOW | TRAY
             | NEVER
             | FULL
             | ALWAYS
@@ -603,6 +607,15 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
             check | WS_GROUP,
         ),
         (6305, "", 22, note),
+        (UPDATE_STATUS, "", 26, note),
+        (
+            CHECK_UPDATE,
+            crate::i18n::text("检查更新"),
+            30,
+            push | WS_GROUP,
+        ),
+        (DOWNLOAD_UPDATE, crate::i18n::text("更新"), 30, push),
+        (RESTART_UPDATE, crate::i18n::text("重启"), 30, push),
         (
             CONFIG_INFO,
             crate::i18n::text("配置与关于…"),
@@ -714,6 +727,7 @@ fn source_note(key: &'static str, reason: Option<&str>) -> String {
     }
 }
 fn refresh() {
+    crate::update::poll();
     label(
         handle(),
         &crate::ui_format!(
@@ -856,6 +870,53 @@ fn refresh() {
             (!actual).then_some(crate::i18n::text("本次无任务栏")),
         ),
     );
+    let update = crate::update::view();
+    use crate::update::Phase;
+    let version = update
+        .version
+        .as_deref()
+        .unwrap_or(env!("CARGO_PKG_VERSION"));
+    let update_text = match update.phase {
+        Phase::Recovered => crate::i18n::text("已恢复旧版本，可重新检查更新。").into(),
+        Phase::Idle => crate::ui_format!("版本 {}", "Version {}", env!("CARGO_PKG_VERSION")),
+        Phase::Checking => crate::i18n::text("正在检查更新…").into(),
+        Phase::Current => crate::ui_format!(
+            "{} · 已是最新版本",
+            "{} · Up to date",
+            env!("CARGO_PKG_VERSION")
+        ),
+        Phase::Available => format!("{} → {version}", env!("CARGO_PKG_VERSION")),
+        Phase::Downloading => crate::ui_format!(
+            "正在下载… {:.1} MiB",
+            "Downloading… {:.1} MiB",
+            update.bytes as f64 / 1048576.0
+        ),
+        Phase::Ready if update.error.is_some() => crate::i18n::text("重启未完成，请重试。").into(),
+        Phase::Ready => crate::ui_format!("{} 已就绪，重启后更新", "{} ready to restart", version),
+        Phase::Restarting => crate::i18n::text("正在重启…").into(),
+        Phase::Failed
+            if update
+                .error
+                .as_deref()
+                .is_some_and(|v| v.starts_with("installation directory is not writable")) =>
+        {
+            crate::i18n::text("此处无法更新，请下载发布文件后手动替换。").into()
+        }
+        Phase::Failed => crate::i18n::text("更新未完成，请重试。").into(),
+    };
+    label(control(UPDATE_STATUS), &update_text);
+    enabled(
+        CHECK_UPDATE,
+        !matches!(
+            update.phase,
+            Phase::Checking | Phase::Downloading | Phase::Ready | Phase::Restarting
+        ),
+    );
+    enabled(DOWNLOAD_UPDATE, crate::update::can_download());
+    enabled(
+        RESTART_UPDATE,
+        update.phase == Phase::Ready && !crate::settings_store::status().dirty(),
+    );
     let status = crate::settings_store::status();
     let message = if let Some(error) = with(|p| p.error.clone()).flatten() {
         error
@@ -910,6 +971,9 @@ fn apply(id: u16) {
     with(|p| p.error = None);
     let cfg = config::current();
     match id {
+        CHECK_UPDATE => crate::update::check(),
+        DOWNLOAD_UPDATE => crate::update::download(),
+        RESTART_UPDATE => crate::update::restart(),
         ENGLISH | CHINESE => {
             config::set_language(if id == ENGLISH {
                 crate::i18n::Language::En
@@ -1078,6 +1142,13 @@ fn apply(id: u16) {
                     config::source(key)
                 ));
             }
+            if let Some(error) = crate::update::view().error {
+                message.push_str(&crate::ui_format!(
+                    "更新详情：{}\n\n",
+                    "Update details: {}\n\n",
+                    error
+                ));
+            }
             if let Some(path) = config::settings_path() {
                 message.push_str(&crate::ui_format!(
                     "设置保存位置：{}",
@@ -1154,7 +1225,7 @@ fn fit(center: bool) {
     }
     .max(96);
     let width = (640 * dpi as i32 / 96).min(work.right - work.left).max(1);
-    let height = (570 * dpi as i32 / 96).min(work.bottom - work.top).max(1);
+    let height = (634 * dpi as i32 / 96).min(work.bottom - work.top).max(1);
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -1332,6 +1403,14 @@ fn layout() {
                 )),
                 EXE | PID if horizontal => Some((EXE, usize::from(c.id == PID), 2)),
                 SHOW | TRAY if compact => Some((SHOW, usize::from(c.id == TRAY), 2)),
+                CHECK_UPDATE | DOWNLOAD_UPDATE | RESTART_UPDATE if horizontal => Some((
+                    CHECK_UPDATE,
+                    [CHECK_UPDATE, DOWNLOAD_UPDATE, RESTART_UPDATE]
+                        .iter()
+                        .position(|id| *id == c.id)
+                        .unwrap(),
+                    3,
+                )),
                 CONFIG_INFO | ADVANCED if horizontal => {
                     Some((CONFIG_INFO, usize::from(c.id == ADVANCED), 2))
                 }
@@ -1342,6 +1421,9 @@ fn layout() {
             };
             if c.id == CONFIG_INFO {
                 top += scale(12);
+            }
+            if c.id == UPDATE_STATUS {
+                top += scale(24);
             }
             if matches!(c.id, SHOW | 6213) {
                 top += scale(10);
@@ -1444,21 +1526,25 @@ fn layout() {
             p.scroll
         })
         .unwrap();
-        let cards = [(6213, RIGHT), (SHOW, PREVIEW)]
-            .into_iter()
-            .filter_map(|(start, end)| {
-                let a = positions.iter().find(|c| c.0 == start)?;
-                let b = positions.iter().rev().find(|c| {
-                    c.0 == end || (end == PREVIEW && c.0 == 6305) || (end == RIGHT && c.0 == 6311)
-                })?;
-                Some(RECT {
-                    left: 0,
-                    top: a.2 - scale(10) - scroll,
-                    right: g.width,
-                    bottom: b.2 + b.4 + scale(10) - scroll,
-                })
+        let cards = [
+            (6213, RIGHT),
+            (SHOW, PREVIEW),
+            (UPDATE_STATUS, RESTART_UPDATE),
+        ]
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let a = positions.iter().find(|c| c.0 == start)?;
+            let b = positions.iter().rev().find(|c| {
+                c.0 == end || (end == PREVIEW && c.0 == 6305) || (end == RIGHT && c.0 == 6311)
+            })?;
+            Some(RECT {
+                left: 0,
+                top: a.2 - scale(10) - scroll,
+                right: g.width,
+                bottom: b.2 + b.4 + scale(10) - scroll,
             })
-            .collect();
+        })
+        .collect();
         with(|p| p.cards = cards);
         let _ = MoveWindow(view, g.margin, 0, g.width, g.viewport, true);
         for (id, x, top, width, height) in positions {
@@ -1583,6 +1669,9 @@ pub(crate) fn filter(msg: &MSG) -> bool {
         if msg.wParam.0 == VK_RETURN.0 as usize {
             let id = unsafe { GetDlgCtrlID(msg.hwnd) } as u16;
             if [
+                CHECK_UPDATE,
+                DOWNLOAD_UPDATE,
+                RESTART_UPDATE,
                 REPLACE,
                 ROLLBACK,
                 RETRY,
@@ -1651,7 +1740,16 @@ unsafe extern "system" fn childproc(
             let id = unsafe { GetDlgCtrlID(hwnd) } as u16;
             if matches!(
                 id,
-                CONFIG_INFO | ADVANCED | CLOSE | RETRY | DETAIL | REPLACE | ROLLBACK
+                CHECK_UPDATE
+                    | DOWNLOAD_UPDATE
+                    | RESTART_UPDATE
+                    | CONFIG_INFO
+                    | ADVANCED
+                    | CLOSE
+                    | RETRY
+                    | DETAIL
+                    | REPLACE
+                    | ROLLBACK
             ) || choice(id)
             {
                 if msg == WM_PAINT {
