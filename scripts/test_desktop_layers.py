@@ -23,11 +23,11 @@ class DesktopLayers(unittest.TestCase):
         self.candidate=self.root/'candidate.exe';self.candidate.write_bytes(b'MZ'+b'c'*510)
         spec=importlib.util.spec_from_file_location('layer_dispatch_fixture',ROOT/'scripts/test.py')
         self.module=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.module)
-        self.module.ROOT=self.root;self.events=[];self.commands=[];self.fail=False
+        self.module.ROOT=self.root;self.events=[];self.commands=[];self.fail_probe=False
         settings=types.ModuleType('settings_probe')
         def desktop_checks(**options):
             self.events.append(('checks',options))
-            if self.fail:raise RuntimeError('Injected probe failure')
+            if self.fail_probe:raise RuntimeError('Injected probe failure')
         settings.main=desktop_checks
         isolation=types.ModuleType('desktop_session')
         @contextmanager
@@ -86,16 +86,37 @@ class DesktopLayers(unittest.TestCase):
         self.assertEqual(report['tested_binary_sha256'],hashlib.sha256(self.candidate.read_bytes()).hexdigest())
 
     def test_probe_failure_records_failure_after_context_restores_original(self):
-        self.fail=True
+        self.fail_probe=True
         with self.assertRaisesRegex(RuntimeError,'Injected'):
             self.invoke('--layer','settings','--restore-exe',self.restore,'--candidate-exe',self.candidate)
         report=json.loads((self.root/'target/test-reports/settings/summary.json').read_text())
         self.assertFalse(report['passed']);self.assertTrue(report['original_shell_restored'])
         self.assertEqual(self.events[-1],('restored',))
 
-    def test_prebuilt_candidate_is_not_allowed_to_bypass_release_resource_gate(self):
+    def test_development_candidate_option_is_rejected_for_release(self):
         with self.assertRaises(SystemExit) as error:
             self.invoke('--layer','release','--restore-exe',self.restore,'--candidate-exe',self.candidate)
+        self.assertEqual(error.exception.code,2)
+        self.assertEqual(self.commands,[]);self.assertEqual(self.events,[])
+
+
+    def test_release_without_long_campaigns_binds_artifact_before_checks(self):
+        with self.assertRaises(AssertionError):
+            # The fake build refuses fmt: reaching it proves CLI validation succeeded,
+            # without invoking any native UI or accepting a release.
+            self.invoke('--layer','release','--restore-exe',self.restore,
+                        '--legacy-exe',self.restore,'--baseline',self.restore,
+                        '--release-binary',self.candidate)
+        report=json.loads((self.root/'target/test-reports/release/summary.json').read_text())
+        self.assertFalse(report['passed'])
+        self.assertFalse(report['long_observation_completed'])
+        self.assertNotIn('resource_prerequisites',report)
+        self.assertEqual(report['tested_binary_sha256'],hashlib.sha256(self.candidate.read_bytes()).hexdigest())
+        self.assertEqual(self.events,[])
+
+    def test_resource_certification_still_requires_campaign_evidence(self):
+        with self.assertRaises(SystemExit) as error:
+            self.invoke('--layer','resource-gate','--release-binary',self.candidate,'--baseline',self.restore)
         self.assertEqual(error.exception.code,2)
         self.assertEqual(self.commands,[]);self.assertEqual(self.events,[])
 

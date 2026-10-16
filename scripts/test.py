@@ -37,9 +37,12 @@ def main():
         if args.layer!='release':parser.error('--legacy-exe only applies to release')
         args.legacy_exe=args.legacy_exe.resolve(strict=True)
     if args.layer in ['resource-gate','release']:
-        if not args.release_binary or not args.baseline or not args.campaign:
-            parser.error('resource-gate/release requires --release-binary, --baseline and repeated --campaign')
+        if not args.release_binary or not args.baseline:
+            parser.error('resource-gate/release requires --release-binary and --baseline')
+        if args.layer=='resource-gate' and not args.campaign:
+            parser.error('resource-gate requires repeated --campaign evidence')
         args.release_binary=args.release_binary.resolve(strict=True)
+        args.baseline=args.baseline.resolve(strict=True)
     elif args.release_binary or args.baseline or args.campaign:
         parser.error('--release-binary/--baseline/--campaign only apply to resource-gate/release')
     if args.layer in ['memory','soak']:
@@ -64,11 +67,17 @@ def main():
             cmd=(*cmd[:2],'--target-dir',str(ROOT/'target/release-validation'),*cmd[2:])
         step(' '.join(cmd),lambda:subprocess.run(cmd,cwd=ROOT,check=True))
     try:
-        if args.layer in ['resource-gate','release']:
+        if args.layer=='release':
+            import release_artifact
+            report['tested_binary_sha256']=release_artifact.digest(args.release_binary)
+            report['long_observation_completed']=False
+            report['resource_scope']='Extended resource certification is separate; no whole-application memory or long-run stability claim.'
+        if args.layer=='resource-gate' or (args.layer=='release' and args.campaign):
             import resource_gate
             def resources():
                 result=resource_gate.evaluate(args.release_binary,args.baseline,args.campaign)
                 report['resource_prerequisites']=result
+                report['long_observation_completed']=True
                 report['tested_binary_sha256']=result['candidate_sha256']
             step('controlled resource prerequisites (not complete release acceptance)',resources)
         if args.layer in ['memory','soak']:

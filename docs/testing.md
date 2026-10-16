@@ -15,7 +15,7 @@
 | `python scripts/test.py --layer update --restore-exe <normal-running-exe>` | 本地 HTTP 故障、双语按钮、禁止启动联网、校验失败、暂存篡改、保存阻止重启、两版本真实交接、文件占用和启动失败回滚；独立目录，不替换用户安装 |
 | `python scripts/test.py --layer settings --restore-exe <normal-running-exe>` | 构建 debug；设置原生交互、来源、保存故障、UIA 与窗口复用；省略完整 Run 历史/IME 回归 |
 | `python scripts/test.py --layer resource-gate --release-binary <candidate> --baseline <baseline> --campaign <local-summary> ...` | 只读核对三轮对照和先 2h 后 8h 原始证据；不等于完整验收 |
-| `python scripts/test.py --layer release --release-binary <candidate> --restore-exe <normal-running-exe> --legacy-exe <official-v0.1.4-exe> --baseline <baseline> --campaign <local-summary> ...` | 资源证据门槛、格式、严格 Clippy、release 全部单元、组件资源/更新内存、诊断 fixture 及实际候选的侧栏/更新/交互/设置/Run/布局/主题/换边/回收站回归 |
+| `python scripts/test.py --layer release --release-binary <candidate> --restore-exe <normal-running-exe> --legacy-exe <official-v0.1.4-exe> --baseline <baseline>` | 格式、严格 Clippy、release 全部单元、组件资源/更新内存、诊断 fixture 及实际候选的侧栏/更新/交互/设置/Run/布局/主题/换边/回收站回归 |
 
 会替换实例的桌面层均要求显式 `--restore-exe`，指向当前实际运行文件，并由隔离上下文先核对同用户/会话、文件路径和摘要；依赖当前可用的 Windows 输入桌面、Python Pillow（截图）和 PowerShell 7（UIA）。开发层默认构建到 `target/desktop-validation`，只在忽略目录内的副本上运行，正常退出后从原路径恢复并核对工作区及 Shell。不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
 
@@ -39,7 +39,7 @@
 
 原始数据写入每次唯一的 observation 目录，不覆盖上次实验。曲线依赖 matplotlib；采样本身只使用 Python 标准库。独立工具 `scripts/memory_probe.py` 也要求显式 PID 与时长。Private Working Set 只在确认支持的系统尝试，缺失值保持为空。当前层通过只代表工具和执行完整，不等于 0.1.10 的长期门槛已通过。
 
-`python scripts/test.py --layer fault` 当前覆盖 pin 文件超长/损坏/替换失败/外部修改/占用、交接清单读取边界、流式暂存故障保护，以及 loopback HTTP 大小/截断/状态码/预算与增量哈希验证。它不代表完整网络超时、跨进程交接或长跑矩阵；跨进程交接继续使用 update 层。发布另要求 resource-gate 的真实证据；校验器自身使用合成数据测试，不能代替长跑。
+`python scripts/test.py --layer fault` 当前覆盖 pin 文件超长/损坏/替换失败/外部修改/占用、交接清单读取边界、流式暂存故障保护，以及 loopback HTTP 大小/截断/状态码/预算与增量哈希验证。它不代表完整网络超时、跨进程交接或长跑矩阵；跨进程交接继续使用 update 层。扩展资源认证另用 resource-gate 的真实证据；校验器自身使用合成数据测试，不能代替长跑。
 
 `python scripts/test.py --layer side-resize` 构建 debug，使用隔离偏好操作本会话任务栏内边缘，检查左右拖宽、取消、提交与重启持久化；finally 恢复原 live 二进制与环境。该层使用真实鼠标输入，不能与其他桌面层或长跑同时执行。
 
@@ -51,7 +51,7 @@
 
 0.1.10 的 update 层会根据 Cargo 当前版本构造上一补丁的回移 fixture，替换/回滚仍在自建 case 目录；finally 恢复测试开始时备份的原 live 二进制，并检查其摘要，避免把开发候选误留为正常运行版本。错误报告显式按 UTF-8 读取。
 
-`python scripts/test.py --layer diagnostics` 运行有界数据/导出测试，再从真实“关于”入口打开独立原生诊断窗口，覆盖中英 × 明暗主题、默认不采样、停止/关闭/重开、新记录确认、原生保存取消和实际导出，以及窄宽布局。不替换 live、不使用全局输入，也不修改 Shell；依赖当前可用桌面和 Pillow。`python scripts/diagnostics_probe.py --case zh-dark` 可仅复查一个组合。该专项也纳入 release 入口；原生 fixture 当前使用 debug 测试构建，不能冒充优化版全应用内存验收。真实长跑和整应用资源对照仍是另外的发布要求。
+`python scripts/test.py --layer diagnostics` 运行有界数据/导出测试，再从真实“关于”入口打开独立原生诊断窗口，覆盖中英 × 明暗主题、默认不采样、停止/关闭/重开、新记录确认、原生保存取消和实际导出，以及窄宽布局。不替换 live、不使用全局输入，也不修改 Shell；依赖当前可用桌面和 Pillow。`python scripts/diagnostics_probe.py --case zh-dark` 可仅复查一个组合。该专项也纳入 release 入口；原生 fixture 当前使用 debug 测试构建，不能冒充优化版全应用内存验收。真实长跑和整应用资源对照独立跟踪，不阻塞普通修复发布。
 
 `quality` 层另跑 `logging::tests`，用 AST 约束无插值的静态日志文案，并在独立子进程验证文件、stderr、span 及 panic 的文本保护；不需要桌面输入，不跑完整桌面套件。`unit --filter logging::tests` 可单独运行。原生数值与布尔值保留，文本、Debug/Display 和错误链在格式化前屏蔽，即使设置 trace 也不输出；显式 CLI 查询结果和用户错误对话框不属于后台日志。该组测试使用系统临时目录，不修改正常会话日志。
 
@@ -104,3 +104,6 @@ python scripts/test.py --layer settings --restore-exe <normal-running-exe> --can
 ```
 
 各旧桌面探针脚本的直接 CLI 已改为指向此受保护入口；模块函数仍供隔离上下文调用，interaction 的独立测试窗口子进程入口保留。缺少恢复路径或非法参数时，在构建和窗口操作前退出。6 项无桌面模拟检查验证缺少/无效恢复参数、独立构建目录、预构建跳过编译、测试异常后的恢复与报告，以及禁止预构建参数绕过发布资源门槛；它们不是实际桌面验收。
+
+
+发布功能层与扩展资源认证分离：`release` 不要求等待小时级 campaign，但仍要求准确候选、公开基线（用于真实历史更新）、官方 0.1.4 及原实例恢复路径，并跑全部自动化功能项。不传 `--campaign` 时报告明确记录 `long_observation_completed=false`；不等于长期资源认证。若提供 campaign 则仍调用原严格资源门槛，缺失/不完整证据照常拒绝。`resource-gate` 的三轮、2h/8h、原始 CSV 核对标准未降低。公开内存结论只引用实际完成的场景与时长。
