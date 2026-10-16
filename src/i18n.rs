@@ -280,6 +280,12 @@ const CATALOG: &[(&str, &str)] = &[
         "Unable to open system settings. Please try again.",
     ),
     ("时间设置", "Date & time"),
+    ("回收站", "Recycle Bin"),
+    ("无法打开此入口", "Unable to open shortcut"),
+    (
+        "无法打开此入口，请重试。",
+        "Unable to open this shortcut. Please try again.",
+    ),
     ("暂无应用通知图标", "No application notification icons"),
     ("网络设置", "Network settings"),
     ("音量设置", "Sound settings"),

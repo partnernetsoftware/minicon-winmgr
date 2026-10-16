@@ -241,7 +241,10 @@ impl Geometry {
         let scale = |n: i32| n * dpi.max(96) as i32 / 96;
         let width = scale(216).min((work.right - work.left).max(1));
         let columns = ((width - scale(16) - 2 + scale(4)) / scale(36)).clamp(1, 4) as usize;
-        let rows = ((work.bottom - work.top - scale(102)) / scale(36)).clamp(1, 8) as usize;
+        let mut rows = ((work.bottom - work.top - scale(102)) / scale(36)).clamp(1, 8) as usize;
+        if count > rows * columns {
+            rows = ((work.bottom - work.top - scale(132)) / scale(36)).clamp(1, 8) as usize;
+        }
         let capacity = rows * columns;
         let page = page.min(count.saturating_sub(1) / capacity);
         let visible_rows = count
@@ -249,7 +252,7 @@ impl Geometry {
             .min(capacity)
             .div_ceil(columns)
             .max(1);
-        let footer = 78; // Settings include a second row for date/time, even without paging.
+        let footer = if count > capacity { 108 } else { 78 };
         let height = scale(visible_rows as i32 * 36 + footer).min((work.bottom - work.top).max(1));
         Self {
             width,
@@ -259,6 +262,15 @@ impl Geometry {
             page,
             visible_rows,
         }
+    }
+
+    fn footer_step(&self, dpi: u32, paging: bool) -> i32 {
+        let scale = |n: i32| n * dpi.max(96) as i32 / 96;
+        let base = scale(12 + self.visible_rows as i32 * 36);
+        // Preserve all actions on short, high-DPI work areas as well.
+        scale(30)
+            .min((self.height - base - scale(6) - 2) / if paging { 3 } else { 2 })
+            .max(1)
     }
 }
 
@@ -289,6 +301,8 @@ fn rebuild() {
         };
         let _ = GetMonitorInfoW(MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST), &mut mi);
         let work = mi.rcWork;
+        let geometry = Geometry::new(work, dpi, items.len(), page);
+        let step = geometry.footer_step(dpi, items.len() > geometry.capacity);
         let Geometry {
             width,
             height,
@@ -296,7 +310,7 @@ fn rebuild() {
             capacity,
             page,
             visible_rows,
-        } = Geometry::new(work, dpi, items.len(), page);
+        } = geometry;
         let (old_font, font_dpi) = with(|s| (s.font, s.font_dpi)).unwrap_or_default();
         let font = if font_dpi == dpi && !old_font.is_invalid() {
             old_font
@@ -407,30 +421,25 @@ fn rebuild() {
         let base = scale(12 + visible_rows as i32 * 36);
         let bw = ((width - scale(24) - 2) / 2).max(1);
         let paging = items.len() > capacity;
-        let half = ((bw - scale(4)) / 2).max(1);
+        let button_height = (step - scale(4)).max(1);
         for (id, title, bx, by, button_width) in [
             (1, crate::i18n::text("音量设置"), scale(8), base, bw),
             (2, crate::i18n::text("网络设置"), scale(16) + bw, base, bw),
+            (6, crate::i18n::text("时间设置"), scale(8), base + step, bw),
             (
-                6,
-                crate::i18n::text("时间设置"),
-                scale(8),
-                base + scale(30),
-                if paging { bw } else { width - scale(16) - 2 },
-            ),
-            (
-                3,
-                crate::i18n::text("上页"),
+                7,
+                crate::i18n::text("回收站"),
                 scale(16) + bw,
-                base + scale(30),
-                half,
+                base + step,
+                bw,
             ),
+            (3, crate::i18n::text("上页"), scale(8), base + step * 2, bw),
             (
                 4,
                 crate::i18n::text("下页"),
-                scale(20) + bw + half,
-                base + scale(30),
-                half,
+                scale(16) + bw,
+                base + step * 2,
+                bw,
             ),
         ] {
             if matches!(id, 3 | 4) && !paging {
@@ -444,7 +453,7 @@ fn rebuild() {
                 bx,
                 by,
                 button_width,
-                scale(26),
+                button_height,
                 Some(hwnd),
                 Some(HMENU(id as *mut _)),
                 Some(instance),
@@ -470,7 +479,7 @@ fn rebuild() {
         }
         with(|s| s.buttons = buttons);
         if IsWindowVisible(hwnd).as_bool() {
-            if (1..=4).contains(&focused_id) {
+            if matches!(focused_id, 1..=4 | 6 | 7) {
                 let target = GetDlgItem(Some(hwnd), focused_id).unwrap_or_default();
                 if IsWindowEnabled(target).as_bool() {
                     let _ = SetFocus(Some(target));
@@ -551,6 +560,9 @@ pub(crate) fn open_date_time_settings() {
 }
 
 fn open_system(id: usize) {
+    let Some((request, fallback)) = system_requests(id) else {
+        return;
+    };
     if with(|s| s.launch.is_some()).unwrap_or(true) {
         return;
     }
@@ -560,26 +572,10 @@ fn open_system(id: usize) {
         .spawn(move || {
             let com =
                 unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
-            let request = crate::shell_launch::LaunchRequest {
-                file: match id {
-                    1 => "ms-settings:sound",
-                    2 => "ms-settings:network",
-                    _ => "control.exe",
-                }
-                .into(),
-                params: if id == 6 { "timedate.cpl" } else { "" }.into(),
-                directory: None,
-            };
             let result = crate::shell_launch::execute(&request)
-                .or_else(|error| {
-                    if id == 6 {
-                        return Err(error);
-                    }
-                    crate::shell_launch::execute(&crate::shell_launch::LaunchRequest {
-                        file: "control.exe".into(),
-                        params: if id == 1 { "mmsys.cpl" } else { "ncpa.cpl" }.into(),
-                        directory: None,
-                    })
+                .or_else(|error| match fallback {
+                    Some(request) => crate::shell_launch::execute(&request),
+                    None => Err(error),
                 })
                 .map_err(|error| error.message);
             if com.is_ok() {
@@ -600,6 +596,36 @@ fn open_system(id: usize) {
             tracing::error!(%error, "notification settings worker failed");
         }
     }
+}
+
+fn system_requests(
+    id: usize,
+) -> Option<(
+    crate::shell_launch::LaunchRequest,
+    Option<crate::shell_launch::LaunchRequest>,
+)> {
+    let request = |file: &str, params: &str| crate::shell_launch::LaunchRequest {
+        file: file.into(),
+        params: params.into(),
+        directory: None,
+    };
+    Some(match id {
+        1 => (
+            request("ms-settings:sound", ""),
+            Some(request("control.exe", "mmsys.cpl")),
+        ),
+        2 => (
+            request("ms-settings:network", ""),
+            Some(request("control.exe", "ncpa.cpl")),
+        ),
+        6 => (request("control.exe", "timedate.cpl"), None),
+        // An explicit folder argument keeps Explorer in browser mode when we own the shell.
+        7 => (
+            request("explorer.exe", "::{645FF040-5081-101B-9F08-00AA002F954E}"),
+            None,
+        ),
+        _ => return None,
+    })
 }
 unsafe extern "system" fn child_proc(
     hwnd: HWND,
@@ -791,7 +817,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                     let id = wp.0 & 0xffff;
                     match id {
-                        1 | 2 | 6 => {
+                        1 | 2 | 6 | 7 => {
                             open_system(id);
                         }
                         3 | 4 => {
@@ -838,7 +864,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         s.launch.as_ref().and_then(|rx| match rx.try_recv() {
                             Ok(result) => Some(result),
                             Err(mpsc::TryRecvError::Disconnected) => {
-                                Some(Err(crate::i18n::text("无法打开系统设置，请重试。").into()))
+                                Some(Err(crate::i18n::text("无法打开此入口，请重试。").into()))
                             }
                             Err(mpsc::TryRecvError::Empty) => None,
                         })
@@ -853,7 +879,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                                 let _ = MessageBoxW(
                                     Some(hwnd),
                                     PCWSTR(wide(&error).as_ptr()),
-                                    PCWSTR(wide(crate::i18n::text("无法打开系统设置")).as_ptr()),
+                                    PCWSTR(wide(crate::i18n::text("无法打开此入口")).as_ptr()),
                                     MB_OK | MB_ICONERROR,
                                 );
                             }
@@ -915,7 +941,11 @@ mod tests {
                         }
                         let bw = (g.width - scale(24) - 2) / 2;
                         assert!(scale(16) + 2 * bw < g.width);
-                        let footer_bottom = scale(12 + g.visible_rows as i32 * 36 + 26 + 30);
+                        let paging = count > g.capacity;
+                        let step = g.footer_step(dpi, paging);
+                        let footer_bottom = scale(12 + g.visible_rows as i32 * 36)
+                            + step * if paging { 2 } else { 1 }
+                            + (step - scale(4)).max(1);
                         assert!(footer_bottom < g.height, "{g:?}, dpi={dpi}");
                     }
                 }
