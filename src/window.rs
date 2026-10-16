@@ -84,7 +84,10 @@ pub(crate) fn request_settings() -> Result<(), String> {
 }
 
 /// Runs the shell message loop until a quit message is received.
-pub fn run(show_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    show_settings: bool,
+    on_ready: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: standard Win32 window setup; all buffers outlive their calls and
     // the wndproc is a valid `extern "system"` function.
     unsafe {
@@ -140,8 +143,10 @@ pub fn run(show_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!(interval_ms = heartbeat_ms, "heartbeat timer armed");
         }
 
+        let mut taskbar_ready = true;
         if crate::taskbar::enabled() {
             if let Err(err) = crate::taskbar::create(hinstance) {
+                taskbar_ready = false;
                 tracing::error!(%err, "taskbar creation failed; continuing without it");
             }
         } else {
@@ -235,6 +240,7 @@ pub fn run(show_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
             crate::settings_ui::show();
         }
         crate::appearance::refresh();
+        on_ready(taskbar_ready && crate::settings_panel::owner().is_some())?;
         STARTUP_READY.set(true);
         loop {
             let ret = GetMessageW(&mut msg, None, 0, 0);

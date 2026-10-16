@@ -20,9 +20,13 @@ def main():
     parser.add_argument('--baseline', type=Path, help='Comparison baseline artifact; resource-gate/release only')
     parser.add_argument('--campaign', type=Path, action='append', help='Local resource campaign summary; repeat for each campaign')
     parser.add_argument('--restore-exe', type=Path, help='Explicit original shell executable to restore after release desktop checks')
+    parser.add_argument('--legacy-exe', type=Path, help='Official historical 0.1.4 executable; required for release compatibility checks')
     args = parser.parse_args()
     if args.filter and args.layer != 'unit': parser.error('--filter requires --layer unit')
-    if args.layer=='release' and not args.restore_exe:parser.error('release requires --restore-exe')
+    if args.layer=='release' and (not args.restore_exe or not args.legacy_exe):parser.error('release requires --restore-exe and --legacy-exe')
+    if args.legacy_exe:
+        if args.layer!='release':parser.error('--legacy-exe only applies to release')
+        args.legacy_exe=args.legacy_exe.resolve(strict=True)
     if args.layer!='release' and args.restore_exe:parser.error('--restore-exe only applies to release')
     if args.layer in ['resource-gate','release']:
         if not args.release_binary or not args.baseline or not args.campaign:
@@ -156,6 +160,9 @@ def main():
             if args.layer=='release':
                 import desktop_session
                 with desktop_session.isolated(args.release_binary,args.restore_exe):desktop_checks()
+                import instance_switch_probe
+                for language in ['en','zh']:
+                    step('historical instance switch '+language,lambda language=language:instance_switch_probe.main(args.release_binary,args.legacy_exe,args.restore_exe,language))
                 import resource_gate
                 if resource_gate.digest(args.release_binary)!=report['tested_binary_sha256']:
                     raise RuntimeError('Candidate changed during acceptance')

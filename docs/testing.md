@@ -15,7 +15,7 @@
 | `python scripts/test.py --layer update` | 本地 HTTP 故障、双语按钮、禁止启动联网、校验失败、暂存篡改、保存阻止重启、两版本真实交接、文件占用和启动失败回滚；独立目录，不替换用户安装 |
 | `python scripts/test.py --layer settings` | 构建 debug；设置原生交互、来源、保存故障、UIA 与窗口复用；省略完整 Run 历史/IME 回归 |
 | `python scripts/test.py --layer resource-gate --release-binary <candidate> --baseline <baseline> --campaign <local-summary> ...` | 只读核对三轮对照和先 2h 后 8h 原始证据；不等于完整验收 |
-| `python scripts/test.py --layer release --release-binary <candidate> --restore-exe <normal-running-exe> --baseline <baseline> --campaign <local-summary> ...` | 资源证据门槛、格式、严格 Clippy、release 全部单元、组件资源/更新内存、诊断 fixture 及实际候选的侧栏/更新/交互/设置/Run/布局/主题/换边/回收站回归 |
+| `python scripts/test.py --layer release --release-binary <candidate> --restore-exe <normal-running-exe> --legacy-exe <official-v0.1.4-exe> --baseline <baseline> --campaign <local-summary> ...` | 资源证据门槛、格式、严格 Clippy、release 全部单元、组件资源/更新内存、诊断 fixture 及实际候选的侧栏/更新/交互/设置/Run/布局/主题/换边/回收站回归 |
 
 桌面层需要当前 Windows 输入桌面可用，依赖 Python Pillow（截图）、PowerShell 7（UIA）。测试先构建，再正常关闭当前会话实例，复制至 live 路径；使用独立配置，结束后恢复正常会话。不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
 
@@ -74,3 +74,13 @@ python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <norm
 `python scripts/test_scenario_probe.py` 的 10 项模拟生命周期检查不需要桌面，也纳入 quality 和 release。模拟通过只证明驱动控制流，不能证明 native 恢复成功或应用资源稳定。曲线可用现有 memory_probe 的 `--plot-only` 从每个 run 目录生成；缺少 matplotlib 时保留数据后再生成。
 
 fault 层现运行整个 update 状态机模块，覆盖进度合并后隐藏 UI 的终态交付、退出取消、幂等 shutdown 与拒绝新 worker；HTTP 覆盖取消中的原生回调寿命，安装模块逐个检查 7 个取消边界。它们不依赖输入桌面，不关闭正常会话。每次操作的取消由应用退出触发；隐藏设置继续既有下载。完整交接、桌面和长跑仍需各自的验收。
+
+
+跨版本手动启动交接另有显式桌面探针（不得与其他桌面探针并行）：
+
+```powershell
+python scripts/instance_switch_probe.py --candidate <candidate-exe> --legacy <official-v0.1.4-exe> --restore <normal-running-exe> --language en
+python scripts/instance_switch_probe.py --candidate <candidate-exe> --legacy <official-v0.1.9-exe> --restore <normal-running-exe> --language zh
+```
+
+只使用忽略目录内的副本，测试默认取消、Esc、明确确认、原进程正常退出、新进程就绪、相同构建重复启动。外层恢复原程序并核对工作区与 Shell。历史版本无需支持新就绪消息；只在候选上检查该消息。它不覆盖进程异常终止时的恢复或拒绝退出故障注入。

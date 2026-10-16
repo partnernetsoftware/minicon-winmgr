@@ -27,3 +27,4 @@ scripts/__pycache__/
 !scripts/resource_gate.py
 !scripts/test_resource_gate.py
 !scripts/desktop_session.py
+!scripts/instance_switch_probe.py

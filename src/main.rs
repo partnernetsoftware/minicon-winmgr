@@ -17,6 +17,7 @@ mod hotkeys;
 mod hover_preview;
 mod hub;
 mod i18n;
+mod instance_switch;
 mod launcher;
 mod launcher_ui;
 mod log_store;
@@ -258,26 +259,21 @@ fn run_companion(show_settings: bool) {
         tracing::info!("running as the shell; console detached");
     }
 
-    let _instance = match single_instance::InstanceGuard::acquire("minicon-winmgr.singleton") {
-        Ok(guard) => guard,
-        Err(single_instance::AcquireError::AlreadyRunning) if show_settings => {
-            if let Err(err) = window::request_settings() {
-                eprintln!("minicon-winmgr: {err}");
-                unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
-                        None,
-                        windows::core::PCWSTR(crate::win_util::wide(&err).as_ptr()),
-                        windows::core::PCWSTR(crate::win_util::wide("无法打开设置").as_ptr()),
-                        windows::Win32::UI::WindowsAndMessaging::MB_OK,
-                    );
-                }
-                std::process::exit(1);
-            }
-            return;
-        }
+    let mut instance = match instance_switch::acquire(show_settings) {
+        Ok(Some(guard)) => guard,
+        Ok(None) => return,
         Err(err) => {
             tracing::warn!(%err, "refusing to start a second instance");
             eprintln!("minicon-winmgr: {err}");
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                    None,
+                    windows::core::PCWSTR(crate::win_util::wide(&err).as_ptr()),
+                    windows::core::PCWSTR(crate::win_util::wide("minicon-winmgr").as_ptr()),
+                    windows::Win32::UI::WindowsAndMessaging::MB_OK
+                        | windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+                );
+            }
             std::process::exit(1);
         }
     };
@@ -287,7 +283,7 @@ fn run_companion(show_settings: bool) {
     // could restore it (task manager / `shellctl stop`).
     crate::taskbar::recover_workarea();
 
-    let result = window::run(show_settings);
+    let result = window::run(show_settings, |usable| instance.ready(usable));
     crate::update::shutdown();
     crate::settings_ui::shutdown();
     crate::diagnostic_export::shutdown();
@@ -297,6 +293,7 @@ fn run_companion(show_settings: bool) {
     // windows never see WM_DESTROY and would not restore the reserved work
     // area. Tear them down explicitly.
     crate::taskbar::shutdown();
+    drop(instance);
     if let Err(err) = result {
         tracing::error!(%err, "message loop terminated with error");
         std::process::exit(1);
