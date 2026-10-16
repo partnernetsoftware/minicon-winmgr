@@ -324,6 +324,13 @@ $ids=@($shell.Windows() | ForEach-Object {
             p.wait(lambda:p.u.IsWindowVisible(notification))
             button=p.u.GetDlgItem(notification,7)
             if not button or p.text(button)!=caption or not p.u.IsWindowVisible(button):
+                context=dict(language=language,theme=theme,key=key,expected=caption,
+                    actual=p.text(button) if button else None,button_exists=bool(button),
+                    button_visible=bool(button and p.u.IsWindowVisible(button)),
+                    popup_visible=bool(p.u.IsWindowVisible(notification)),
+                    foreground_pid=p.pid(p.u.GetForegroundWindow()),popup_pid=p.pid(notification))
+                (observation.folder/'shortcut-failure.json').write_text(json.dumps(context,indent=2),encoding='utf-8')
+                if p.u.IsWindowVisible(notification):p.capture_settings(observation.folder/'shortcut-failure.png',notification)
                 raise RuntimeError('Localized recycle-bin shortcut is missing')
             p.capture_settings(observation.folder/(language+'-'+theme+'-shortcuts.png'),notification)
             # Native Tab handlers set focus on the owner thread. Exercise the

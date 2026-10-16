@@ -83,7 +83,9 @@ def main(cases=None, *, release=False):
                 check(f'{language}-{theme}: localized controls',p.text(ctrl(2))==expected)
                 if language=='en' and theme=='light':
                     time.sleep(5.2)
-                    check('default opens without a diagnostic timer',state()==0)
+                    idle_state=state();report['idle_after_5s_state']=idle_state
+                    if idle_state:p.capture_settings(case/'unexpected-idle-state.png',hwnd)
+                    check('default opens without a diagnostic timer',idle_state==0)
                 p.capture_settings(case/'idle.png',hwnd)
                 click(2);p.wait(active)
                 check(f'{language}-{theme}: explicit start arms recording',count()==1 and not p.u.IsWindowEnabled(ctrl(2)))

@@ -54,8 +54,18 @@ def main():
         bar=p.window('minicon_winmgr_taskbar');rect=p.rect(bar)
         # No pins or menu. The topmost fixture was present before enumeration,
         # so the first stable task button is the owned STATIC fixture.
-        p.u.SetCursorPos(rect[0]+70,rect[1]+18)
-        return until(lambda:(h:=p.window('minicon_winmgr_hover_preview')) and p.u.IsWindowVisible(h) and h)
+        moved=bool(p.u.SetCursorPos(rect[0]+70,rect[1]+18))
+        try:
+            if not moved:raise RuntimeError("Input desktop refused SetCursorPos; physical hover cannot be exercised")
+            return until(lambda:(h:=p.window('minicon_winmgr_hover_preview')) and p.u.IsWindowVisible(h) and h)
+        except BaseException:
+            position=w.POINT();p.u.GetCursorPos(c.byref(position))
+            context=dict(cursor_move_succeeded=moved,initial_cursor=[cursor.x,cursor.y],cursor=[position.x,position.y],bar_rect=list(rect),
+                         fixture_visible=bool(p.u.IsWindowVisible(fixture)),fixture_rect=list(p.rect(fixture)),
+                         preview_exists=bool(p.window('minicon_winmgr_hover_preview')),metrics=p.metrics())
+            (folder/'hover-context.json').write_text(json.dumps(context,indent=2),encoding='utf-8')
+            capture(folder/'hover-bar.png',bar)
+            raise
     try:
         p.stop()
         fixture=desktop.u.CreateWindowExW(0,'STATIC','WINMGR PREVIEW FIXTURE',
@@ -105,6 +115,9 @@ def main():
         desktop.u.DestroyWindow(fixture);fixture=None
         until(lambda:not p.u.IsWindowVisible(preview))
         check('destroyed_source_clears_preview',True)
+    except BaseException as error:
+        if failure is None:failure=dict(error=repr(error))
+        raise
     finally:
         p.u.SetCursorPos(cursor.x,cursor.y)
         if fixture:desktop.u.DestroyWindow(fixture)
