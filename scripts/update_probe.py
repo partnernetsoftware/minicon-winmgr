@@ -32,15 +32,19 @@ def build_fixture(release=False):
     subprocess.run(['cargo','build','--manifest-path',str(fixture/'Cargo.toml'),'--target-dir',str(target),*(['--release'] if release else [])],cwd=p.ROOT,check=True)
     return target/('release' if release else 'debug')/'winmgr-update-fixture.exe'
 
-def main(*,release=False):
-    OUT.mkdir(parents=True,exist_ok=True)
-    fixture=build_fixture(release)
+def main(*,release=False,previous_artifact=None):
+    output=OUT/('historical-public' if previous_artifact is not None else 'current-backport')
+    output.mkdir(parents=True,exist_ok=True)
+    fixture=Path(previous_artifact).resolve(strict=True) if previous_artifact is not None else build_fixture(release)
     candidate=p.SOURCE.read_bytes();old_bytes=fixture.read_bytes()
     original=os.environ.copy();original_live=p.LIVE
-    original_backup=OUT/f'original-live-{time.time_ns()}.exe'
+    original_backup=output/f'original-live-{time.time_ns()}.exe'
     shutil.copy2(original_live,original_backup)
     original_hash=hashlib.sha256(original_backup.read_bytes()).hexdigest()
     report={'binary_sha256':hashlib.sha256(candidate).hexdigest(),'fixture_sha256':hashlib.sha256(old_bytes).hexdigest(),'fixture_note':f'{PREVIOUS} test-only backport of current updater, not a historical public binary. Successful target is the actual {CURRENT} build.','checks':[]}
+    if previous_artifact is not None:
+        report['fixture_note']=f'Explicit historical baseline executable, expected {PREVIOUS}; not a synthesized backport. Verify the recorded SHA against its published release.'
+    report['fixture_kind']='historical-public' if previous_artifact is not None else 'current-backport'
     shell=p.shell_settings()
     mode={'value':'good','payload':candidate};requests=[];created=[]
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -68,7 +72,7 @@ def main(*,release=False):
     def wait_idle():p.wait(lambda:enabled(CHECK) or enabled(RESTART),timeout=15)
     def start_case(binary):
         p.stop()
-        folder=Path(tempfile.mkdtemp(prefix='case-',dir=OUT));created.append(folder);exe=folder/'winmgr.exe';exe.write_bytes(binary)
+        folder=Path(tempfile.mkdtemp(prefix='case-',dir=output));created.append(folder);exe=folder/'winmgr.exe';exe.write_bytes(binary)
         cfg=folder/'settings.txt';cfg.write_text('ui.language=en\nappearance.mode=light\ntaskbar.position=bottom\ntaskbar.menu=false\n',encoding='utf-8')
         env=original.copy()
         for key in ['MINICON_LANGUAGE','MINICON_TASKBAR','MINICON_NO_TASKBAR','MINICON_START_MENU','MINICON_THEME_MODE','MINICON_TASKBAR_POSITION','MINICON_WINMGR_UPDATE_RECOVERED']:
@@ -87,12 +91,12 @@ def main(*,release=False):
         check('startup_and_open_settings_do_not_connect',not requests and enabled(CHECK) and not enabled(UPDATE) and not enabled(RESTART))
         p.click(CHECK);wait_idle()
         check('same_version_is_current_without_downgrade','Up to date' in status() and not enabled(UPDATE))
-        p.capture_settings(OUT/'settings_en_light.png')
+        p.capture_settings(output/'settings_en_light.png')
         p.click(6151);p.saved()
         check('update_controls_switch_to_chinese',p.text(p.ctrl(CHECK))=='检查更新' and '最新版本' in status())
-        p.capture_settings(OUT/'settings_zh_light.png')
-        p.click(6131);p.saved();p.capture_settings(OUT/'settings_zh_dark.png')
-        p.click(6150);p.saved();p.capture_settings(OUT/'settings_en_dark.png')
+        p.capture_settings(output/'settings_zh_light.png')
+        p.click(6131);p.saved();p.capture_settings(output/'settings_zh_dark.png')
+        p.click(6150);p.saved();p.capture_settings(output/'settings_en_dark.png')
         mode['value']='rate';p.click(CHECK);wait_idle()
         check('rate_limit_is_retryable_and_current_file_unchanged',not enabled(UPDATE) and enabled(CHECK) and exe.read_bytes()==candidate)
         mode['value']='good';p.click(CHECK);wait_idle()
@@ -135,7 +139,7 @@ def main(*,release=False):
         report['passed']=True
     except Exception as error:
         report['passed']=False;report['error']=repr(error)
-        if p.panel():report['status']=status();p.capture_settings(OUT/'failure.png')
+        if p.panel():report['status']=status();p.capture_settings(output/'failure.png')
         raise
     finally:
         if p.LIVE!=original_live:
@@ -167,14 +171,14 @@ def main(*,release=False):
                 report['transaction_evidence'].append({'stage':stage.name,'started':(stage/'started').exists(),'backup':(stage/'previous.exe').exists(),'failed_candidate':(stage/'failed.exe').exists(),'error':(stage/'error.txt').read_text(encoding='utf-8') if (stage/'error.txt').exists() else None})
         if report.get('passed'):
             for folder in created:
-                owned=folder.resolve();assert owned.parent==OUT.resolve() and owned.name.startswith('case-')
+                owned=folder.resolve();assert owned.parent==output.resolve() and owned.name.startswith('case-')
                 shutil.rmtree(owned)
 
         report['normal_session_restored']=bool(p.message())
         report['shell_registration_unchanged']=p.shell_settings()==shell
         report['original_binary_restored']=hashlib.sha256(p.LIVE.read_bytes()).hexdigest()==original_hash
         report['passed']=bool(report.get('passed')) and all(report[key] for key in ['normal_session_restored','shell_registration_unchanged','original_binary_restored'])
-        (OUT/'summary.json').write_bytes((json.dumps(report,ensure_ascii=False,indent=2)+'\n').encode())
+        (output/'summary.json').write_bytes((json.dumps(report,ensure_ascii=False,indent=2)+'\n').encode())
         print(json.dumps({'passed':report['passed'],'checks':len(report['checks']),
                           'normal_session_restored':report['normal_session_restored'],
                           'original_binary_restored':report['original_binary_restored']}),flush=True)

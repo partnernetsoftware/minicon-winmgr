@@ -136,6 +136,8 @@ def main():
                 if args.layer in ['update','release']:
                     import update_probe
                     step('manual update and rollback handoff',lambda:update_probe.main(release=args.layer=='release'))
+                    if args.layer=='release':
+                        step('published baseline updater to exact candidate and rollback',lambda:update_probe.main(release=True,previous_artifact=args.baseline))
                 if args.layer in ['taskmgr','release']:
                     import taskmgr_probe
                     step('existing Task Manager activation',taskmgr_probe.main)
