@@ -45,6 +45,7 @@ mod tray_popup;
 mod update;
 mod update_http;
 mod update_install;
+mod update_stream;
 mod win_util;
 mod window;
 mod window_events;

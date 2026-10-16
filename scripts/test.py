@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'memory', 'soak', 'resources', 'fault', 'side-resize', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
+    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'memory', 'soak', 'resources', 'update-memory', 'fault', 'side-resize', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
     parser.add_argument('--filter', help='Rust test name/module filter; only with --layer unit')
     parser.add_argument('--pid', type=int, help='Existing test process; only memory/soak')
     parser.add_argument('--duration', type=float, help='Observation seconds; required for soak')
@@ -61,15 +61,19 @@ def main():
         if args.layer=='resources':
             import resources_probe
             step('stalled source preview, asynchronous owned icons, and isolated logging queue measurement',resources_probe.main)
+        if args.layer=='update-memory':
+            import update_memory_probe
+            step('bounded update staging memory comparison',update_memory_probe.main)
         if args.layer=='fault':
             report['scope']=['pin-file corruption/size/replace failure/external edit/lock',
-                             'handoff manifest bounds and confinement',
-                             'loopback HTTP size/error responses and URL/hash validation']
+                             'handoff manifest bounds, streamed staging failures and confinement',
+                             'loopback HTTP size/truncation/budget/sink errors and bounded incremental hashing']
             report['not_covered']=['all WinHTTP timeout paths','process handoff and recovery (use update layer)',
                                    'long-run and physical display faults']
             command('cargo','test','quick_launch::tests::pin_mutations')
             command('cargo','test','update_install::tests')
             command('cargo','test','update_http::tests')
+            command('cargo','test','update_stream::tests')
         if args.layer in ['check','quality','release']:
             command('cargo','fmt','--all','--','--check')
         if args.layer=='check': command('cargo','check')

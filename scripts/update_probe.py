@@ -10,16 +10,21 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 import settings_probe as p
 
+CURRENT=tomllib.loads((p.ROOT/'Cargo.toml').read_text(encoding='utf-8'))['package']['version']
+_parts=[int(value) for value in CURRENT.split('.')]
+if len(_parts)!=3 or _parts[2]<1:raise RuntimeError('Update fixture requires a previous patch version')
+PREVIOUS='.'.join(map(str,[*_parts[:2],_parts[2]-1]))
 OUT=p.ROOT/'target/update-acceptance'
 CHECK,UPDATE,RESTART,STATUS=6401,6402,6403,6400
 
 def build_fixture(release=False):
-    """Backport the current updater into a clearly isolated 0.1.8 test build."""
+    """Backport the updater into an isolated previous-patch test build."""
     fixture=p.ROOT/'target/update-fixture-source';fixture.mkdir(parents=True,exist_ok=True)
     shutil.copytree(p.ROOT/'src',fixture/'src',dirs_exist_ok=True)
-    manifest=(p.ROOT/'Cargo.toml').read_text(encoding='utf-8').replace('name = "minicon-winmgr"','name = "minicon-winmgr-update-fixture"',1).replace('version = "0.1.9"','version = "0.1.8"',1)
+    manifest=(p.ROOT/'Cargo.toml').read_text(encoding='utf-8').replace('name = "minicon-winmgr"','name = "minicon-winmgr-update-fixture"',1).replace(f'version = "{CURRENT}"',f'version = "{PREVIOUS}"',1)
     manifest=manifest.replace('edition = "2024"','edition = "2024"\nautobins = false',1)+'\n[[bin]]\nname = "winmgr-update-fixture"\npath = "src/main.rs"\n'
     (fixture/'Cargo.toml').write_bytes(manifest.encode())
     shutil.copy2(p.ROOT/'Cargo.lock',fixture/'Cargo.lock')
@@ -32,7 +37,10 @@ def main(*,release=False):
     fixture=build_fixture(release)
     candidate=p.SOURCE.read_bytes();old_bytes=fixture.read_bytes()
     original=os.environ.copy();original_live=p.LIVE
-    report={'binary_sha256':hashlib.sha256(candidate).hexdigest(),'fixture_sha256':hashlib.sha256(old_bytes).hexdigest(),'fixture_note':'0.1.8 test-only backport of current updater, not a historical public binary. Successful target is the actual 0.1.9 build.','checks':[]}
+    original_backup=OUT/f'original-live-{time.time_ns()}.exe'
+    shutil.copy2(original_live,original_backup)
+    original_hash=hashlib.sha256(original_backup.read_bytes()).hexdigest()
+    report={'binary_sha256':hashlib.sha256(candidate).hexdigest(),'fixture_sha256':hashlib.sha256(old_bytes).hexdigest(),'fixture_note':f'{PREVIOUS} test-only backport of current updater, not a historical public binary. Successful target is the actual {CURRENT} build.','checks':[]}
     shell=p.shell_settings()
     mode={'value':'good','payload':candidate};requests=[];created=[]
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -41,10 +49,10 @@ def main(*,release=False):
             requests.append(self.path)
             if mode['value']=='rate':self.send_error(429);return
             if self.path=='/latest':
-                body=json.dumps({'tag_name':'v0.1.9','draft':False,'prerelease':False,'assets':[{'name':'minicon-winmgr-v0.1.9-x86_64-windows.exe','browser_download_url':base+'/app.exe'},{'name':'SHA256SUMS.txt','browser_download_url':base+'/sums'}]}).encode()
+                body=json.dumps({'tag_name':f'v{CURRENT}','draft':False,'prerelease':False,'assets':[{'name':f'minicon-winmgr-v{CURRENT}-x86_64-windows.exe','browser_download_url':base+'/app.exe'},{'name':'SHA256SUMS.txt','browser_download_url':base+'/sums'}]}).encode()
             elif self.path=='/sums':
                 digest='0'*64 if mode['value']=='bad_hash' else hashlib.sha256(mode['payload']).hexdigest()
-                body=(digest+'  minicon-winmgr-v0.1.9-x86_64-windows.exe\n').encode()
+                body=(digest+f'  minicon-winmgr-v{CURRENT}-x86_64-windows.exe\n').encode()
             elif self.path=='/app.exe':body=mode['payload']
             else:self.send_error(404);return
             self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
@@ -104,8 +112,8 @@ def main(*,release=False):
         p.click(RESTART);p.wait(lambda:'retry' in status().lower() and enabled(RESTART),timeout=10)
         check('restart_rechecks_staged_hash_before_exit',p.pid(p.message())==before and exe.read_bytes()==old_bytes)
         payload.write_bytes(candidate);p.click(RESTART)
-        p.wait(lambda:p.message() and p.pid(p.message())!=before and p.panel() and p.text(p.panel()).endswith('0.1.9') and (stage/'started').exists(),timeout=30)
-        check('real_018_fixture_to_019_handoff',exe.read_bytes()==candidate and (stage/'previous.exe').read_bytes()==old_bytes and p.text(p.panel()).endswith('0.1.9'))
+        p.wait(lambda:p.message() and p.pid(p.message())!=before and p.panel() and p.text(p.panel()).endswith(CURRENT) and (stage/'started').exists(),timeout=30)
+        check('real_previous_fixture_to_current_handoff',exe.read_bytes()==candidate and (stage/'previous.exe').read_bytes()==old_bytes and p.text(p.panel()).endswith(CURRENT))
         check('settings_survive_restart','appearance.mode = dark' in cfg.read_text(encoding='utf-8'))
         # Hold only our installed fixture file without delete sharing.
         folder,exe,cfg=start_case(old_bytes);available();stage=ready();before=p.pid(p.message())
@@ -151,12 +159,12 @@ def main(*,release=False):
                             p.k.WaitForSingleObject(handle,25000)
                     finally:p.k.CloseHandle(handle)
             except (OSError,ValueError):pass
-        p.stop();p.LIVE=original_live;shutil.copy2(p.SOURCE,p.LIVE);p.start(original)
+        p.stop();p.LIVE=original_live;shutil.copy2(original_backup,p.LIVE);p.start(original)
         server.shutdown();server.server_close();thread.join(timeout=2)
         report['transaction_evidence']=[]
         for folder in created:
             for stage in folder.glob('.winmgr-update-*'):
-                report['transaction_evidence'].append({'stage':stage.name,'started':(stage/'started').exists(),'backup':(stage/'previous.exe').exists(),'failed_candidate':(stage/'failed.exe').exists(),'error':(stage/'error.txt').read_text() if (stage/'error.txt').exists() else None})
+                report['transaction_evidence'].append({'stage':stage.name,'started':(stage/'started').exists(),'backup':(stage/'previous.exe').exists(),'failed_candidate':(stage/'failed.exe').exists(),'error':(stage/'error.txt').read_text(encoding='utf-8') if (stage/'error.txt').exists() else None})
         if report.get('passed'):
             for folder in created:
                 owned=folder.resolve();assert owned.parent==OUT.resolve() and owned.name.startswith('case-')
@@ -164,7 +172,12 @@ def main(*,release=False):
 
         report['normal_session_restored']=bool(p.message())
         report['shell_registration_unchanged']=p.shell_settings()==shell
+        report['original_binary_restored']=hashlib.sha256(p.LIVE.read_bytes()).hexdigest()==original_hash
+        report['passed']=bool(report.get('passed')) and all(report[key] for key in ['normal_session_restored','shell_registration_unchanged','original_binary_restored'])
         (OUT/'summary.json').write_bytes((json.dumps(report,ensure_ascii=False,indent=2)+'\n').encode())
-        print(json.dumps(report,ensure_ascii=True,indent=2))
+        print(json.dumps({'passed':report['passed'],'checks':len(report['checks']),
+                          'normal_session_restored':report['normal_session_restored'],
+                          'original_binary_restored':report['original_binary_restored']}),flush=True)
+        if not report['passed']:raise RuntimeError('Update acceptance or restoration failed; inspect the local report')
 
 if __name__=='__main__':main()

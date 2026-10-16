@@ -38,10 +38,14 @@
 
 原始数据写入每次唯一的 observation 目录，不覆盖上次实验。曲线依赖 matplotlib；采样本身只使用 Python 标准库。独立工具 `scripts/memory_probe.py` 也要求显式 PID 与时长。Private Working Set 只在确认支持的系统尝试，缺失值保持为空。当前层通过只代表工具和执行完整，不等于 0.1.10 的长期门槛已通过。
 
-`python scripts/test.py --layer fault` 当前覆盖 pin 文件超长/损坏/替换失败/外部修改/占用、交接清单读取边界，以及 loopback HTTP 大小/状态码与 URL/哈希验证。它不代表完整网络超时、跨进程交接或长跑矩阵；跨进程交接继续使用 update 层。发布长跑门禁尚待实现，现有 release 入口尚未声称覆盖新的 0.1.10 长跑要求。
+`python scripts/test.py --layer fault` 当前覆盖 pin 文件超长/损坏/替换失败/外部修改/占用、交接清单读取边界、流式暂存故障保护，以及 loopback HTTP 大小/截断/状态码/预算与增量哈希验证。它不代表完整网络超时、跨进程交接或长跑矩阵；跨进程交接继续使用 update 层。发布长跑门禁尚待实现，现有 release 入口尚未声称覆盖新的 0.1.10 长跑要求。
 
 `python scripts/test.py --layer side-resize` 构建 debug，使用隔离偏好操作本会话任务栏内边缘，检查左右拖宽、取消、提交与重启持久化；finally 恢复原 live 二进制与环境。该层使用真实鼠标输入，不能与其他桌面层或长跑同时执行。
 
 `python scripts/memory_probe.py --export-summary --output <local-observation-directory>` 只把白名单数值、场景代号和二进制摘要写成本地 Markdown 草稿，未知字段不导出，字段中出现路径字符串会拒绝；经人工检查后才提交公开摘要。
 
 无 matplotlib 的环境可先完成采样，再用带该模块的 Python 执行 `--plot-only`。采样报告明确记录是否已生成曲线，不把缺失曲线隐藏为已生成。
+
+`python scripts/test.py --layer update-memory` 独立比较 32 MiB 文件的旧双缓冲模式与实际流式暂存；每种模式各三个全新进程，不操作正常外壳，不联网。`python scripts/update_memory_probe.py --release` 在隔离优化构建目录重复同一实验。局部私有提交差值不当作整个应用峰值，采样未观察到增量也不代表零分配。原始日志和数值报告只留在 target。
+
+0.1.10 的 update 层会根据 Cargo 当前版本构造上一补丁的回移 fixture，替换/回滚仍在自建 case 目录；finally 恢复测试开始时备份的原 live 二进制，并检查其摘要，避免把开发候选误留为正常运行版本。错误报告显式按 UTF-8 读取。

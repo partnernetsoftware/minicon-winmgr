@@ -1,5 +1,5 @@
 //! An ordinary-privilege, short-lived copy of this executable owns the handoff.
-use crate::update_http::sha256;
+use crate::update_stream::{copy_hashed, hash_file, verify_file};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -52,10 +52,22 @@ fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     read_limited(file, limit)
 }
 
-pub(crate) fn prepare(bytes: &[u8], hash: &str, version: &str) -> Result<PathBuf, String> {
+pub(crate) fn prepare(
+    hash: &str,
+    version: &str,
+    download: impl FnOnce(&mut fs::File) -> Result<(), String>,
+) -> Result<PathBuf, String> {
     let target = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(|e| e.to_string())?;
+    prepare_at(target, hash, version, download)
+}
+fn prepare_at(
+    target: PathBuf,
+    hash: &str,
+    version: &str,
+    download: impl FnOnce(&mut fs::File) -> Result<(), String>,
+) -> Result<PathBuf, String> {
     let parent = target.parent().ok_or("no executable directory")?;
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -64,16 +76,24 @@ pub(crate) fn prepare(bytes: &[u8], hash: &str, version: &str) -> Result<PathBuf
     let folder = parent.join(format!(".winmgr-update-{}-{id}", std::process::id()));
     fs::create_dir(&folder).map_err(|e| format!("installation directory is not writable: {e}"))?;
     let result = (|| {
-        let old = bounded_read(&target, crate::update::MAX_EXE)?;
+        let payload_path = folder.join("payload.exe");
+        let mut payload = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&payload_path)
+            .map_err(|e| e.to_string())?;
+        download(&mut payload)?;
+        payload.sync_all().map_err(|e| e.to_string())?;
+        drop(payload);
+        verify_file(&payload_path, hash)?;
+        let old_hash = copy_hashed(&target, &folder.join("helper.exe"))?;
         let plan = Plan {
             target: target.clone(),
             parent: std::process::id(),
-            old_hash: sha256(&old)?,
+            old_hash,
             new_hash: hash.into(),
             version: version.into(),
         };
-        write_new(&folder.join("payload.exe"), bytes)?;
-        write_new(&folder.join("helper.exe"), &old)?;
         let path = folder.join("plan.json");
         write_new(
             &path,
@@ -140,15 +160,9 @@ pub(crate) fn start_helper(path: &Path) -> Result<(), String> {
     {
         return Err("handoff belongs to another instance".into());
     }
-    crate::update::verify(
-        &bounded_read(&folder.join("payload.exe"), crate::update::MAX_EXE)?,
-        &plan.new_hash,
-    )?;
-    if sha256(&bounded_read(&plan.target, crate::update::MAX_EXE)?)? != plan.old_hash
-        || sha256(&bounded_read(
-            &folder.join("helper.exe"),
-            crate::update::MAX_EXE,
-        )?)? != plan.old_hash
+    verify_file(&folder.join("payload.exe"), &plan.new_hash)?;
+    if hash_file(&plan.target)? != plan.old_hash
+        || hash_file(&folder.join("helper.exe"))? != plan.old_hash
     {
         return Err("installation changed since download".into());
     }
@@ -238,10 +252,7 @@ pub(crate) fn helper(path: &Path) -> Result<(), String> {
     {
         return Err("parent executable does not match handoff".into());
     }
-    crate::update::verify(
-        &bounded_read(&folder.join("payload.exe"), crate::update::MAX_EXE)?,
-        &plan.new_hash,
-    )?;
+    verify_file(&folder.join("payload.exe"), &plan.new_hash)?;
     write_new(
         &folder.join("ready"),
         std::process::id().to_string().as_bytes(),
@@ -263,11 +274,7 @@ pub(crate) fn helper(path: &Path) -> Result<(), String> {
         let _ = fs::write(folder.join("error.txt"), error);
         // Verification or a locked file may fail before any rename. If the old
         // executable is intact and there is no live shell, restore availability.
-        if bounded_read(&plan.target, crate::update::MAX_EXE)
-            .ok()
-            .and_then(|b| sha256(&b).ok())
-            .as_deref()
-            == Some(&plan.old_hash)
+        if hash_file(&plan.target).ok().as_deref() == Some(&plan.old_hash)
             && let Ok(guard) =
                 crate::single_instance::InstanceGuard::acquire("minicon-winmgr.singleton")
         {
@@ -288,11 +295,8 @@ fn install_and_launch(plan: &Plan, folder: &Path) -> Result<(), String> {
     // Recheck after waiting: another instance or installer must not be overwritten.
     let guard = crate::single_instance::InstanceGuard::acquire("minicon-winmgr.singleton")
         .map_err(|e| e.to_string())?;
-    crate::update::verify(
-        &bounded_read(&folder.join("payload.exe"), crate::update::MAX_EXE)?,
-        &plan.new_hash,
-    )?;
-    if sha256(&bounded_read(&plan.target, crate::update::MAX_EXE)?)? != plan.old_hash {
+    verify_file(&folder.join("payload.exe"), &plan.new_hash)?;
+    if hash_file(&plan.target)? != plan.old_hash {
         drop(guard);
         return Err("installation changed during handoff".into());
     }
@@ -364,6 +368,213 @@ pub(crate) fn confirm_startup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct Installation(PathBuf);
+    impl Installation {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "winmgr-stream-install-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path.canonicalize().unwrap())
+        }
+        fn executable(&self) -> PathBuf {
+            self.0.join("winmgr.exe")
+        }
+    }
+    impl Drop for Installation {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn executable_bytes() -> Vec<u8> {
+        let mut bytes = vec![0; 80_000];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[60..64].copy_from_slice(&128u32.to_le_bytes());
+        bytes[128..132].copy_from_slice(b"PE\0\0");
+        bytes[132..134].copy_from_slice(&[0x64, 0x86]);
+        bytes[152..154].copy_from_slice(&[0x0b, 0x02]);
+        bytes
+    }
+    #[test]
+    #[ignore = "isolated update memory experiment; run update-memory layer"]
+    fn streaming_preparation_commit_footprint() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicU64, Ordering},
+        };
+        const LENGTH: usize = 32 * 1024 * 1024;
+        let installation = Installation::new();
+        let mut header = executable_bytes();
+        let target = installation.executable();
+        {
+            let mut file = fs::File::create(&target).unwrap();
+            file.write_all(&header).unwrap();
+            file.set_len(LENGTH as u64).unwrap();
+            file.sync_all().unwrap();
+        }
+        let old_hash = hash_file(&target).unwrap();
+        header[1000] = 7;
+        let body = || {
+            std::io::Cursor::new(&header)
+                .chain(std::io::repeat(0).take((LENGTH - header.len()) as u64))
+        };
+        let expected = crate::update_stream::hash_reader(body(), LENGTH).unwrap();
+        let mode = std::env::var("WINMGR_TEST_UPDATE_BUFFER").unwrap_or_else(|_| "stream".into());
+        assert!(matches!(mode.as_str(), "legacy" | "stream"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let peak = Arc::new(AtomicU64::new(0));
+        let invalid = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let observer = {
+            let stop = stop.clone();
+            let peak = peak.clone();
+            let invalid = invalid.clone();
+            std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                while !stop.load(Ordering::SeqCst) {
+                    let bytes = crate::metrics::sample().private_bytes;
+                    if bytes == 0 {
+                        invalid.store(true, Ordering::SeqCst);
+                    }
+                    peak.fetch_max(bytes, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+        };
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let baseline = crate::metrics::sample().private_bytes;
+        assert!(baseline > 0);
+        peak.store(baseline, Ordering::SeqCst);
+        let result: Result<(), String> = (|| {
+            if mode == "legacy" {
+                // Previous live-buffer pattern, test only: a full new payload
+                // remains allocated while the full old executable is read.
+                let mut new = fs::read(&target).map_err(|e| e.to_string())?;
+                new[1000] = 7;
+                let old = fs::read(&target).map_err(|e| e.to_string())?;
+                peak.fetch_max(crate::metrics::sample().private_bytes, Ordering::SeqCst);
+                assert_eq!(crate::update_http::sha256(&new)?, expected);
+                fs::write(installation.0.join("legacy-payload.bin"), &new)
+                    .map_err(|e| e.to_string())?;
+                fs::write(installation.0.join("legacy-helper.bin"), &old)
+                    .map_err(|e| e.to_string())?;
+                std::hint::black_box((&new, &old));
+            } else {
+                let plan_path = prepare_at(target.clone(), &expected, "0.1.10", |file| {
+                    let mut source = body();
+                    let mut chunk = [0u8; 16 * 1024];
+                    loop {
+                        let count = source.read(&mut chunk).map_err(|e| e.to_string())?;
+                        if count == 0 {
+                            break;
+                        }
+                        file.write_all(&chunk[..count]).map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                })?;
+                let (plan, folder) = read_plan(&plan_path)?;
+                assert_eq!(plan.old_hash, old_hash);
+                verify_file(&folder.join("payload.exe"), &expected)?;
+                assert_eq!(hash_file(&folder.join("helper.exe"))?, old_hash);
+            }
+            assert_eq!(hash_file(&target)?, old_hash);
+            Ok(())
+        })();
+        stop.store(true, Ordering::SeqCst);
+        observer.join().unwrap();
+        result.unwrap();
+        assert!(
+            !invalid.load(Ordering::SeqCst),
+            "private commit sampling failed"
+        );
+        let peak_delta = peak.load(Ordering::SeqCst).saturating_sub(baseline);
+        if mode == "legacy" {
+            assert!(peak_delta >= 60 * 1024 * 1024);
+        } else {
+            assert!(
+                peak_delta < 8 * 1024 * 1024,
+                "streaming staging needs memory investigation"
+            );
+        }
+        println!(
+            "UPDATE_MEMORY_SAMPLE {{\"mode\":\"{mode}\",\"file_bytes\":{LENGTH},\"private_peak_delta_bytes\":{peak_delta}}}"
+        );
+    }
+
+    #[test]
+    fn streamed_staging_verifies_payload_copies_old_helper_and_preserves_installation() {
+        let installation = Installation::new();
+        let old = executable_bytes();
+        fs::write(installation.executable(), &old).unwrap();
+        let mut new = old.clone();
+        new[1000] = 7;
+        let hash = crate::update_http::sha256(&new).unwrap();
+        let path = prepare_at(installation.executable(), &hash, "0.1.10", |file| {
+            for chunk in new.chunks(16 * 1024) {
+                file.write_all(chunk).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let (plan, folder) = read_plan(&path).unwrap();
+        assert_eq!(plan.old_hash, crate::update_http::sha256(&old).unwrap());
+        assert_eq!(plan.new_hash, hash);
+        assert_eq!(
+            hash_file(&folder.join("helper.exe")).unwrap(),
+            plan.old_hash
+        );
+        verify_file(&folder.join("payload.exe"), &hash).unwrap();
+        assert_eq!(fs::read(installation.executable()).unwrap(), old);
+    }
+    #[test]
+    fn failed_or_invalid_streamed_staging_cleans_owned_files_and_keeps_old_executable() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let installation = Installation::new();
+        let old = executable_bytes();
+        let target = installation.executable();
+        fs::write(&target, &old).unwrap();
+        let hash = crate::update_http::sha256(&old).unwrap();
+        let bad_hash = "0".repeat(64);
+        for mode in ["download", "hash", "oversize", "locked-old"] {
+            let lock = (mode == "locked-old").then(|| {
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&target)
+                    .unwrap()
+            });
+            let result = prepare_at(
+                target.clone(),
+                if mode == "hash" { &bad_hash } else { &hash },
+                "0.1.10",
+                |file| {
+                    file.write_all(&old).map_err(|e| e.to_string())?;
+                    if mode == "download" {
+                        return Err("injected download failure".into());
+                    }
+                    if mode == "oversize" {
+                        file.set_len(crate::update::MAX_EXE as u64 + 1)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                },
+            );
+            drop(lock);
+            assert!(result.is_err(), "{mode} unexpectedly staged");
+            assert_eq!(fs::read(&target).unwrap(), old);
+            assert_eq!(
+                fs::read_dir(&installation.0).unwrap().count(),
+                1,
+                "{mode} left a staging folder"
+            );
+        }
+    }
+
     #[test]
     fn manifest_limit_stops_reading_before_executable_sized_allocation() {
         use std::io::Read;

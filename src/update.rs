@@ -93,21 +93,9 @@ pub(crate) fn checksum(table: &[u8], name: &str) -> Result<String, String> {
     }
     result.ok_or_else(|| "asset checksum missing".into())
 }
+#[cfg(test)]
 pub(crate) fn verify(bytes: &[u8], expected: &str) -> Result<(), String> {
-    if bytes.len() > MAX_EXE || bytes.len() < 256 || &bytes[..2] != b"MZ" {
-        return Err("not a Windows executable".into());
-    }
-    let offset = u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
-    let header = bytes
-        .get(offset..offset.saturating_add(26))
-        .ok_or("invalid PE offset")?;
-    if &header[..4] != b"PE\0\0" || header[4..6] != [0x64, 0x86] || header[24..26] != [0x0b, 0x02] {
-        return Err("not an x64 PE executable".into());
-    }
-    if http::sha256(bytes)? != expected {
-        return Err("SHA-256 mismatch".into());
-    }
-    Ok(())
+    crate::update_stream::verify_reader(std::io::Cursor::new(bytes), expected)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,14 +223,22 @@ pub(crate) fn download() {
     begin(Phase::Downloading, move |sender| {
         let sums = http::get(&release.sums, 64 * 1024, Duration::from_secs(25), |_| {})?;
         let hash = checksum(&sums, &release.name)?;
-        let bytes = http::get(&release.url, MAX_EXE, Duration::from_secs(300), |count| {
-            let _ = sender.try_send(Event::Progress(count));
-        })?;
-        verify(&bytes, &hash)?;
         Ok(Event::Staged(install::prepare(
-            &bytes,
             &hash,
             &release.version,
+            |file| {
+                use std::io::Write;
+                http::get_into(
+                    &release.url,
+                    MAX_EXE,
+                    Duration::from_secs(300),
+                    |count| {
+                        let _ = sender.try_send(Event::Progress(count));
+                    },
+                    |chunk| file.write_all(chunk).map_err(|e| e.to_string()),
+                )?;
+                Ok(())
+            },
         )?))
     });
 }

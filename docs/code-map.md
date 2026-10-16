@@ -40,3 +40,5 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 0.1.9：`update` 管理手动状态与一次性 worker；`update_http` 封装有界 WinHTTP/CNG；`update_install` 负责暂存、同版本助手、进程退出等待、备份替换、启动回执与回滚；`settings_panel` 呈现三按钮和双语状态，不在渲染路径联网。`scripts/update_probe.py` 为隔离真实交接层，并纳入 release。
 
 0.1.10：`memory_probe.py` 提供外部有界采样；`window_icon_worker` 合并查询、拒绝过期结果，UI 只绘制 owned 图像；`log_store` 固定日志保留预算；`settings_store` 默认持久化用户目录偏好并兼容迁移。完整范围与待办以[版本计划](plan_0_1_10.md)为准。
+
+0.1.10 更新路径：`update_http::get_into` 有界分块交付；`update_stream` 负责增量 CNG 哈希、PE 文件校验和复制；`update_install` 只持小清单与固定缓冲，不再同时保留新旧 exe 的完整 Vec。`update-memory` 为独立组件对照层，update 层继续验证真实交接与回滚。
