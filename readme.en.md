@@ -2,7 +2,18 @@
 
 [Language index](readme.md) · **English** · [简体中文](readme.zh.md)
 
-A lightweight Windows shell and session manager built with Rust and Win32. It runs alongside Explorer by default. Explicit takeover mode can replace the current user's desktop shell.
+**Stability first. A minimal footprint.**
+
+A lightweight Windows shell and session manager built with Rust and Win32. Stability, memory safety, and low memory use guide the design: everyday actions stay direct, and optional capabilities are enabled when needed. It runs alongside Explorer by default; explicit takeover mode can replace the current user's desktop shell.
+
+## Why minicon-winmgr
+
+- **Stability at the core.** Rust's ownership and type systems reduce memory-error risks, with explicit handle and resource-lifetime management at Win32 boundaries. Failed settings saves preserve the original file and support retries; shutdown restores the work area. Full release regression checks provide reproducible evidence of reliability.
+- **Low resident memory use.** Native Rust and Win32, without an embedded browser engine. A local v0.1.7 release sample across 40 theme/position switches measured approximately **13.5–13.9 MiB of private bytes** and **36 MiB of working set**. See the [measurements and scope](docs/acceptance_release_0_1_7.json). These are short-run, scenario-specific results; a long-term memory study is tentatively planned for 0.1.10.
+- **Minimal by default, optional by choice.** Everyday paths stay focused on the taskbar and settings. Thumbnail previews are off by default and do not create a preview window; companion mode leaves Explorer's notification host in place. Optional capabilities remain a user choice, keeping extra controls and default overhead down.
+
+Product principle: **Optional features you do not need should not load by default.** Preview and conditional notification-host initialization already follow this principle. The legacy menu still initializes hidden UI; the [next design iteration](docs/plan_0_1_8.md) will continue tightening initialization around enabled features.
+
 
 Current release: **[0.1.7](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.7)**. See the [changelog](CHANGELOG.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_6.md). Linked design and specification documents are currently primarily in Chinese.
 
