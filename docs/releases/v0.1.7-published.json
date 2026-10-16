@@ -1,0 +1,13 @@
+{
+  "version": "0.1.7",
+  "url": "https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.7",
+  "workflow_url": "https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/38839538365",
+  "workflow_conclusion": "success",
+  "source_commit": "3746844dbc28819baa1f8fd459e99bc4192480d2",
+  "download_verification": {
+    "tag": "v0.1.7",
+    "name": "minicon-winmgr-v0.1.7-x86_64-windows.exe",
+    "sha256": "0f5fc28ca3806106c0ca5cca8d9042755ed49b973135adf04c1c54bcce482e9b",
+    "verified": true
+  }
+}

@@ -94,7 +94,7 @@
 ---
 
 ## 环境变量 / 开关（唯一真值表）
-> 本节是全仓**环境变量清单的唯一真值源**；[`README.md`](../README.md) 只引用，不另列。
+> 本节是全仓**环境变量清单的唯一真值源**；[README 索引](../readme.md) 只引用，不另列。
 
 `MINICON_NO_TASKBAR=1`、`MINICON_TASKBAR=1|0`、`MINICON_TRAY=1|0`、`MINICON_ACRYLIC=1`、`MINICON_HOVER_PREVIEW=1`、
 `MINICON_GROUP_TASKS=1`（≡ `taskbar.group=always`，优先于设置面板）、`MINICON_GROUP_BY=exe|pid`、

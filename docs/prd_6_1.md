@@ -176,7 +176,7 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 
 ## 6. 配置与持久化（配置键唯一真值表）
 
-> 本节是全仓**配置键的唯一真值表**；[`prd_1_1.md`](prd_1_1.md)、[`README.md`](../README.md) 只引用，不另列。
+> 本节是全仓**配置键的唯一真值表**；[`prd_1_1.md`](prd_1_1.md)、[README 索引](../readme.md) 只引用，不另列。
 
 | 键 | 取值 | 默认 |
 |----|------|------|

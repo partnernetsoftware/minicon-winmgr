@@ -1,5 +1,7 @@
 # minicon-winmgr
 
+[语言索引](readme.md) · [English](readme.en.md) · **简体中文**
+
 轻量 Windows 外壳与会话管理器，Rust + Win32。默认作为 companion 与 Explorer 共存；受控接管模式可替换当前用户的桌面外壳。
 
 当前版本 **[0.1.7](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.7)**。版本事实见 [CHANGELOG](CHANGELOG.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.6 计划](docs/plan_0_1_6.md)。
@@ -29,6 +31,10 @@
 
 任务栏左侧保留设置入口。开始菜单圆点与窗口列表按钮已于 0.1.2 退役；旧菜单仅保留隐藏开关，不列为默认主路径。声音/网络入口是设置快捷方式，电源/输入法状态图标尚未实现。设置面板使用原生控件，支持键盘导航、滚动、来源说明和保存失败重试。
 
+## 下载
+
+从 [GitHub Releases](https://github.com/partnernetsoftware/minicon-winmgr/releases/latest) 下载 Windows x64 可执行文件与 `SHA256SUMS.txt`。普通运行无需管理员权限；升级前正常退出旧实例并保留个人配置。二进制尚未代码签名。
+
 ## 使用与配置
 
 ```powershell
@@ -52,6 +58,7 @@ Alt+反引号聚焦任务栏，方向键选择、Enter 激活；Win+B 打开通�
 
 - [代码与文档地图](docs/code-map.md)：模块边界、已知差距和证据入口。
 - [0.1.6 计划](docs/plan_0_1_6.md)：设置日常可用与反馈闭环。
+- [0.1.8 设计讨论稿](docs/plan_0_1_8.md)：候选方向，尚未承诺实现。
 - [后续能力清单](docs/prd_5_1.md)：未排期需求及实施前提。
 - [历史归档](docs/archive/README.md)：旧版本计划、旧路线图和整理前 README。
 
