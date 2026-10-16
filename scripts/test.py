@@ -120,16 +120,15 @@ def main():
         if args.layer=='release':
             import resources_probe
             import update_memory_probe
-            step('component resource ownership and stalled-source regressions',resources_probe.main)
-            step('bounded update staging memory comparison',update_memory_probe.main)
+            step('optimized component resource ownership and stalled-source regressions',lambda:resources_probe.main(release=True))
+            step('optimized bounded update staging memory comparison',lambda:update_memory_probe.main(release=True))
         if args.layer in ['side-resize','layout','appearance','interaction','taskmgr','update','settings','release']:
             command('cargo','build',*(['--release'] if args.layer=='release' else []))
             import settings_probe as settings
             def desktop_checks():
                 if args.layer=='release':
                     import diagnostics_probe
-                    command('cargo','test','diagnostic')
-                    step('diagnostic fixture language/theme matrix (separate test executable)',diagnostics_probe.main)
+                    step('optimized diagnostic fixture language/theme matrix (separate test executable)',lambda:diagnostics_probe.main(release=True))
                 if args.layer in ['side-resize','release']:
                     import side_resize_probe
                     step('side taskbar drag resize and persistence',side_resize_probe.main)

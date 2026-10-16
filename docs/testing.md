@@ -92,3 +92,6 @@ python scripts/instance_switch_probe.py --candidate <candidate-exe> --legacy <of
 
 
 0.1.10 完整更新验证区分两组：默认 `update_probe.main()` 的当前代码回移 fixture，以及发布层 `previous_artifact=--baseline` 的真正历史公开文件。前者便于验证当前故障处理，后者验证旧更新器与新文件的实际协议兼容。报告分别位于 `target/update-acceptance/current-backport` 和 `historical-public`，摘要记录两份准确文件 SHA；两组都必须成功，不能相互顶替。资源任务执行期间不得并行运行这些桌面动作。
+
+
+发布层显式以 `release=True` 执行资源所有权/停滞源实验、流式更新准备内存对照和诊断 fixture，记录对应 profile；开发层继续默认 debug，可单独选优化构建。诊断 fixture 只说明专项窗口行为，实际候选入口仍由 native_feature_probe 另验。全发布已有优化 Rust 单元，诊断专项不再次重复跑同一组普通单元。

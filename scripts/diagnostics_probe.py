@@ -29,8 +29,9 @@ def find(pid, class_name):
     return found[0] if found else 0
 
 
-def main(cases=None):
-    build = subprocess.run(['cargo','test','--bin','minicon-winmgr','--no-run','--message-format=json'],
+def main(cases=None, *, release=False):
+    build = subprocess.run(['cargo','test','--bin','minicon-winmgr','--no-run','--message-format=json',
+         *(['--release','--target-dir','target/release-validation'] if release else [])],
         cwd=ROOT,text=True,encoding='utf-8',stdout=subprocess.PIPE,check=True)
     executable = [item['executable'] for line in build.stdout.splitlines()
         if (item:=json.loads(line)).get('reason')=='compiler-artifact'
@@ -38,7 +39,7 @@ def main(cases=None):
     assert len(executable)==1
     output = ROOT/'target/test-reports/diagnostics'/str(time.time_ns())
     output.mkdir(parents=True)
-    report = {'passed':False,'checks':[], 'scope':'Owned diagnostic fixture windows; no live shell replacement',
+    report = {'profile':'release' if release else 'debug','passed':False,'checks':[], 'scope':'Owned diagnostic fixture windows; no live shell replacement',
               'test_binary_sha256':hashlib.sha256(Path(executable[0]).read_bytes()).hexdigest()}
     shell = p.shell_settings()
     original = hashlib.sha256(p.LIVE.read_bytes()).hexdigest()
@@ -188,5 +189,6 @@ if __name__=='__main__':
     import argparse
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',choices=['en-light','en-dark','zh-light','zh-dark'])
+    parser.add_argument('--release',action='store_true')
     args=parser.parse_args()
-    main([tuple(args.case.split('-'))] if args.case else None)
+    main([tuple(args.case.split('-'))] if args.case else None,release=args.release)
