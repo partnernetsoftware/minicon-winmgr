@@ -11,7 +11,7 @@
 //! a short timeout and must not run while holding the taskbar locks.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Shell::ExtractIconExW;
@@ -90,48 +90,92 @@ pub fn for_window(hwnd: HWND) -> Icon {
     icon
 }
 
-/// Icons extracted from executable paths, keyed by path. Unlike the window
-/// cache these handles are **ours** (the shell hands out a fresh copy), so
-/// [`clear_path_icons`] must destroy them.
-fn path_cache() -> &'static Mutex<HashMap<String, Icon>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Icon>>> = OnceLock::new();
+/// Shared ownership keeps a paint snapshot valid across cache refreshes.
+#[derive(Clone)]
+pub(crate) struct PathIcon(Arc<OwnedIcon>);
+struct OwnedIcon(Icon);
+impl PathIcon {
+    fn new(raw: Icon) -> Self {
+        Self(Arc::new(OwnedIcon(raw)))
+    }
+    pub(crate) fn raw(&self) -> Icon {
+        self.0.0
+    }
+}
+impl Drop for OwnedIcon {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            unsafe {
+                let _ = DestroyIcon(HICON(self.0 as *mut _));
+            }
+        }
+    }
+}
+const MAX_PATH_ICONS: usize = 64;
+const MAX_PATH_KEY_BYTES: usize = 256 * 1024;
+fn path_cache() -> &'static Mutex<HashMap<String, PathIcon>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, PathIcon>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Returns a small icon for the executable at `path`, cached. `0` means "draw
-/// no icon" (the file is missing, is not an executable, or has no icon).
-pub fn for_path(path: &str) -> Icon {
-    if path.is_empty() {
-        return 0;
+/// Owned small icon, or an empty icon. The key cache is bounded; pin and paint
+/// snapshots retain their own references even after cache entries are dropped.
+pub fn for_path(path: &str) -> PathIcon {
+    if path.is_empty() || path.len() > MAX_PATH_KEY_BYTES {
+        return PathIcon::new(0);
     }
-    if let Some(hit) = crate::win_util::lock_or_recover(path_cache()).get(path) {
-        return *hit;
+    if let Some(hit) = crate::win_util::lock_or_recover(path_cache())
+        .get(path)
+        .cloned()
+    {
+        return hit;
     }
     let file = crate::win_util::wide(path);
     let mut small = HICON(std::ptr::null_mut());
-    // SAFETY: `small` outlives the call; asking only for the small slot. A
-    // missing or icon-less file simply extracts nothing.
     let extracted = unsafe { ExtractIconExW(PCWSTR(file.as_ptr()), 0, None, Some(&mut small), 1) };
-    let icon = if extracted > 0 { small.0 as Icon } else { 0 };
-    crate::win_util::lock_or_recover(path_cache()).insert(path.to_owned(), icon);
+    let icon = PathIcon::new(if extracted == 1 { small.0 as Icon } else { 0 });
+    let mut cache = crate::win_util::lock_or_recover(path_cache());
+    if cache.len() >= MAX_PATH_ICONS
+        || cache.keys().map(String::len).sum::<usize>() + path.len() > MAX_PATH_KEY_BYTES
+    {
+        cache.clear();
+    }
+    cache.insert(path.to_owned(), icon.clone());
     icon
 }
 
-/// Frees every cached path icon and clears the cache.
-///
-/// Called at the top of each taskbar refresh: these handles are ours, so
-/// dropping the map without destroying them would leak one icon per pin per
-/// refresh. Handles from the window cache are not touched — we never own those.
+/// Drop cache references, not icons still owned by a pin or paint snapshot.
 pub fn clear_path_icons() {
-    let mut cache = crate::win_util::lock_or_recover(path_cache());
-    for icon in cache.drain().map(|(_, icon)| icon) {
-        if icon != 0 {
-            // SAFETY: the handle came from `ExtractIconExW` and is only ever
-            // passed to `DrawIconEx` (never selected into a DC), so it is safe
-            // to free.
-            unsafe {
-                let _ = DestroyIcon(HICON(icon as *mut core::ffi::c_void));
+    crate::win_util::lock_or_recover(path_cache()).clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "isolated native resource experiment; run resources layer"]
+    fn owned_path_icon_outlives_cache_eviction() {
+        use windows::Win32::Graphics::Gdi::DeleteObject;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CopyIcon, GetIconInfo, ICONINFO, IDI_APPLICATION, LoadIconW,
+        };
+        let shared = unsafe { LoadIconW(None, IDI_APPLICATION).unwrap() };
+        let raw = unsafe { CopyIcon(shared).unwrap() }.0 as Icon;
+        let pin = PathIcon::new(raw);
+        crate::win_util::lock_or_recover(path_cache())
+            .insert("isolated-fixture".into(), pin.clone());
+        clear_path_icons();
+        let mut info = ICONINFO::default();
+        unsafe {
+            assert!(GetIconInfo(HICON(raw as *mut _), &mut info).is_ok());
+            if !info.hbmColor.is_invalid() {
+                let _ = DeleteObject(info.hbmColor.into());
+            }
+            if !info.hbmMask.is_invalid() {
+                let _ = DeleteObject(info.hbmMask.into());
             }
         }
+        drop(pin);
+        assert!(unsafe { GetIconInfo(HICON(raw as *mut _), &mut ICONINFO::default()) }.is_err());
     }
 }

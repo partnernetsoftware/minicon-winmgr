@@ -69,6 +69,7 @@ macro_rules! ui_format {
     ($zh:literal,$en:literal $(,$($args:tt)*)?)=>{if $crate::i18n::language()==$crate::i18n::Language::En {format!($en $(,$($args)*)?)}else{format!($zh $(,$($args)*)?)}};
 }
 const CATALOG: &[(&str, &str)] = &[
+    ("预览暂不可用", "Preview unavailable"),
     (
         "此处无法更新，请下载发布文件后手动替换。",
         "Cannot update here. Download the release and replace manually.",

@@ -8,7 +8,11 @@
 //!
 //! Geometry is pure and unit-tested; the taskbar owns the HDC and hit-testing.
 
-use std::path::PathBuf;
+use std::{
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+};
+const MAX_PIN_FILE_BYTES: usize = 1024 * 1024;
 
 use windows::Win32::Foundation::RECT;
 
@@ -65,6 +69,7 @@ fn parse(contents: &str) -> Vec<Pin> {
                 path: path.to_owned(),
             })
         })
+        .take(MAX_PINS)
         .collect()
 }
 
@@ -101,26 +106,95 @@ fn push(pins: &mut Vec<Pin>, label: &str, path: &str) -> bool {
     true
 }
 
-/// Loads the persisted pins, capped at [`MAX_PINS`]. Best effort: a missing or
-/// unreadable file yields an empty list.
-fn load() -> Vec<Pin> {
-    let contents = match std::fs::read_to_string(pins_file()) {
-        Ok(contents) => contents,
-        Err(err) => {
-            tracing::debug!(error = %err, "no quick-launch pin file");
-            return Vec::new();
-        }
+fn read_pin_file(path: &Path) -> io::Result<Option<String>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     };
-    let mut pins = parse(&contents);
-    pins.truncate(MAX_PINS);
-    pins
+    let mut contents = String::new();
+    file.take(MAX_PIN_FILE_BYTES as u64 + 1)
+        .read_to_string(&mut contents)?;
+    if contents.len() > MAX_PIN_FILE_BYTES {
+        return Err(io::Error::other("pin file exceeds size limit"));
+    }
+    Ok(Some(contents))
 }
 
-/// Writes `pins` back to disk, best effort.
-fn save(pins: &[Pin]) {
-    if let Err(err) = std::fs::write(pins_file(), serialize(pins)) {
-        tracing::warn!(error = %err, "failed to persist quick-launch pins");
+/// Display may degrade to an empty strip. Mutations must propagate read errors
+/// instead of treating an unreadable/corrupt file as an empty writable list.
+fn load() -> Vec<Pin> {
+    read_pin_file(&pins_file())
+        .ok()
+        .flatten()
+        .map(|text| parse(&text))
+        .unwrap_or_default()
+}
+
+fn mutate_file(path: &Path, change: impl FnOnce(&mut Vec<Pin>) -> bool) -> io::Result<bool> {
+    mutate_file_with(path, change, || Ok(()))
+}
+fn mutate_file_with(
+    path: &Path,
+    change: impl FnOnce(&mut Vec<Pin>) -> bool,
+    before_replace: impl FnOnce() -> io::Result<()>,
+) -> io::Result<bool> {
+    let original = read_pin_file(path)?;
+    let mut pins = parse(original.as_deref().unwrap_or(""));
+    if !change(&mut pins) {
+        return Ok(false);
     }
+    let contents = serialize(&pins);
+    if contents.len() > MAX_PIN_FILE_BYTES {
+        return Err(io::Error::other("pin file exceeds size limit"));
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut temporary = path.as_os_str().to_os_string();
+    temporary.push(format!(".{}.{serial}.tmp", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let result = (|| {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        before_replace()?;
+        if read_pin_file(path)? != original {
+            return Err(io::Error::other("pin file changed externally"));
+        }
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        };
+        use windows::core::PCWSTR;
+        let from: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            MoveFileExW(
+                PCWSTR(from.as_ptr()),
+                PCWSTR(to.as_ptr()),
+                MOVEFILE_WRITE_THROUGH
+                    | if original.is_some() {
+                        MOVEFILE_REPLACE_EXISTING
+                    } else {
+                        Default::default()
+                    },
+            )
+        }
+        .map_err(io::Error::other)?;
+        Ok(true)
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result
 }
 
 /// The current pins, in display order.
@@ -142,28 +216,27 @@ pub fn is_full() -> bool {
 /// changed (false for a duplicate, an empty path, or when [`MAX_PINS`] is
 /// reached).
 pub fn add(label: &str, path: &str) -> bool {
-    let mut pins = load();
-    if push(&mut pins, label, path) {
-        save(&pins);
-        tracing::info!(path, "quick-launch: pin added");
-        true
-    } else {
-        false
+    match mutate_file(&pins_file(), |pins| push(pins, label, path)) {
+        Ok(changed) => changed,
+        Err(error) => {
+            tracing::warn!(%error, "quick-launch save failed; existing file retained");
+            false
+        }
     }
 }
 
-/// Drops the pin whose path matches, persisting on success. Returns whether the
-/// list changed.
+/// Remove only after reading the existing file successfully; replacement is atomic.
 pub fn remove(path: &str) -> bool {
-    let mut pins = load();
-    let before = pins.len();
-    pins.retain(|p| !p.path.eq_ignore_ascii_case(path));
-    if pins.len() == before {
-        false
-    } else {
-        save(&pins);
-        tracing::info!(path, "quick-launch: pin removed");
-        true
+    match mutate_file(&pins_file(), |pins| {
+        let before = pins.len();
+        pins.retain(|pin| !pin.path.eq_ignore_ascii_case(path));
+        pins.len() != before
+    }) {
+        Ok(changed) => changed,
+        Err(error) => {
+            tracing::warn!(%error, "quick-launch save failed; existing file retained");
+            false
+        }
     }
 }
 
@@ -205,6 +278,75 @@ pub fn launch_path(path: &str) {
 #[cfg(test)]
 mod tests {
     use super::{MAX_PINS, PIN_GAP, Pin, contains, hit, layout, parse, push, serialize};
+
+    #[test]
+    fn pin_mutations_reject_oversized_input_and_preserve_original_on_failure() {
+        use super::*;
+        let folder = std::env::temp_dir().join(format!(
+            "winmgr-pins-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("pins.txt");
+        let original = b"Editor\tC:\\Examples\\editor.exe\n";
+        std::fs::write(&path, original).unwrap();
+        assert!(
+            mutate_file_with(
+                &path,
+                |pins| push(pins, "Second", "second.exe"),
+                || Err(io::Error::other("injected replace failure"))
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+        assert!(mutate_file(&path, |pins| push(pins, "Second", "second.exe")).unwrap());
+        assert_eq!(load_test(&path).len(), 2);
+        let external = b"External\texternal.exe\n";
+        assert!(
+            mutate_file_with(
+                &path,
+                |pins| push(pins, "Third", "third.exe"),
+                || { std::fs::write(&path, external) }
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), external);
+        use std::os::windows::fs::OpenOptionsExt;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        assert!(mutate_file(&path, |pins| push(pins, "Blocked", "blocked.exe")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), external);
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+        drop(lock);
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert!(mutate_file(&path, |pins| push(pins, "Third", "third.exe")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), [0xff, 0xfe]);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_PIN_FILE_BYTES as u64 + 1).unwrap();
+        drop(file);
+        assert!(mutate_file(&path, |pins| push(pins, "Third", "third.exe")).is_err());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            MAX_PIN_FILE_BYTES as u64 + 1
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&folder).unwrap();
+        fn load_test(path: &Path) -> Vec<Pin> {
+            parse(read_pin_file(path).unwrap().as_deref().unwrap())
+        }
+        let many = (0..100)
+            .map(|i| format!("Item{i}\tpath{i}\n"))
+            .collect::<String>();
+        assert_eq!(parse(&many).len(), MAX_PINS);
+    }
 
     #[test]
     fn empty_has_no_rects() {

@@ -266,3 +266,7 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 1. **`WM_MOUSEWHEEL`**：经典语义发给**焦点窗口**；Win10+ 可经系统设置（`HKCU\Control Panel\Desktop\MouseWheelRouting`，默认开）按**光标**路由到非活动窗口 → 滚轮翻页"**可行但依赖该设置**"，且需在 `wndproc` 加该分支（**当前无**）。本项目**未实现**滚轮翻页。
 2. **`TrackPopupMenu`**：不保证自动滚动箭头，30+ 项可能超出屏幕 → 已改用 `MF_MENUBARBREAK` **显式分列**（每 `PER_COLUMN=24` 行，纯函数 `starts_new_column`）。
 3. **UWP / `ApplicationFrameHost`**：`QueryFullProcessImageNameW` 会让多个 UWP 应用解析到同一 `ApplicationFrameHost.exe` → `exe` 策略会**过度合并**；属已知取舍（已记入 §0.1 偏差 2）。
+
+## 0.1.10 侧边宽度需求
+
+左/右停靠支持拖动内边缘调整宽度，默认 180 DIP，保存为 `taskbar.side_width`，范围 160–480 DIP；实际像素宽度还受屏幕跨度三分之一限制。每屏按 DPI 换算。拖动预览、松开异步保存并刷新工作区，取消不改变偏好；细则与验收见[0.1.10 计划](plan_0_1_10.md)。

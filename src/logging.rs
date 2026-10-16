@@ -7,6 +7,11 @@ use std::path::PathBuf;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
+// The dependency default reserves 128,000 queue slots. A desktop shell needs
+// a small burst buffer, not a server-sized backlog. Saturation must never
+// apply disk backpressure to the message thread.
+const LOG_QUEUE_LINES: usize = 512;
+
 /// Initializes the global tracing subscriber.
 ///
 /// Logs go to both stderr and a daily-rolling file under the log directory.
@@ -15,7 +20,10 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 pub fn init() -> WorkerGuard {
     let dir = log_dir();
     let file_appender = tracing_appender::rolling::daily(&dir, "minicon-winmgr.log");
-    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let (file_writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(LOG_QUEUE_LINES)
+        .lossy(true)
+        .finish(file_appender);
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -87,5 +95,60 @@ fn payload_str(payload: &(dyn std::any::Any + Send)) -> String {
         s.clone()
     } else {
         "<non-string panic payload>".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "isolated resource experiment; run each capacity in a fresh process"]
+    fn logging_queue_commit_footprint() {
+        let capacity = match std::env::var("WINMGR_TEST_LOG_QUEUE").as_deref() {
+            Ok("128000") => tracing_appender::non_blocking::DEFAULT_BUFFERED_LINES_LIMIT,
+            _ => LOG_QUEUE_LINES,
+        };
+        let before = crate::metrics::sample().private_bytes;
+        let (_writer, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .buffered_lines_limit(capacity)
+            .lossy(true)
+            .finish(std::io::sink());
+        let after = crate::metrics::sample().private_bytes;
+        println!(
+            "QUEUE_SAMPLE {{\"capacity\":{capacity},\"private_before\":{before},\"private_after\":{after}}}"
+        );
+    }
+
+    #[test]
+    fn saturated_log_queue_drops_instead_of_blocking_the_caller() {
+        use std::io::Write;
+        use std::time::{Duration, Instant};
+        struct Slow(Option<std::sync::mpsc::Receiver<()>>);
+        impl Write for Slow {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(release) = self.0.take() {
+                    release.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (release, blocked) = std::sync::mpsc::sync_channel(1);
+        let (mut writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .buffered_lines_limit(2)
+            .lossy(true)
+            .finish(Slow(Some(blocked)));
+        let errors = writer.error_counter();
+        let started = Instant::now();
+        for _ in 0..1000 {
+            writer.write_all(b"synthetic resource test\n").unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(errors.dropped_lines() > 0);
+        release.send(()).unwrap();
+        drop(guard);
     }
 }

@@ -146,6 +146,7 @@ pub(crate) fn enqueue(key: &'static str, value: &str) {
             crate::config::keys::HOVER_PREVIEW,
             crate::config::keys::LANGUAGE,
             crate::config::keys::THEME_MODE,
+            crate::config::keys::SIDE_WIDTH,
             crate::config::keys::TASKBAR_POSITION
         ]
         .contains(&key)

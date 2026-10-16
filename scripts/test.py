@@ -11,10 +11,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
+    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'memory', 'soak', 'resources', 'fault', 'side-resize', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
     parser.add_argument('--filter', help='Rust test name/module filter; only with --layer unit')
+    parser.add_argument('--pid', type=int, help='Existing test process; only memory/soak')
+    parser.add_argument('--duration', type=float, help='Observation seconds; required for soak')
+    parser.add_argument('--interval', type=float, default=5, help='Memory observation sample period')
     args = parser.parse_args()
     if args.filter and args.layer != 'unit': parser.error('--filter requires --layer unit')
+    if args.layer in ['memory','soak']:
+        if not args.pid or args.pid <= 0: parser.error('memory/soak requires --pid')
+        if args.layer=='soak' and args.duration is None: parser.error('soak requires explicit --duration')
+    elif args.pid is not None or args.duration is not None:
+        parser.error('--pid/--duration only apply to memory/soak')
     fingerprint=hashlib.sha256(b''.join(f.read_bytes() for f in sorted((ROOT/'src').glob('*.rs')))).hexdigest()
     report = {'utc':datetime.now(timezone.utc).isoformat(), 'source_sha256':fingerprint, 'layer':args.layer, 'filter':args.filter, 'steps':[], 'passed':False}
     output=ROOT/'target/test-reports'/args.layer
@@ -32,6 +40,30 @@ def main():
             cmd=(*cmd[:2],'--target-dir',str(ROOT/'target/release-validation'),*cmd[2:])
         step(' '.join(cmd),lambda:subprocess.run(cmd,cwd=ROOT,check=True))
     try:
+        if args.layer in ['memory','soak']:
+            import sys
+            import memory_probe
+            observation=output/('observation-'+str(time.time_ns()))
+            report['subject']='external process identified by binary hash in observation summary'
+            report['observation_only']=True
+            command(sys.executable,'scripts/test_memory_probe.py')
+            result=memory_probe.collect(args.pid,args.duration if args.duration is not None else 60,
+                                        args.interval,observation,'soak' if args.layer=='soak' else 'idle')
+            report['observation_summary']=str((observation/'summary.json').relative_to(ROOT))
+            if result['stop_reason']!='duration_completed':raise RuntimeError('Observation ended before requested duration')
+            memory_probe.plot(observation)
+        if args.layer=='resources':
+            import resources_probe
+            step('stalled source preview and isolated logging queue measurement',resources_probe.main)
+        if args.layer=='fault':
+            report['scope']=['pin-file corruption/size/replace failure/external edit/lock',
+                             'handoff manifest bounds and confinement',
+                             'loopback HTTP size/error responses and URL/hash validation']
+            report['not_covered']=['all WinHTTP timeout paths','process handoff and recovery (use update layer)',
+                                   'long-run and physical display faults']
+            command('cargo','test','quick_launch::tests::pin_mutations')
+            command('cargo','test','update_install::tests')
+            command('cargo','test','update_http::tests')
         if args.layer in ['check','quality','release']:
             command('cargo','fmt','--all','--','--check')
         if args.layer=='check': command('cargo','check')
@@ -39,10 +71,13 @@ def main():
             command('cargo','clippy','--all-targets','--','-D','warnings')
         if args.layer in ['unit','release']:
             command('cargo','test','--all',*(['--release'] if args.layer=='release' else []),*([args.filter] if args.filter else []))
-        if args.layer in ['layout','appearance','interaction','taskmgr','update','settings','release']:
+        if args.layer in ['side-resize','layout','appearance','interaction','taskmgr','update','settings','release']:
             command('cargo','build',*(['--release'] if args.layer=='release' else []))
             import settings_probe as settings
             if args.layer=='release':settings.SOURCE=ROOT/'target/release-validation/release/minicon-winmgr.exe'
+            if args.layer=='side-resize':
+                import side_resize_probe
+                step('side taskbar drag resize and persistence',side_resize_probe.main)
             if args.layer in ['update','release']:
                 import update_probe
                 step('manual update and rollback handoff',lambda:update_probe.main(release=args.layer=='release'))

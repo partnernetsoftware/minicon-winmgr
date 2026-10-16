@@ -1,10 +1,8 @@
 //! Hover preview: a thumbnail popup shown above a hovered task button.
 //!
-//! Design constraints (from review):
-//! - The taskbar must **not** call `capture` from `WM_MOUSEMOVE`; the caller
-//!   throttles with a `WM_TIMER` and only then calls [`show`].
-//! - One process-lifetime popup window, shown/hidden (never recreated).
-//! - The captured `HBITMAP` is released on redirect and on destroy.
+//! DWM composes one live thumbnail into our popup. No WM_PRINT requests,
+//! screenshots, worker threads, bitmap copies, or unbounded capture retries.
+//! Registration is released when hidden, redirected, or destroyed.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -12,18 +10,20 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::{
     COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
 };
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
-    DeleteObject, EndPaint, FillRect, GetDC, GetMonitorInfoW, HBITMAP, HGDIOBJ, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, PAINTSTRUCT, ReleaseDC, SRCCOPY,
-    SelectObject, StretchBlt,
+use windows::Win32::Graphics::Dwm::{
+    DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
+    DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE, DwmQueryThumbnailSourceSize,
+    DwmRegisterThumbnail, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
 };
-use windows::Win32::Storage::Xps::PrintWindow;
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DrawTextW, EndPaint, FillRect,
+    GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
+    PAINTSTRUCT, SetBkMode, SetTextColor, TRANSPARENT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetSystemMetrics, PW_RENDERFULLCONTENT, RegisterClassW,
-    SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
-    WINDOW_STYLE, WM_DESTROY, WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, GetSystemMetrics, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
+    SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WINDOW_STYLE, WM_DESTROY,
+    WM_PAINT, WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -54,10 +54,10 @@ const WINDOW_TITLE: &str = "minicon preview";
 // Handles are stored as `isize`; the message thread is the sole user, so this
 // is safe by construction.
 static PREVIEW: AtomicIsize = AtomicIsize::new(0);
-/// The window handle currently captured into [`BITMAP`].
+/// Source window associated with the current thumbnail.
 static TARGET: AtomicIsize = AtomicIsize::new(0);
-/// The captured thumbnail (`HBITMAP` as `isize`), owned by this module.
-static BITMAP: AtomicIsize = AtomicIsize::new(0);
+/// One DWM registration owned by this module (zero means unavailable).
+static THUMBNAIL: AtomicIsize = AtomicIsize::new(0);
 /// Last anchor rectangle, kept only for diagnostics.
 static ANCHOR: Mutex<Option<RECT>> = Mutex::new(None);
 
@@ -74,62 +74,55 @@ fn preview() -> Option<HWND> {
     existing(&PREVIEW)
 }
 
-/// Captures `hwnd` into a fresh `w`×`h` bitmap via `PrintWindow`
-/// (`PW_RENDERFULLCONTENT`). Returns `None` on failure so the caller can
-/// degrade gracefully. The caller owns the bitmap and must delete it.
-///
-/// SAFETY: `hwnd` should be a live top-level window; must be called on the
-/// message thread.
-pub unsafe fn capture(hwnd: isize, w: i32, h: i32) -> Option<HBITMAP> {
-    if hwnd == 0 || w <= 0 || h <= 0 {
+/// Aspect-fit with a small border; invalid source dimensions produce no thumbnail.
+fn thumbnail_rect(width: i32, height: i32) -> Option<RECT> {
+    if width <= 0 || height <= 0 {
         return None;
     }
-    // SAFETY: standard GDI capture sequence. `src_dc` is a borrowed screen DC
-    // released below; `mem_dc` is created and deleted by us; the bitmap is
-    // either returned to the caller or deleted on failure.
+    let available_w = PREVIEW_W - 8;
+    let available_h = PREVIEW_H - 8;
+    let scale = (available_w as f64 / width as f64).min(available_h as f64 / height as f64);
+    let w = (width as f64 * scale).round().max(1.0) as i32;
+    let h = (height as f64 * scale).round().max(1.0) as i32;
+    let left = (PREVIEW_W - w) / 2;
+    let top = (PREVIEW_H - h) / 2;
+    Some(RECT {
+        left,
+        top,
+        right: left + w,
+        bottom: top + h,
+    })
+}
+
+fn register_thumbnail(destination: HWND, target: isize) -> Option<isize> {
+    // DWM reads its compositor surface rather than requesting rendering from
+    // the source application, including when that application's UI is wedged.
     unsafe {
-        let src_dc = GetDC(None);
-        if src_dc.0.is_null() {
-            tracing::warn!("hover preview: GetDC failed");
-            return None;
+        let registration = DwmRegisterThumbnail(destination, hwnd_from(target)).ok()?;
+        let configured = (|| {
+            let size = DwmQueryThumbnailSourceSize(registration).ok()?;
+            let rect = thumbnail_rect(size.cx, size.cy)?;
+            DwmUpdateThumbnailProperties(
+                registration,
+                &DWM_THUMBNAIL_PROPERTIES {
+                    dwFlags: DWM_TNP_RECTDESTINATION
+                        | DWM_TNP_VISIBLE
+                        | DWM_TNP_OPACITY
+                        | DWM_TNP_SOURCECLIENTAREAONLY,
+                    rcDestination: rect,
+                    opacity: 255,
+                    fVisible: true.into(),
+                    fSourceClientAreaOnly: false.into(),
+                    ..Default::default()
+                },
+            )
+            .ok()?;
+            Some(registration)
+        })();
+        if configured.is_none() {
+            let _ = DwmUnregisterThumbnail(registration);
         }
-
-        let mem_dc = CreateCompatibleDC(Some(src_dc));
-        if mem_dc.0.is_null() {
-            ReleaseDC(None, src_dc);
-            tracing::warn!("hover preview: CreateCompatibleDC failed");
-            return None;
-        }
-
-        let bitmap = CreateCompatibleBitmap(src_dc, w, h);
-        if bitmap.0.is_null() {
-            let _ = DeleteDC(mem_dc);
-            ReleaseDC(None, src_dc);
-            tracing::warn!("hover preview: CreateCompatibleBitmap failed");
-            return None;
-        }
-
-        // Select the bitmap so `PrintWindow` renders into it.
-        let previous = SelectObject(mem_dc, HGDIOBJ(bitmap.0));
-        let ok = PrintWindow(
-            hwnd_from(hwnd),
-            mem_dc,
-            windows::Win32::Storage::Xps::PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT),
-        )
-        .as_bool();
-        // Restore the original object before deleting the DC; otherwise the
-        // bitmap stays owned by the DC and leaks.
-        SelectObject(mem_dc, previous);
-        let _ = DeleteDC(mem_dc);
-        ReleaseDC(None, src_dc);
-
-        if ok {
-            Some(bitmap)
-        } else {
-            let _ = DeleteObject(HGDIOBJ(bitmap.0));
-            tracing::warn!(hwnd, "hover preview: PrintWindow failed");
-            None
-        }
+        configured
     }
 }
 
@@ -151,7 +144,6 @@ pub(crate) fn prepare(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Er
     unsafe {
         let class_name = wide(CLASS_NAME);
         let title = wide(WINDOW_TITLE);
-        let background = CreateSolidBrush(bg_color());
 
         let wnd_class = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
@@ -162,7 +154,6 @@ pub(crate) fn prepare(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Er
                 windows::Win32::UI::WindowsAndMessaging::IDC_ARROW,
             )
             .unwrap_or_default(),
-            hbrBackground: background,
             style: WNDCLASS_STYLES::default(),
             ..Default::default()
         };
@@ -196,16 +187,13 @@ pub(crate) fn prepare(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Releases the captured bitmap, if any (leaves [`TARGET`] untouched).
-fn release_bitmap() {
-    let raw = BITMAP.swap(0, Ordering::SeqCst);
+/// Release before redirect/hide/destroy, including every failed registration.
+fn release_thumbnail() {
+    let raw = THUMBNAIL.swap(0, Ordering::SeqCst);
     if raw != 0 {
-        // SAFETY: `raw` came from `CreateCompatibleBitmap` and is not selected
-        // into any DC (we always restore before returning from `capture`).
         unsafe {
-            let _ = DeleteObject(HGDIOBJ(raw as *mut core::ffi::c_void));
+            let _ = DwmUnregisterThumbnail(raw);
         }
-        tracing::debug!("hover preview: released captured bitmap");
     }
 }
 
@@ -244,23 +232,19 @@ fn work_area(anchor: RECT) -> RECT {
 }
 
 /// Shows the preview for `target` (a window handle) anchored under `anchor`
-/// (a screen rectangle). Captures only when the target changes.
+/// (a screen rectangle). Registers only when the target changes.
 pub fn show(target: isize, anchor: RECT) {
     let Some(hwnd) = preview() else {
         tracing::debug!("hover preview: show ignored (not installed)");
         return;
     };
 
-    // Capture only when the hovered target actually changed; a re-hover over
-    // the same window reuses the existing thumbnail.
+    // A failed source gets a placeholder until the next hover. Never fall back
+    // to PrintWindow or create another worker to wait on a stalled application.
     if TARGET.load(Ordering::SeqCst) != target {
-        release_bitmap();
-        match unsafe { capture(target, PREVIEW_W, PREVIEW_H) } {
-            Some(bitmap) => {
-                BITMAP.store(bitmap.0 as isize, Ordering::SeqCst);
-                tracing::debug!(target, "hover preview: captured target");
-            }
-            None => tracing::warn!(target, "hover preview: capture failed"),
+        release_thumbnail();
+        if let Some(registration) = register_thumbnail(hwnd, target) {
+            THUMBNAIL.store(registration, Ordering::SeqCst);
         }
         TARGET.store(target, Ordering::SeqCst);
     }
@@ -288,9 +272,9 @@ pub fn show(target: isize, anchor: RECT) {
     tracing::debug!(target, ?rect, "hover preview shown");
 }
 
-/// Hides the preview and releases the target bitmap immediately.
+/// Hides the preview and unregisters the compositor relationship immediately.
 pub fn hide() {
-    release_bitmap();
+    release_thumbnail();
     TARGET.store(0, Ordering::SeqCst);
     *lock_or_recover(&ANCHOR) = None;
     let Some(hwnd) = preview() else { return };
@@ -301,7 +285,7 @@ pub fn hide() {
     tracing::debug!("hover preview hidden");
 }
 
-/// Paints the dark card and blits the thumbnail, if one is available.
+/// Paint the backing and fallback; DWM draws available thumbnails itself.
 fn paint(hwnd: HWND) {
     // SAFETY: `hwnd` is our live popup; all GDI objects created here are
     // deleted before the function returns.
@@ -319,30 +303,17 @@ fn paint(hwnd: HWND) {
             FillRect(hdc, &client, background.handle());
         }
 
-        let raw = BITMAP.load(Ordering::SeqCst);
-        if raw != 0 {
-            let bitmap = HBITMAP(raw as *mut core::ffi::c_void);
-            let mem_dc = CreateCompatibleDC(Some(hdc));
-            if !mem_dc.0.is_null() {
-                let previous = SelectObject(mem_dc, HGDIOBJ(bitmap.0));
-                let _ = StretchBlt(
-                    hdc,
-                    0,
-                    0,
-                    PREVIEW_W,
-                    PREVIEW_H,
-                    Some(mem_dc),
-                    0,
-                    0,
-                    PREVIEW_W,
-                    PREVIEW_H,
-                    SRCCOPY,
-                );
-                // Restore before deleting the DC so the DC does not free our
-                // still-owned bitmap.
-                SelectObject(mem_dc, previous);
-                let _ = DeleteDC(mem_dc);
-            }
+        if THUMBNAIL.load(Ordering::SeqCst) == 0 {
+            let mut text = wide(crate::i18n::text("预览暂不可用"));
+            let mut rect = client;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COLORREF(crate::config::theme().muted));
+            DrawTextW(
+                hdc,
+                &mut text[..],
+                &mut rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
         }
 
         let _ = EndPaint(hwnd, &ps);
@@ -374,7 +345,7 @@ unsafe extern "system" fn wndproc_inner(
         }
         WM_DESTROY => {
             // The preview never owns the message loop, so no PostQuitMessage.
-            release_bitmap();
+            release_thumbnail();
             TARGET.store(0, Ordering::SeqCst);
             PREVIEW.store(0, Ordering::SeqCst);
             let mut slot = lock_or_recover(&ANCHOR);
@@ -383,5 +354,150 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an interactive Windows DWM desktop; run resources layer"]
+    fn compositor_preview_survives_stalled_source_and_releases_registrations() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        static STALLED: AtomicBool = AtomicBool::new(false);
+        static RELEASE: AtomicBool = AtomicBool::new(false);
+        static PRINTED: AtomicBool = AtomicBool::new(false);
+        unsafe extern "system" fn source_proc(
+            hwnd: HWND,
+            msg: u32,
+            w: WPARAM,
+            l: LPARAM,
+        ) -> LRESULT {
+            if msg == WM_APP + 1 {
+                STALLED.store(true, Ordering::SeqCst);
+                while !RELEASE.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                return LRESULT(0);
+            }
+            if msg == WM_PRINT || msg == WM_PRINTCLIENT {
+                PRINTED.store(true, Ordering::SeqCst);
+            }
+            if msg == WM_DESTROY {
+                unsafe {
+                    PostQuitMessage(0);
+                }
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, w, l) }
+        }
+        struct Fixture {
+            source: HWND,
+            destination: HWND,
+            worker: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                RELEASE.store(true, Ordering::SeqCst);
+                unsafe {
+                    let _ = PostMessageW(Some(self.source), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    if !self.destination.is_invalid() {
+                        let _ = DestroyWindow(self.destination);
+                    }
+                }
+                if let Some(worker) = self.worker.take() {
+                    worker.join().unwrap();
+                }
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || unsafe {
+            let class = wide("winmgr_preview_stalled_fixture");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(source_proc),
+                lpszClassName: PCWSTR(class.as_ptr()),
+                ..Default::default()
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let source = CreateWindowExW(
+                Default::default(),
+                PCWSTR(class.as_ptr()),
+                PCWSTR::null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            tx.send(source.0 as isize).unwrap();
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                DispatchMessageW(&msg);
+            }
+            let _ = UnregisterClassW(PCWSTR(class.as_ptr()), None);
+        });
+        let source = hwnd_from(rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        let mut fixture = Fixture {
+            source,
+            destination: HWND::default(),
+            worker: Some(worker),
+        };
+        unsafe {
+            fixture.destination = CreateWindowExW(
+                Default::default(),
+                windows::core::w!("STATIC"),
+                PCWSTR::null(),
+                WS_POPUP,
+                0,
+                0,
+                PREVIEW_W,
+                PREVIEW_H,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            PostMessageW(Some(source), WM_APP + 1, WPARAM(0), LPARAM(0)).unwrap();
+        }
+        let started = Instant::now();
+        while !STALLED.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(STALLED.load(Ordering::SeqCst), "fixture did not stall");
+        let started = Instant::now();
+        for _ in 0..100 {
+            let registration = register_thumbnail(fixture.destination, source.0 as isize)
+                .expect("DWM thumbnail must work without source message processing");
+            unsafe {
+                DwmUnregisterThumbnail(registration).unwrap();
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "preview waited for stalled source"
+        );
+        assert!(!PRINTED.load(Ordering::SeqCst));
+        assert!(register_thumbnail(fixture.destination, 0).is_none());
+    }
+
+    #[test]
+    fn aspect_fit_handles_wide_tall_and_invalid_sources() {
+        for (w, h) in [(1920, 1080), (400, 2000), (1, i32::MAX), (i32::MAX, 1)] {
+            let rect = thumbnail_rect(w, h).unwrap();
+            assert!(rect.left >= 4 && rect.top >= 4);
+            assert!(rect.right <= PREVIEW_W - 4 && rect.bottom <= PREVIEW_H - 4);
+            assert!(rect.right > rect.left && rect.bottom > rect.top);
+        }
+        assert!(thumbnail_rect(0, 100).is_none());
+        assert!(thumbnail_rect(100, -1).is_none());
     }
 }

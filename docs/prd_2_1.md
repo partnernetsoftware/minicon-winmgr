@@ -13,19 +13,13 @@
   目的：窗口一被销毁，任务按钮立刻消失，而不是等 30s 心跳。
   - **坑**：`SetWinEventHook` 的 `eventmin ≤ eventmax`，否则直接失败（曾把 0x8000 当 min、0x0017 当 max → 失败）。
 
-## 2. 稳定性证据（实测）
-- `cargo test`：**以实测为准（当前 161 passed / 0 failed），改动后不得低于该值**；`cargo fmt --check` 通过；`cargo clippy --all-targets -- -D warnings` 干净。
-- 分钟级采样：`handles` / `gdi_objects` **持平**（无泄漏）。
-- **资源基线（2026-10-13 实测，debug 构建常驻实例）**：工作集 37.6 MB / **私有 14.5 MB** / 句柄 380 / 线程 14；
-  30 秒连续采样**完全平稳**（无泄漏）。横向对比同机：explorer 173.95 MB(ws) / 58.75 MB(私有) / 2012 句柄 / 52 线程；
-  StartMenuExperienceHost 58.17 / 14.31；ShellExperienceHost 50.46 / 10.21。
-  → **minicon 约为 explorer 的 1/4（私有字节）**，与"开始菜单宿主"单进程相当。
-- **为什么工作集不小（重要认知）**：进程加载 68 个模块共约 89 MB 映像，但几乎全是**共享系统 DLL 页**
-  （`windows.storage` 8.5M、`shell32` 7.5M、`d2d1` 5.9M、`uiautomationcore` 4.1M、`combase`、`CoreUIComponents`、
-  `textinputframework`、输入法钩子 `wetype_tip_core.dll`…），由 Shell API / Direct2D / WinRT / IME 钩子带入，
-  **不是本程序私有**。本程序 exe 自身 debug 4.4 MB / **release 1.89 MB**。
-  → 优化方向：**发版用 release**（exe 自身 4.4→1.89 MB），私有字节下降空间有限且已足够低。
-- 优雅退出路径：`message loop exited → work area restored on teardown → stopped`。
+## 2. 稳定性证据与口径
+
+当前公开版为 0.1.9，完成的测试范围见[验收摘要](validation.md)。单元测试数量和短时间资源计数不能证明长期无泄漏；早期 30 秒观察和 debug 单点数字不作为当前版本内存承诺。
+
+0.1.10 正在实现[专项计划](plan_0_1_10.md)。外部只读采样区分私有提交、工作集及可用时的私有工作集，并记录句柄、GDI/USER、线程与观测开销。数据绑定同一进程句柄与创建时间；退出立即停止，不跟随复用 PID。原始 CSV/JSON 和曲线只留在忽略目录。
+
+资源归因以同一构建、相同规模、操作前后及静置阶段对照，重复场景并单列 2 小时/至少 8 小时观察。禁止用强制修剪工作集替代资源释放。观察尚未完成时明确标记未完成，不以短测结论覆盖长跑缺口。
 
 ## 3. 工作区自管（无 explorer 也能当唯一 shell）
 背景：`SHAppBarMessage(ABM_NEW)` 需 **explorer 充当 AppBar broker**；explorer 不在时注册失败，

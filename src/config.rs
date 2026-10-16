@@ -30,6 +30,7 @@ pub mod keys {
     pub const HOVER_PREVIEW: &str = "behavior.hover_preview";
     pub const THEME_MODE: &str = "appearance.mode";
     pub const TASKBAR_POSITION: &str = "taskbar.position";
+    pub const SIDE_WIDTH: &str = "taskbar.side_width";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -208,6 +209,17 @@ impl GroupBy {
     }
 }
 
+pub(crate) const SIDE_WIDTH_MIN: i32 = 160;
+pub(crate) const SIDE_WIDTH_MAX: i32 = 480;
+
+fn parse_side_width(value: &str) -> Option<i32> {
+    value
+        .trim()
+        .parse()
+        .ok()
+        .filter(|width| (SIDE_WIDTH_MIN..=SIDE_WIDTH_MAX).contains(width))
+}
+
 /// Full configuration, with defaults matching `docs/prd_4_1.md`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -215,6 +227,7 @@ pub struct Config {
     pub language: crate::i18n::Language,
     pub theme_mode: ThemeMode,
     pub position: Position,
+    pub side_width: i32,
     theme_overrides: u8,
     /// Hotkey spec, e.g. `"alt+`"`.
     pub hotkey: String,
@@ -256,6 +269,7 @@ impl Default for Config {
             theme: Theme::default(),
             theme_mode: ThemeMode::Auto,
             position: Position::Bottom,
+            side_width: 180,
             theme_overrides: 0,
             hotkey: "alt+`".to_string(),
             show_taskbar: true,
@@ -343,6 +357,11 @@ fn apply(cfg: &mut Config, key: &str, value: &str) {
         keys::THEME_MODE => {
             if let Some(mode) = ThemeMode::parse(value) {
                 cfg.theme_mode = mode;
+            }
+        }
+        keys::SIDE_WIDTH => {
+            if let Some(width) = parse_side_width(value) {
+                cfg.side_width = width;
             }
         }
         keys::TASKBAR_POSITION => {
@@ -622,6 +641,7 @@ pub(crate) fn source(key: &'static str) -> String {
                             keys::LANGUAGE
                         }
                         keys::THEME_MODE if ThemeMode::parse(value).is_some() => keys::THEME_MODE,
+                        keys::SIDE_WIDTH if parse_side_width(value).is_some() => keys::SIDE_WIDTH,
                         keys::TASKBAR_POSITION if Position::parse(value).is_some() => {
                             keys::TASKBAR_POSITION
                         }
@@ -766,6 +786,14 @@ pub fn set_language(language: crate::i18n::Language) -> bool {
 }
 pub fn set_theme_mode(mode: ThemeMode) -> bool {
     update(|c| c.theme_mode = mode, keys::THEME_MODE, mode.as_key())
+}
+pub fn set_side_width(width: i32) -> bool {
+    let width = width.clamp(SIDE_WIDTH_MIN, SIDE_WIDTH_MAX);
+    update(
+        |c| c.side_width = width,
+        keys::SIDE_WIDTH,
+        &width.to_string(),
+    )
 }
 pub fn set_position(position: Position) -> bool {
     update(
@@ -1210,6 +1238,13 @@ theme.surface = #2C2626
             );
         }
 
+        round_trip(keys::SIDE_WIDTH, "248", |c| c.side_width == 248);
+        for invalid in ["0", "-1", "159", "481", "1.5", "invalid"] {
+            assert_eq!(
+                parse(&format!("{} = {invalid}", keys::SIDE_WIDTH)).side_width,
+                180
+            );
+        }
         round_trip(keys::TASKBAR_SHOW, "false", |c| !c.show_taskbar);
         round_trip(keys::TASKBAR_TRAY, "false", |c| !c.show_tray);
         round_trip(keys::HOVER_PREVIEW, "true", |c| c.hover_preview);

@@ -3,7 +3,7 @@ use crate::update_http::sha256;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -35,18 +35,23 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())
 }
-fn bounded_read(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+const MAX_PLAN: usize = 16 * 1024;
+
+fn read_limited(reader: impl std::io::Read, limit: usize) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    file.take(crate::update::MAX_EXE as u64 + 1)
+    std::io::Read::take(reader, limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > crate::update::MAX_EXE {
+    if bytes.len() > limit {
         return Err("update file exceeds size limit".into());
     }
     Ok(bytes)
 }
+fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    read_limited(file, limit)
+}
+
 pub(crate) fn prepare(bytes: &[u8], hash: &str, version: &str) -> Result<PathBuf, String> {
     let target = std::env::current_exe()
         .and_then(fs::canonicalize)
@@ -59,7 +64,7 @@ pub(crate) fn prepare(bytes: &[u8], hash: &str, version: &str) -> Result<PathBuf
     let folder = parent.join(format!(".winmgr-update-{}-{id}", std::process::id()));
     fs::create_dir(&folder).map_err(|e| format!("installation directory is not writable: {e}"))?;
     let result = (|| {
-        let old = bounded_read(&target)?;
+        let old = bounded_read(&target, crate::update::MAX_EXE)?;
         let plan = Plan {
             target: target.clone(),
             parent: std::process::id(),
@@ -101,10 +106,7 @@ fn read_plan(path: &Path) -> Result<(Plan, PathBuf), String> {
     {
         return Err("invalid stage directory".into());
     }
-    let bytes = bounded_read(&canonical)?;
-    if bytes.len() > 16 * 1024 {
-        return Err("oversized handoff manifest".into());
-    }
+    let bytes = bounded_read(&canonical, MAX_PLAN)?;
     let plan: Plan = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if plan.target.parent() != folder.parent() || plan.target.file_name().is_none() {
         return Err("handoff target is outside installation directory".into());
@@ -138,9 +140,15 @@ pub(crate) fn start_helper(path: &Path) -> Result<(), String> {
     {
         return Err("handoff belongs to another instance".into());
     }
-    crate::update::verify(&bounded_read(&folder.join("payload.exe"))?, &plan.new_hash)?;
-    if sha256(&bounded_read(&plan.target)?)? != plan.old_hash
-        || sha256(&bounded_read(&folder.join("helper.exe"))?)? != plan.old_hash
+    crate::update::verify(
+        &bounded_read(&folder.join("payload.exe"), crate::update::MAX_EXE)?,
+        &plan.new_hash,
+    )?;
+    if sha256(&bounded_read(&plan.target, crate::update::MAX_EXE)?)? != plan.old_hash
+        || sha256(&bounded_read(
+            &folder.join("helper.exe"),
+            crate::update::MAX_EXE,
+        )?)? != plan.old_hash
     {
         return Err("installation changed since download".into());
     }
@@ -230,7 +238,10 @@ pub(crate) fn helper(path: &Path) -> Result<(), String> {
     {
         return Err("parent executable does not match handoff".into());
     }
-    crate::update::verify(&bounded_read(&folder.join("payload.exe"))?, &plan.new_hash)?;
+    crate::update::verify(
+        &bounded_read(&folder.join("payload.exe"), crate::update::MAX_EXE)?,
+        &plan.new_hash,
+    )?;
     write_new(
         &folder.join("ready"),
         std::process::id().to_string().as_bytes(),
@@ -252,7 +263,7 @@ pub(crate) fn helper(path: &Path) -> Result<(), String> {
         let _ = fs::write(folder.join("error.txt"), error);
         // Verification or a locked file may fail before any rename. If the old
         // executable is intact and there is no live shell, restore availability.
-        if bounded_read(&plan.target)
+        if bounded_read(&plan.target, crate::update::MAX_EXE)
             .ok()
             .and_then(|b| sha256(&b).ok())
             .as_deref()
@@ -277,8 +288,11 @@ fn install_and_launch(plan: &Plan, folder: &Path) -> Result<(), String> {
     // Recheck after waiting: another instance or installer must not be overwritten.
     let guard = crate::single_instance::InstanceGuard::acquire("minicon-winmgr.singleton")
         .map_err(|e| e.to_string())?;
-    crate::update::verify(&bounded_read(&folder.join("payload.exe"))?, &plan.new_hash)?;
-    if sha256(&bounded_read(&plan.target)?)? != plan.old_hash {
+    crate::update::verify(
+        &bounded_read(&folder.join("payload.exe"), crate::update::MAX_EXE)?,
+        &plan.new_hash,
+    )?;
+    if sha256(&bounded_read(&plan.target, crate::update::MAX_EXE)?)? != plan.old_hash {
         drop(guard);
         return Err("installation changed during handoff".into());
     }
@@ -350,6 +364,17 @@ pub(crate) fn confirm_startup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn manifest_limit_stops_reading_before_executable_sized_allocation() {
+        use std::io::Read;
+        let length = crate::update::MAX_EXE as u64;
+        let mut oversized = std::io::repeat(b' ').take(length);
+        assert!(read_limited(&mut oversized, MAX_PLAN).is_err());
+        assert_eq!(oversized.limit(), length - MAX_PLAN as u64 - 1);
+        let exact = std::io::repeat(b' ').take(MAX_PLAN as u64);
+        assert_eq!(read_limited(exact, MAX_PLAN).unwrap().len(), MAX_PLAN);
+    }
+
     #[test]
     fn manifest_is_bounded_and_confined_to_its_install_directory() {
         let root = std::env::temp_dir().join(format!(

@@ -60,12 +60,176 @@ use crate::win_util::{guard_abi, lock_or_recover, wide};
 
 // --- layout tokens --------------------------------------------------------
 const BAR_H: i32 = 36;
-const SIDE_W: i32 = 180;
 fn vertical() -> bool {
     crate::config::current().position.vertical()
 }
-fn thickness() -> i32 {
-    if vertical() { SIDE_W } else { BAR_H }
+fn thickness(hwnd: Option<HWND>, span: i32) -> i32 {
+    if !vertical() {
+        return BAR_H;
+    }
+    let dpi = unsafe {
+        hwnd.map(|h| windows::Win32::UI::HiDpi::GetDpiForWindow(h))
+            .unwrap_or_else(|| windows::Win32::UI::HiDpi::GetDpiForSystem())
+    }
+    .max(96);
+    crate::dock::side_width_pixels(crate::config::current().side_width, dpi, span)
+}
+
+const SIDE_RESIZE_TIMER: usize = 84;
+#[derive(Clone, Copy)]
+struct SideDrag {
+    hwnd: isize,
+    edge: crate::config::Position,
+    original: RECT,
+    width: i32,
+    dpi: u32,
+    span: i32,
+}
+thread_local! { static SIDE_DRAG: std::cell::RefCell<Option<SideDrag>> = const { std::cell::RefCell::new(None) }; }
+fn resizing(hwnd: HWND) -> bool {
+    SIDE_DRAG.with(|state| {
+        state
+            .borrow()
+            .is_some_and(|drag| drag.hwnd == hwnd.0 as isize)
+    })
+}
+fn resize_cursor() {
+    use windows::Win32::UI::WindowsAndMessaging::{IDC_SIZEWE, LoadCursorW, SetCursor};
+    if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_SIZEWE) } {
+        unsafe {
+            SetCursor(Some(cursor));
+        }
+    }
+}
+fn side_resize_hit(hwnd: HWND, x: i32, y: i32) -> bool {
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
+    crate::dock::side_resize_hit(
+        crate::config::current().position,
+        bar_client(hwnd.0 as isize),
+        x,
+        y,
+        ((6 * dpi + 48) / 96) as i32,
+    )
+}
+fn begin_side_resize(hwnd: HWND, x: i32, y: i32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
+    if !side_resize_hit(hwnd, x, y) {
+        return false;
+    }
+    let Some(span) = lock_or_recover(bars())
+        .iter()
+        .find(|bar| bar.hwnd == hwnd.0 as isize)
+        .map(|bar| bar.area.2)
+    else {
+        return false;
+    };
+    let mut original = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut original) }.is_err() {
+        return false;
+    }
+    cancel_hover();
+    let drag = SideDrag {
+        hwnd: hwnd.0 as isize,
+        edge: crate::config::current().position,
+        original,
+        width: original.right - original.left,
+        span,
+        dpi: unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96),
+    };
+    SIDE_DRAG.with(|state| *state.borrow_mut() = Some(drag));
+    unsafe {
+        SetCapture(hwnd);
+    }
+    if unsafe { SetTimer(Some(hwnd), SIDE_RESIZE_TIMER, 16, None) } == 0 {
+        finish_side_resize(hwnd, false);
+    }
+    resize_cursor();
+    true
+}
+fn finish_side_resize(hwnd: HWND, commit: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture};
+    let drag = SIDE_DRAG.with(|state| {
+        if state
+            .borrow()
+            .is_some_and(|drag| drag.hwnd == hwnd.0 as isize)
+        {
+            state.borrow_mut().take()
+        } else {
+            None
+        }
+    });
+    let Some(drag) = drag else {
+        return;
+    };
+    unsafe {
+        let _ = KillTimer(Some(hwnd), SIDE_RESIZE_TIMER);
+        if GetCapture() == hwnd {
+            let _ = ReleaseCapture();
+        }
+    }
+    if commit && crate::config::current().position == drag.edge {
+        let dip = ((drag.width as i64 * 96 + drag.dpi as i64 / 2) / drag.dpi as i64) as i32;
+        crate::config::set_side_width(dip);
+    } else {
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                drag.original.left,
+                drag.original.top,
+                drag.original.right - drag.original.left,
+                drag.original.bottom - drag.original.top,
+                SWP_NOACTIVATE,
+            );
+        }
+    }
+    refresh();
+}
+fn poll_side_resize(hwnd: HWND) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetCapture, VK_LBUTTON};
+    let drag = SIDE_DRAG.with(|state| *state.borrow());
+    let Some(mut drag) = drag.filter(|drag| drag.hwnd == hwnd.0 as isize) else {
+        return;
+    };
+    if crate::config::current().position != drag.edge
+        || unsafe { GetCapture() } != hwnd
+        || unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } < 0
+    {
+        finish_side_resize(hwnd, false);
+        return;
+    }
+    let mut pointer = windows::Win32::Foundation::POINT::default();
+    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pointer) }.is_err() {
+        finish_side_resize(hwnd, false);
+        return;
+    }
+    let requested = crate::dock::dragged_side_width(drag.edge, drag.original, pointer.x);
+    let min = crate::dock::side_width_pixels(crate::config::SIDE_WIDTH_MIN, drag.dpi, drag.span);
+    let max = crate::dock::side_width_pixels(crate::config::SIDE_WIDTH_MAX, drag.dpi, drag.span);
+    let width = requested.clamp(min, max);
+    if width != drag.width {
+        drag.width = width;
+        SIDE_DRAG.with(|state| *state.borrow_mut() = Some(drag));
+        let left = if drag.edge == crate::config::Position::Right {
+            drag.original.right - width
+        } else {
+            drag.original.left
+        };
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                left,
+                drag.original.top,
+                width,
+                drag.original.bottom - drag.original.top,
+                SWP_NOACTIVATE,
+            );
+        }
+    }
+    if unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } >= 0 {
+        finish_side_resize(hwnd, true);
+    }
 }
 const PAD: i32 = 10;
 /// Spacing between adjacent elements of the bar. Primarily the gap between
@@ -245,7 +409,7 @@ static ORIG_WORKAREA: Mutex<Option<RECT>> = Mutex::new(None);
 /// AppBar docking failed. Captures the original area
 /// once so it can be restored faithfully, and persists both rectangles so a run
 /// that is *killed* (task manager, `shellctl stop`) can still be recovered.
-fn reserve_workarea(_area: (i32, i32, i32, i32)) {
+fn reserve_workarea(area: (i32, i32, i32, i32), hwnd: HWND) {
     let mut guard = lock_or_recover(&ORIG_WORKAREA);
     // SAFETY: `SystemParametersInfoW` reads/writes the RECT we point at, which
     // outlives the call; these are process-global work-area queries.
@@ -268,7 +432,7 @@ fn reserve_workarea(_area: (i32, i32, i32, i32)) {
         let mut target = crate::dock::reserve(
             guard.unwrap(),
             crate::config::current().position,
-            thickness(),
+            thickness(Some(hwnd), area.2),
         );
         if let Err(err) = SystemParametersInfoW(
             SPI_SETWORKAREA,
@@ -475,7 +639,7 @@ struct PinItem {
     label: String,
     path: String,
     /// Icon drawn in the pin square; `0` falls back to the label's initial.
-    icon: crate::window_icon::Icon,
+    icon: crate::window_icon::PathIcon,
 }
 
 /// Per-bar state: layout, mouse hover, and keyboard cursor.
@@ -485,6 +649,7 @@ struct BarEntry {
     /// Monitor work area this bar is docked to.
     area: (i32, i32, i32, i32),
     position: crate::config::Position,
+    thickness: i32,
     appbar: bool,
     rects: Vec<RECT>,
     /// Overflow button rect, shown when some task buttons do not fit.
@@ -921,7 +1086,7 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                     bottom: y + h,
                 },
                 position,
-                thickness(),
+                thickness(None, w),
             );
             let hwnd = CreateWindowExW(
                 // `WS_EX_NOACTIVATE` is what makes the bar behave like the stock
@@ -969,7 +1134,7 @@ pub fn create(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                 // No AppBar broker (e.g. no explorer): shrink the work area
                 // ourselves so maximized windows still stop above the bar.
                 if i == 0 {
-                    reserve_workarea((x, y, w, h));
+                    reserve_workarea((x, y, w, h), hwnd);
                 }
             }
 
@@ -1072,7 +1237,7 @@ fn set_appbar_pos(hwnd: HWND, area: (i32, i32, i32, i32)) {
                 "AppBar: ABM_QUERYPOS refused; using the full screen rect"
             );
         }
-        abd.rc = crate::dock::bounds(abd.rc, position, thickness());
+        abd.rc = crate::dock::bounds(abd.rc, position, thickness(Some(hwnd), w));
         if SHAppBarMessage(ABM_SETPOS, &mut abd) == 0 {
             tracing::warn!(
                 ?hwnd,
@@ -1320,10 +1485,12 @@ fn reposition() {
         bars.iter_mut()
             .enumerate()
             .filter_map(|(i, b)| {
-                if b.position == position {
+                let thickness = thickness(Some(hwnd_from(b.hwnd)), b.area.2);
+                if b.position == position && b.thickness == thickness {
                     return None;
                 }
                 b.position = position;
+                b.thickness = thickness;
                 Some((i, b.hwnd, b.area, b.appbar))
             })
             .collect()
@@ -1348,7 +1515,7 @@ fn reposition() {
                     bottom: y + h,
                 },
                 position,
-                thickness(),
+                thickness(Some(hwnd_from(key)), w),
             );
             unsafe {
                 let _ = SetWindowPos(
@@ -1362,7 +1529,7 @@ fn reposition() {
                 );
             }
             if i == 0 {
-                reserve_workarea(area)
+                reserve_workarea(area, hwnd_from(key))
             }
         }
     }
@@ -1744,11 +1911,44 @@ unsafe extern "system" fn wndproc_inner(
 ) -> LRESULT {
     let key = hwnd.0 as isize;
     match msg {
+        WM_TIMER if wparam.0 == SIDE_RESIZE_TIMER => {
+            poll_side_resize(hwnd);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_CAPTURECHANGED
+        | windows::Win32::UI::WindowsAndMessaging::WM_CANCELMODE => {
+            finish_side_resize(hwnd, false);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_DPICHANGED => {
+            finish_side_resize(hwnd, false);
+            refresh();
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_SETCURSOR => {
+            let mut pointer = windows::Win32::Foundation::POINT::default();
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pointer) }
+                .is_ok()
+            {
+                unsafe {
+                    let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pointer);
+                }
+                if resizing(hwnd) || side_resize_hit(hwnd, pointer.x, pointer.y) {
+                    resize_cursor();
+                    return LRESULT(1);
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_PAINT => {
             unsafe { paint(hwnd) };
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            if resizing(hwnd) {
+                poll_side_resize(hwnd);
+                return LRESULT(0);
+            }
             track_leave(hwnd);
             let x = get_x(lparam);
             let y = get_y(lparam);
@@ -1876,6 +2076,9 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            if begin_side_resize(hwnd, get_x(lparam), get_y(lparam)) {
+                return LRESULT(0);
+            }
             if let Some(bar) = lock_or_recover(bars()).iter_mut().find(|b| b.hwnd == key) {
                 bar.tray_pressed = None;
             }
@@ -2008,6 +2211,11 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            if resizing(hwnd) {
+                poll_side_resize(hwnd);
+                finish_side_resize(hwnd, true);
+                return LRESULT(0);
+            }
             let pressed = lock_or_recover(bars())
                 .iter_mut()
                 .find(|b| b.hwnd == key)
@@ -2125,6 +2333,10 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         WM_KEYDOWN => {
+            if resizing(hwnd) && wparam.0 as u16 == VK_ESCAPE.0 {
+                finish_side_resize(hwnd, false);
+                return LRESULT(0);
+            }
             if wparam.0 as u16 == VK_ESCAPE.0 {
                 let previous = {
                     let mut all = lock_or_recover(bars());
@@ -2266,6 +2478,11 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         WM_DESTROY => {
+            SIDE_DRAG.with(|state| {
+                if state.borrow().is_some_and(|drag| drag.hwnd == key) {
+                    state.borrow_mut().take();
+                }
+            });
             let _ = unsafe { UnregisterHotKey(Some(hwnd), HOTKEY_ID) };
             // SAFETY: deregisters this AppBar; harmless if it was never docked.
             unsafe {
@@ -2305,6 +2522,23 @@ unsafe fn paint(hwnd: HWND) {
             br.bg
         };
         FillRect(hdc, &client, hbrush(hdc, bg));
+        if vertical() {
+            let edge = crate::config::current().position;
+            let left = if edge == crate::config::Position::Left {
+                client.right - 1
+            } else {
+                0
+            };
+            FillRect(
+                hdc,
+                &RECT {
+                    left,
+                    right: left + 1,
+                    ..client
+                },
+                hbrush(hdc, br.surface),
+            );
+        }
 
         // Settings button (left of the menu dot): a three-slider glyph.
         let set_rect = settings_rect(client);
@@ -2527,9 +2761,9 @@ unsafe fn paint(hwnd: HWND) {
         // Quick-launch pins: surface squares carrying the pinned app's icon, or
         // the label's initial when no icon could be extracted. The strip only
         // claims space when it is non-empty (see `refresh`).
-        let pin_items: Vec<(String, crate::window_icon::Icon)> = lock_or_recover(pins())
+        let pin_items: Vec<(String, crate::window_icon::PathIcon)> = lock_or_recover(pins())
             .iter()
-            .map(|p| (p.label.clone(), p.icon))
+            .map(|p| (p.label.clone(), p.icon.clone()))
             .collect();
         for (i, r) in pin_rects.iter().enumerate() {
             let fill = if pin_hover == Some(i) {
@@ -2543,14 +2777,14 @@ unsafe fn paint(hwnd: HWND) {
             };
             let cx = (r.left + r.right - ICON_W) / 2;
             let cy = (r.top + r.bottom - ICON_W) / 2;
-            if *icon != 0 {
+            if icon.raw() != 0 {
                 // SAFETY: the handle was extracted by `window_icon::for_path`
-                // and is valid until the next refresh; GDI only reads it.
+                // and retained by this paint snapshot; GDI only reads it.
                 let _ = DrawIconEx(
                     hdc,
                     cx,
                     cy,
-                    HICON(*icon as *mut core::ffi::c_void),
+                    HICON(icon.raw() as *mut core::ffi::c_void),
                     ICON_W,
                     ICON_W,
                     0,
