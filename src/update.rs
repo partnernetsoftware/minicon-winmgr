@@ -335,6 +335,51 @@ pub(crate) fn poll() {
 mod tests {
     use super::*;
     #[test]
+    fn worker_panic_and_full_progress_queue_fail_then_allow_a_new_check() {
+        STATE.with(|state| *state.borrow_mut() = State::default());
+        let (entered, started) = mpsc::sync_channel(1);
+        let (release, blocked) = mpsc::sync_channel(1);
+        begin(Phase::Checking, move |sender| {
+            for bytes in 0..1000 {
+                let _ = sender.try_send(Event::Progress(bytes));
+            }
+            entered.send(()).unwrap();
+            blocked.recv_timeout(Duration::from_secs(3)).unwrap();
+            panic!("synthetic update worker panic");
+        });
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        let tick = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(view().phase, Phase::Checking);
+        }
+        assert!(tick.elapsed() < Duration::from_millis(500));
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now();
+        while view().phase == Phase::Checking && deadline.elapsed() < Duration::from_secs(3) {
+            poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(view().phase, Phase::Failed);
+        assert_eq!(view().error.as_deref(), Some("update worker panicked"));
+        begin(Phase::Checking, |_| {
+            Ok(Event::Checked(Release {
+                version: env!("CARGO_PKG_VERSION").into(),
+                url: String::new(),
+                sums: String::new(),
+                name: String::new(),
+            }))
+        });
+        let deadline = std::time::Instant::now();
+        while view().phase == Phase::Checking && deadline.elapsed() < Duration::from_secs(3) {
+            poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(view().phase, Phase::Current);
+        assert!(view().error.is_none());
+        STATE.with(|state| *state.borrow_mut() = State::default());
+    }
+
+    #[test]
     fn stable_numeric_versions_and_exact_checksum() {
         assert!(Version::parse("0.1.10") > Version::parse("v0.1.9"));
         for bad in ["1.2", "1.2.3-beta", "1.2.03", "1.2.3/", "-1.2.3"] {

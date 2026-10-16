@@ -26,3 +26,6 @@ jobs:
 
       - name: Development quality checks
         run: python scripts/test.py --layer quality
+
+      - name: Bounded fault regressions
+        run: python scripts/test.py --layer fault

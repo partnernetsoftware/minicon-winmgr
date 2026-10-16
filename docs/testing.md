@@ -18,7 +18,7 @@
 
 桌面层需要当前 Windows 输入桌面可用，依赖 Python Pillow（截图）、PowerShell 7（UIA）。测试先构建，再正常关闭当前会话实例，复制至 live 路径；使用独立配置，结束后恢复正常会话。不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
 
-`release` 表示当前自动化全套，不代表所有物理环境已覆盖。混合 DPI、多屏热插拔、高对比度实屏、屏幕阅读器语音、特殊管理员令牌以及小时级常驻观察仍需独立环境验收。CI 没有当前交互桌面，执行 `quality`，release workflow 另外执行全部单元测试；发布前在可用桌面运行 `release` 并审阅报告。仅构建优化二进制不会自动声称完成发布验收。
+`release` 表示当前自动化全套，不代表所有物理环境已覆盖。混合 DPI、多屏热插拔、高对比度实屏、屏幕阅读器语音、特殊管理员令牌以及小时级常驻观察仍需独立环境验收。CI 没有当前交互桌面，执行 `quality` 与独立 `fault` 层，release workflow 另外执行全部单元测试；发布前在可用桌面运行 `release` 并审阅报告。仅构建优化二进制不会自动声称完成发布验收。
 
 发布层构建目录为 `target/release-validation`，避免旧会话直接运行 `target/release` 时锁住 Cargo 硬链接产物。不会为释放构建文件而结束其他会话。桌面专项仍复制产物到 live 后运行。
 
@@ -53,3 +53,5 @@
 `python scripts/test.py --layer diagnostics` 运行有界数据/导出测试，再从真实“关于”入口打开独立原生诊断窗口，覆盖中英 × 明暗主题、默认不采样、停止/关闭/重开、新记录确认、原生保存取消和实际导出，以及窄宽布局。不替换 live、不使用全局输入，也不修改 Shell；依赖当前可用桌面和 Pillow。`python scripts/diagnostics_probe.py --case zh-dark` 可仅复查一个组合。该专项也纳入 release 入口；原生 fixture 当前使用 debug 测试构建，不能冒充优化版全应用内存验收。真实长跑和整应用资源对照仍是另外的发布要求。
 
 `quality` 层另跑 `logging::tests`，用 AST 约束无插值的静态日志文案，并在独立子进程验证文件、stderr、span 及 panic 的文本保护；不需要桌面输入，不跑完整桌面套件。`unit --filter logging::tests` 可单独运行。原生数值与布尔值保留，文本、Debug/Display 和错误链在格式化前屏蔽，即使设置 trace 也不输出；显式 CLI 查询结果和用户错误对话框不属于后台日志。该组测试使用系统临时目录，不修改正常会话日志。
+
+`fault` 另覆盖 WinHTTP 原生异步请求在静默/慢速响应头、停滞/慢速正文和断流时的取消、context/读取缓冲寿命及成功重试，以及更新 worker panic 与进度队列满后的状态恢复。仅使用 loopback 和本测试文件，不替换正常外壳；公网 DNS、代理/TLS 故障及跨进程交接另行验证。完整交接仍使用 update 层，不能因组件测试通过而省略。
