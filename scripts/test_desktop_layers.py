@@ -17,7 +17,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 class DesktopLayers(unittest.TestCase):
     def setUp(self):
-        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
+        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name).resolve()
         (self.root/'src').mkdir();(self.root/'src/main.rs').write_text('fn main() {}')
         self.restore=self.root/'normal.exe';self.restore.write_bytes(b'MZ'+b'\0'*510)
         self.candidate=self.root/'candidate.exe';self.candidate.write_bytes(b'MZ'+b'c'*510)
