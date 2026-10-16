@@ -17,11 +17,12 @@ def main():
     env.update(MINICON_SETTINGS=str(folder/'settings.conf'),MINICON_CONFIG=str(folder/'empty.conf'),
                MINICON_QUICKLAUNCH_FILE=str(folder/'pins.txt'),MINICON_LOG_DIR=str(folder/'logs'))
     (folder/'settings.conf').write_text('ui.language=en\nappearance.mode=dark\ntaskbar.position=bottom\ntaskbar.menu=false\nbehavior.hover_preview=true\n',encoding='utf-8')
-    tests=[];fixture=None;has_record=False
+    tests=[];fixture=None;has_record=False;failure=None
     cursor=w.POINT();p.u.GetCursorPos(c.byref(cursor))
     p.u.SetCursorPos.argtypes=[c.c_int,c.c_int]
     p.u.ShowWindow.argtypes=[w.HWND,c.c_int]
     p.u.SetWindowPos.argtypes=[w.HWND,w.HWND,c.c_int,c.c_int,c.c_int,c.c_int,w.UINT]
+    p.u.RedrawWindow.argtypes=[w.HWND,c.c_void_p,w.HANDLE,w.UINT]
     def check(name,value):
         tests.append(dict(name=name,passed=bool(value)))
         if not value:raise AssertionError(name)
@@ -37,6 +38,18 @@ def main():
             time.sleep(.02)
         raise AssertionError('Native feature condition timed out')
     def click(window,ident):desktop.send(p.u.GetDlgItem(window,ident),0xF5,pid=p.pid(p.message()))
+    def capture(path,window):
+        nonlocal failure
+        # Like the settings/theme probes, capture after the new text/theme has
+        # been painted, rather than racing the final control update.
+        if not p.u.RedrawWindow(window,None,None,0x185):raise RuntimeError('Native repaint failed')
+        wait(.15)
+        try:p.capture_settings(path,window)
+        except BaseException as error:
+            failure=dict(error=str(error),window_valid=bool(p.u.IsWindow(window)),
+                visible=bool(p.u.IsWindowVisible(window)),window_pid=p.pid(window),
+                app_pid=p.pid(p.message()),last_error=c.get_last_error(),resources=p.metrics())
+            raise
     def hover():
         bar=p.window('minicon_winmgr_taskbar');rect=p.rect(bar)
         # No pins or menu. The topmost fixture was present before enumeration,
@@ -73,13 +86,13 @@ def main():
                 click(diagnostic,3)
                 has_record=True
                 check(language+'_'+theme+'_stopped_summary_exportable',p.u.IsWindowEnabled(p.u.GetDlgItem(diagnostic,4)))
-                p.capture_settings(folder/(language+'-'+theme+'-diagnostics.png'),diagnostic)
+                capture(folder/(language+'-'+theme+'-diagnostics.png'),diagnostic)
                 click(diagnostic,5)
                 check(language+'_'+theme+'_close_hides_diagnostics',not p.u.IsWindowVisible(diagnostic))
                 desktop.send(info,16,pid=p.pid(p.message()))
             desktop.send(p.panel(),16,pid=p.pid(p.message()))
         preview=hover();wait(.25)
-        p.capture_settings(folder/'preview.png',preview)
+        capture(folder/'preview.png',preview)
         from PIL import Image
         pixels=list(Image.open(folder/'preview.png').convert('RGB').getdata())
         check('actual_composed_fixture_surface',sum(min(pixel)>200 for pixel in pixels)>len(pixels)*.35)
@@ -97,5 +110,5 @@ def main():
         if fixture:desktop.u.DestroyWindow(fixture)
         desktop.pump()
         p.stop();p.start(os.environ.copy())
-        (folder/'summary.json').write_text(json.dumps(dict(tests=tests,binary_sha256=s.digest(p.SOURCE)),indent=2),encoding='utf-8')
+        (folder/'summary.json').write_text(json.dumps(dict(tests=tests,failure=failure,binary_sha256=s.digest(p.SOURCE)),indent=2),encoding='utf-8')
     print(f'Actual diagnostic/preview features: {len(tests)} checks passed.',flush=True)
