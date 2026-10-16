@@ -32,7 +32,7 @@ def digest(path):
 
 
 def options(args):
-    if getattr(args,'subject','both')!='both' and args.scenario not in ['soak','docking']:
+    if getattr(args,'subject','both')!='both' and args.scenario not in ['soak','docking','shortcuts']:
         raise ValueError('Single-subject runs are reserved for soak; comparisons require both subjects')
     if args.iterations is None:args.iterations=300 if args.scenario=='windows' else 200
     for name in ('warmup', 'observe', 'recovery', 'interval'):
@@ -294,6 +294,51 @@ def docking(desktop,child,observation,config):
         if not desktop.u.DestroyWindow(hwnd):raise RuntimeError('Could not destroy maximization fixture')
 
 
+def shortcuts(desktop,child,observation,config):
+    """Verify the actual recycle-bin folder, without touching its contents."""
+    def bins():
+        command="""$ErrorActionPreference='Stop'; $shell=New-Object -ComObject Shell.Application;
+$ids=@($shell.Windows() | ForEach-Object {
+  try { if ($_.Document.Folder.Self.Path -eq '::{645FF040-5081-101B-9F08-00AA002F954E}') { [long]$_.HWND } } catch {}
+}); ConvertTo-Json -InputObject $ids -Compress"""
+        result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',command],
+            check=True,timeout=12,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        values=json.loads(result.stdout)
+        if not isinstance(values,list) or not all(type(value) is int for value in values):
+            raise RuntimeError('Unexpected recycle-bin window identity response')
+        return set(values)
+    before=bins();created=set();checks=[]
+    try:
+        for language,ident,caption in [('en',6150,'Recycle Bin'),('zh',6151,'回收站')]:
+            desktop.send(p.message(),SETTINGS,pid=child.pid)
+            panel=p.wait(lambda:p.panel() if p.panel() and p.pid(p.panel())==child.pid and p.u.IsWindowVisible(p.panel()) else None)
+            desktop.send(p.controls().get(ident),0xF5,pid=child.pid)
+            observation.wait(desktop,.2)
+            notification=p.window('minicon_winmgr_notification_panel')
+            desktop.send(notification,0x312,pid=child.pid)
+            p.wait(lambda:p.u.IsWindowVisible(notification))
+            button=p.u.GetDlgItem(notification,7)
+            if not button or p.text(button)!=caption or not p.u.IsWindowVisible(button):
+                raise RuntimeError('Localized recycle-bin shortcut is missing')
+            p.capture_settings(observation.folder/(language+'-shortcuts.png'),notification)
+            desktop.send(button,0xF5,pid=child.pid)
+            end=time.monotonic()+15
+            while True:
+                actual=bins();created|=actual-before
+                if actual:break
+                if time.monotonic()>end:raise RuntimeError('Recycle-bin folder did not open')
+                observation.wait(desktop,.1)
+            p.wait(lambda:not p.u.IsWindowVisible(notification))
+            checks.append(dict(language=language,localized_button=True,actual_namespace_opened=True))
+            desktop.send(panel,16,pid=child.pid)
+        observation.operations['shortcut_checks']=len(checks)
+    finally:
+        for hwnd in created:
+            if p.u.IsWindow(hwnd):p.u.PostMessageW(hwnd,16,0,0)
+        (observation.folder/'shortcuts.json').write_text(json.dumps(dict(checks=checks,contents_untouched=True)),encoding='utf-8')
+
+
 def main(args):
     options(args)
     candidate=args.candidate.resolve(strict=True);restore=args.restore_exe.resolve(strict=True)
@@ -357,6 +402,7 @@ def main(args):
                     observation.wait(desktop,args.warmup);observation.switch('work')
                     if args.scenario=='settings':settings(desktop,child,observation,config,args.iterations)
                     elif args.scenario=='docking':docking(desktop,child,observation,config)
+                    elif args.scenario=='shortcuts':shortcuts(desktop,child,observation,config)
                     elif args.scenario=='windows':windows(desktop,observation,args.iterations)
                     else:observation.wait(desktop,args.observe)
                     observation.switch('recovery');observation.wait(desktop,args.recovery)
@@ -406,7 +452,7 @@ if __name__=='__main__':
     parser.add_argument('--baseline',type=Path)
     parser.add_argument('--subject',choices=['both','candidate'],default='both')
     parser.add_argument('--profile',choices=['release','debug'],default='release',help='Declared build profile; verify with the build record')
-    parser.add_argument('--scenario',choices=['idle','settings','windows','soak','docking'],default='idle')
+    parser.add_argument('--scenario',choices=['idle','settings','windows','soak','docking','shortcuts'],default='idle')
     parser.add_argument('--repetitions',type=int,default=3)
     parser.add_argument('--warmup',type=float,default=300)
     parser.add_argument('--observe',type=float,default=900)

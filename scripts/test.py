@@ -145,6 +145,14 @@ def main():
                     if args.layer=='release':step('compact layout',lambda:appearance_probe.main(layout_only=True))
                     step('compact layout' if args.layer=='layout' else 'native themes and four-edge docking',lambda:appearance_probe.main(layout_only=args.layer=='layout'))
                     report['appearance_report']='target/industrial-acceptance/'+('layout.json' if args.layer=='layout' else 'appearance.json')
+                if args.layer=='release':
+                    import scenario_probe
+                    from types import SimpleNamespace
+                    for scenario in ['docking','shortcuts']:
+                        options=SimpleNamespace(candidate=args.release_binary,restore_exe=settings.LIVE,
+                            baseline=args.release_binary,subject='candidate',profile='release',scenario=scenario,
+                            repetitions=1,warmup=0,observe=1,recovery=0,interval=.2,iterations=1,fail_at=None)
+                        step('exact candidate native '+scenario,lambda options=options:scenario_probe.main(options))
             if args.layer=='release':
                 import desktop_session
                 with desktop_session.isolated(args.release_binary,args.restore_exe):desktop_checks()

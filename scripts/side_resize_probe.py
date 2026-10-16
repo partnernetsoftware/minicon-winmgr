@@ -80,6 +80,13 @@ def main():
         p.stop()
         baseline_work = work_area()
         report['baseline_work_area'] = baseline_work
+        reservation_base = baseline_work if p.window('Shell_TrayWnd') else [
+            0, 0, p.u.GetSystemMetrics(0), p.u.GetSystemMetrics(1)]
+        report['reservation_base'] = reservation_base
+        def expected_work(edge):
+            result = reservation_base.copy()
+            result[0 if edge=='left' else 2] += width() if edge=='left' else -width()
+            return result
         shutil.copy2(p.SOURCE, p.LIVE)
         p.start(environment, ['--settings']); p.show()
         report['initial_work_area'] = work_area()
@@ -92,9 +99,9 @@ def main():
         check('drag_does_not_persist_each_pixel', preference() is None)
         mouse(4)
         p.wait(lambda: preference() == 260)
-        p.wait(lambda: work_area()[0] == baseline_work[0]+width())
+        p.wait(lambda: work_area() == expected_work('left'))
         check('left_width_saved_once_on_release', abs(width()-scaled(260)) <= 2)
-        check('left_resize_updates_reserved_work_area', work_area()[0] == baseline_work[0]+width(),
+        check('left_resize_updates_reserved_work_area', work_area() == expected_work('left'),
               {'baseline': baseline_work, 'actual': work_area(), 'width': width()})
         drag_start('left', scaled(340))
         p.u.PostMessageW(bar(), 0x001F, 0, 0)  # WM_CANCELMODE, own taskbar only.
@@ -102,7 +109,7 @@ def main():
         # Release over the owned bar after cancelling capture.
         rect = p.rect(bar()); p.u.SetCursorPos(rect[2]-2,rect[1]+120); mouse(4)
         check('cancel_restores_width_without_saving', preference() == 260)
-        check('cancel_preserves_work_area', work_area()[0] == baseline_work[0]+width())
+        check('cancel_preserves_work_area', work_area() == expected_work('left'))
         drag_start('left', scaled(340))
         escape = p.INPUT(1, p.UNION(key=p.KEY(27,0,0,0,0)))
         assert p.u.SendInput(1,c.byref(escape),c.sizeof(escape)) == 1
@@ -117,15 +124,15 @@ def main():
         p.wait(lambda: p.checked(6143) and abs(width()-scaled(260)) <= 2)
         drag_start('right', scaled(320)); mouse(4)
         p.wait(lambda: preference() == 320)
-        p.wait(lambda: work_area()[0] == baseline_work[0] and work_area()[2] == baseline_work[2]-width())
+        p.wait(lambda: work_area() == expected_work('right'))
         check('right_inner_edge_drags_in_reverse_direction', abs(width()-scaled(320)) <= 2, width())
         check('right_resize_restores_old_edge_and_reserves_new_width',
-              work_area()[0] == baseline_work[0] and work_area()[2] == baseline_work[2]-width())
+              work_area() == expected_work('right'))
         drag_start('right', scaled(80))
         check('minimum_width_is_enforced_while_dragging', abs(width()-scaled(160)) <= 2)
         mouse(4); p.wait(lambda: preference() == 160)
         drag_start('right', scaled(10000))
-        expected_max = min(scaled(480), (baseline_work[2]-baseline_work[0])//3)
+        expected_max = min(scaled(480), (reservation_base[2]-reservation_base[0])//3)
         check('maximum_width_leaves_desktop_space', abs(width()-expected_max) <= 2, width())
         mouse(4); time.sleep(.1)
         drag_start('right', scaled(320)); mouse(4)
@@ -142,6 +149,10 @@ def main():
         p.show()
         check('shell_registration_unchanged', p.shell_settings() == shell)
         report['passed'] = True
+    except Exception as error:
+        report['error'] = type(error).__name__
+        report['failure_state'] = dict(width=width() if bar() else None, work_area=work_area(), preference=preference())
+        raise
     finally:
         mouse(4)
         p.stop()
