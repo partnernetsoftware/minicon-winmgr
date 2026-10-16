@@ -25,7 +25,7 @@
 背景：`SHAppBarMessage(ABM_NEW)` 需 **explorer 充当 AppBar broker**；explorer 不在时注册失败，
 最大化窗口会钻到栏下面。为此我们**自己收窄工作区**：
 
-- `taskbar::reserve_workarea`：AppBar 失败时 `SPI_SETWORKAREA` 把底边 `BAR_H` 留出；收窄时把
+- `taskbar::reserve_workarea`：无 AppBar broker 时，以完整显示器边界重新计算当前所选边的保留带，避免继承旧外壳留下的底部空白；原始工作区仅用于退出恢复，不再作为新增保留带的基准。当前无 broker 回退仍只设置主屏；多屏需要单独验收。收窄成功时把
   `orig`/`mine` 两个矩形写入 **exe 旁 `minicon-workarea.state`**。
 - 正常退出：`taskbar::shutdown()`（在 `run_companion` 里 `window::run()` 之后调用）**主动 `DestroyWindow` 各栏**
   → 触发 `WM_DESTROY → restore_workarea` 并删状态文件。

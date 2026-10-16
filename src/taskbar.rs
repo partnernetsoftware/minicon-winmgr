@@ -417,8 +417,9 @@ static ACRYLIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 static ORIG_WORKAREA: Mutex<Option<RECT>> = Mutex::new(None);
 
 /// Reserves the selected edge so maximized windows avoid our bar when
-/// AppBar docking failed. Captures the original area
-/// once so it can be restored faithfully, and persists both rectangles so a run
+/// AppBar docking failed. The brokerless bar owns a strip of the full monitor,
+/// rather than adding its strip to a possibly stale reservation from a prior shell.
+/// Captures the original area once so it can be restored faithfully, and persists both rectangles so a run
 /// that is *killed* (task manager, `shellctl stop`) can still be recovered.
 fn reserve_workarea(area: (i32, i32, i32, i32), hwnd: HWND) {
     let mut guard = lock_or_recover(&ORIG_WORKAREA);
@@ -440,8 +441,14 @@ fn reserve_workarea(area: (i32, i32, i32, i32), hwnd: HWND) {
             }
             *guard = Some(current);
         }
+        let (x, y, width, height) = area;
         let mut target = crate::dock::reserve(
-            guard.unwrap(),
+            RECT {
+                left: x,
+                top: y,
+                right: x + width,
+                bottom: y + height,
+            },
             crate::config::current().position,
             thickness(Some(hwnd), area.2),
         );
@@ -455,6 +462,7 @@ fn reserve_workarea(area: (i32, i32, i32, i32), hwnd: HWND) {
                 %err,
                 "reserve_workarea: SPI_SETWORKAREA refused; the bar may overlap maximised windows"
             );
+            return;
         }
         if let Some(orig) = *guard {
             save_workarea_state(&orig, &target);
@@ -1526,9 +1534,8 @@ fn reposition() {
         return;
     }
     cancel_hover();
-    // Keep the lifetime baseline. Restoring and recapturing between edges can
-    // capture an intermediate work area adjusted by another shell participant.
-    // reserve_workarea replaces our reservation from that baseline atomically.
+    // Preserve the original rectangle for teardown; each brokerless reservation
+    // is recomputed from monitor bounds so old edges never accumulate.
     for (i, key, area, appbar) in changed {
         if appbar {
             set_appbar_pos(hwnd_from(key), area)

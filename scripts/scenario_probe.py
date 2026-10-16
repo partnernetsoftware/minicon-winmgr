@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import secrets
 import subprocess
 import sys
 import time
@@ -31,6 +32,8 @@ def digest(path):
 
 
 def options(args):
+    if getattr(args,'subject','both')!='both' and args.scenario not in ['soak','docking']:
+        raise ValueError('Single-subject runs are reserved for soak; comparisons require both subjects')
     if args.iterations is None:args.iterations=300 if args.scenario=='windows' else 200
     for name in ('warmup', 'observe', 'recovery', 'interval'):
         if not math.isfinite(getattr(args, name)):
@@ -161,7 +164,7 @@ class Desktop:
 class Observation:
     def __init__(self,process,folder,interval,scenario):
         self.process,self.folder,self.interval=process,folder,interval
-        self.started=time.monotonic();self.cpu=time.process_time();self.next=0
+        self.started=time.monotonic();self.started_utc_ns=time.time_ns();self.cpu=time.process_time();self.next=0
         self.operations=dict(settings_changes=0,settings_cycles=0,windows_created=0,windows_destroyed=0)
         self.rows=[];self.phase='warmup';self.phases=[dict(phase='warmup',elapsed_seconds=0)];self.scenario=scenario
         self.raw=(folder/'samples.csv').open('x',newline='',encoding='utf-8')
@@ -172,7 +175,7 @@ class Observation:
         if elapsed>86400:raise RuntimeError('Scenario exceeded the 24-hour driver limit')
         if elapsed<self.next and not force:return
         if len(self.rows)>=m.MAX_SAMPLES:raise RuntimeError('Scenario sample cap reached')
-        row=dict(elapsed_seconds=round(elapsed,4),phase=self.phase,**self.process.sample())
+        row=dict(elapsed_seconds=elapsed,phase=self.phase,**self.process.sample())
         self.rows.append(row);self.writer.writerow(row);self.raw.flush()
         self.next=(math.floor(elapsed/self.interval)+1)*self.interval
 
@@ -192,6 +195,7 @@ class Observation:
         result=dict(schema=2,scenario=self.scenario,binary_sha256=self.process.image_hash,
             os_build=sys.getwindowsversion().build,interval_seconds=self.interval,
             elapsed_seconds=round(time.monotonic()-self.started,3),sample_count=len(self.rows),
+            started_utc_ns=self.started_utc_ns,finished_utc_ns=time.time_ns(),process_created_filetime=self.process.created,
             observer_and_driver_cpu_seconds=round(time.process_time()-self.cpu,4),stop_reason=reason,
             phases=self.phases,operations=self.operations,metrics=m.summarize(self.rows),long_run_passed=False,
             phase_metrics={phase:m.summarize([row for row in self.rows if row['phase']==phase])
@@ -246,20 +250,71 @@ def windows(desktop,observation,count):
         if failed:raise RuntimeError('Owned fixture cleanup was incomplete')
 
 
+def docking(desktop,child,observation,config):
+    """Exercise actual maximization, not just our rectangle calculations."""
+    desktop.u.ShowWindow.argtypes=[w.HWND,c.c_int];desktop.u.ShowWindow.restype=w.BOOL
+    dwm=c.WinDLL('dwmapi')
+    dwm.DwmGetWindowAttribute.argtypes=[w.HWND,w.DWORD,c.c_void_p,w.DWORD]
+    dwm.DwmGetWindowAttribute.restype=c.c_long
+    hwnd=desktop.u.CreateWindowExW(0,'STATIC','Winmgr docking acceptance',
+        0x10CF0000,300,150,500,350,None,None,None,None)
+    if not hwnd:raise RuntimeError('Could not create maximization fixture')
+    try:
+        desktop.send(p.message(),SETTINGS,pid=child.pid)
+        panel=p.wait(lambda:p.panel() if p.panel() and p.pid(p.panel())==child.pid and p.u.IsWindowVisible(p.panel()) else None)
+        display=desktop.display();bounds=[0,0,display['primary_width'],display['primary_height']]
+        checks=[]
+        for edge,ident in [('bottom',6141),('left',6142),('bottom',6141),('right',6143),('top',6140),('left',6142),('right',6143),('bottom',6141)]:
+            desktop.send(p.controls().get(ident),0xF5,pid=child.pid)
+            end=time.monotonic()+5
+            while 'taskbar.position='+edge not in config.read_text(encoding='utf-8-sig').replace(' ',''):
+                if time.monotonic()>end:raise RuntimeError('Docking preference did not save')
+                observation.wait(desktop,.02)
+            observation.wait(desktop,.15)
+            bar=p.rect(p.window('minicon_winmgr_taskbar'))
+            expected=bounds.copy()
+            expected[{'left':0,'top':1,'right':2,'bottom':3}[edge]]=bar[{'left':2,'top':3,'right':0,'bottom':1}[edge]]
+            actual=desktop.workarea()
+            checks.append(dict(edge=edge,expected=expected,actual=actual))
+            (observation.folder/'docking.json').write_text(json.dumps(checks,indent=2),encoding='utf-8')
+            if actual!=expected:raise RuntimeError('Docking retained a stale work-area edge: '+edge)
+            desktop.u.ShowWindow(hwnd,9);desktop.u.ShowWindow(hwnd,3)
+            observation.wait(desktop,.15)
+            frame=w.RECT()
+            if dwm.DwmGetWindowAttribute(hwnd,9,c.byref(frame),c.sizeof(frame))<0:
+                raise RuntimeError('Could not inspect maximized visible frame')
+            visible=[frame.left,frame.top,frame.right,frame.bottom]
+            checks[-1]['maximized_frame']=visible
+            (observation.folder/'docking.json').write_text(json.dumps(checks,indent=2),encoding='utf-8')
+            if any(abs(a-b)>1 for a,b in zip(visible,expected)):
+                raise RuntimeError('Maximized fixture does not fill the current work area: '+edge)
+        desktop.send(panel,16,pid=child.pid)
+        observation.operations['docking_checks']=len(checks)
+    finally:
+        if not desktop.u.DestroyWindow(hwnd):raise RuntimeError('Could not destroy maximization fixture')
+
+
 def main(args):
     options(args)
     candidate=args.candidate.resolve(strict=True);restore=args.restore_exe.resolve(strict=True)
     baseline=(args.baseline or restore).resolve(strict=True)
     desktop=Desktop();original=m.Process(p.pid(p.message()))
     child=None;closed=False;report=None
-    output=ROOT/'target/test-reports/scenarios'/str(time.time_ns());output.mkdir(parents=True)
+    base=ROOT/'target/test-reports/scenarios';base.mkdir(parents=True,exist_ok=True)
+    cohort_file=base/'cohort.id'
+    try:
+        with cohort_file.open('x',encoding='ascii') as file:file.write(secrets.token_hex(16))
+    except FileExistsError:pass
+    with cohort_file.open(encoding='ascii') as file:cohort=file.read(65)
+    if len(cohort)!=32 or any(char not in '0123456789abcdef' for char in cohort):raise RuntimeError('Invalid local cohort identifier')
+    output=base/str(time.time_ns());output.mkdir()
     env=os.environ.copy();shell=p.shell_settings();area=desktop.workarea()
     try:
         if desktop.image(original)!=restore or not desktop.same_user_session(original):
             raise RuntimeError('Current shell does not match the explicitly named restore executable/user/session')
         expected=digest(restore)
         if original.image_hash!=expected:raise RuntimeError('Original image changed before the test')
-        report=dict(schema=1,scenario=args.scenario,runs=[],passed=False,restored=False,
+        report=dict(schema=2,cohort=cohort,declared_profile=getattr(args,'profile','release'),scenario=args.scenario,runs=[],passed=False,restored=False,
             original_sha256=expected,original_stopped=False,original_preserved=False,role='companion',repetitions=args.repetitions,
             warmup_seconds=args.warmup,observe_seconds=args.observe,recovery_seconds=args.recovery,
             iterations=args.iterations,interval_seconds=args.interval,display=desktop.display(),
@@ -278,6 +333,7 @@ def main(args):
         if getattr(args,'fail_at',None)=='after-stop':raise RuntimeError('Injected failure after original stop')
         for repetition in range(args.repetitions):
             subjects=[('baseline',baseline),('candidate',candidate)]
+            if getattr(args,'subject','both')=='candidate':subjects=[('candidate',candidate)]
             if repetition%2:subjects.reverse()
             for subject,source in subjects:
                 folder=output/f'{repetition+1}-{subject}';folder.mkdir()
@@ -300,6 +356,7 @@ def main(args):
                         'resources' if args.scenario=='windows' else args.scenario)
                     observation.wait(desktop,args.warmup);observation.switch('work')
                     if args.scenario=='settings':settings(desktop,child,observation,config,args.iterations)
+                    elif args.scenario=='docking':docking(desktop,child,observation,config)
                     elif args.scenario=='windows':windows(desktop,observation,args.iterations)
                     else:observation.wait(desktop,args.observe)
                     observation.switch('recovery');observation.wait(desktop,args.recovery)
@@ -347,7 +404,9 @@ if __name__=='__main__':
     parser.add_argument('--candidate',type=Path,required=True)
     parser.add_argument('--restore-exe',type=Path,required=True)
     parser.add_argument('--baseline',type=Path)
-    parser.add_argument('--scenario',choices=['idle','settings','windows','soak'],default='idle')
+    parser.add_argument('--subject',choices=['both','candidate'],default='both')
+    parser.add_argument('--profile',choices=['release','debug'],default='release',help='Declared build profile; verify with the build record')
+    parser.add_argument('--scenario',choices=['idle','settings','windows','soak','docking'],default='idle')
     parser.add_argument('--repetitions',type=int,default=3)
     parser.add_argument('--warmup',type=float,default=300)
     parser.add_argument('--observe',type=float,default=900)

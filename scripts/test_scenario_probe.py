@@ -61,7 +61,7 @@ class Child:
 
 class Process:
     def __init__(self,fixture,pid):
-        self.fixture=fixture;self.pid=pid;self.image_hash=s.digest(fixture.paths[pid])
+        self.fixture=fixture;self.pid=pid;self.created=134000000000000000+pid;self.image_hash=s.digest(fixture.paths[pid])
     def close(self):pass
     def sample(self):return {key:10 for key in s.m.METRICS}
 
