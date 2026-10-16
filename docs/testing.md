@@ -14,13 +14,14 @@
 | `python scripts/test.py --layer interaction` | 冷启动按需初始化、Run 双语候选采用与窗口复用、四边任务栏焦点返回、设置重启提示；0.1.8 专项 |
 | `python scripts/test.py --layer update` | 本地 HTTP 故障、双语按钮、禁止启动联网、校验失败、暂存篡改、保存阻止重启、两版本真实交接、文件占用和启动失败回滚；独立目录，不替换用户安装 |
 | `python scripts/test.py --layer settings` | 构建 debug；设置原生交互、来源、保存故障、UIA 与窗口复用；省略完整 Run 历史/IME 回归 |
-| `python scripts/test.py --layer release` | 格式、严格 Clippy、release 全部单元测试、release 构建，再用该产物跑更新/回滚、按需初始化/交互、设置、完整 Run、语言/布局、主题与四边桌面回归 |
+| `python scripts/test.py --layer resource-gate --release-binary <candidate> --baseline <baseline> --campaign <local-summary> ...` | 只读核对三轮对照和先 2h 后 8h 原始证据；不等于完整验收 |
+| `python scripts/test.py --layer release --release-binary <candidate> --restore-exe <normal-running-exe> --baseline <baseline> --campaign <local-summary> ...` | 资源证据门槛、格式、严格 Clippy、release 全部单元、组件资源/更新内存、诊断 fixture 及实际候选的侧栏/更新/交互/设置/Run/布局/主题/换边/回收站回归 |
 
 桌面层需要当前 Windows 输入桌面可用，依赖 Python Pillow（截图）、PowerShell 7（UIA）。测试先构建，再正常关闭当前会话实例，复制至 live 路径；使用独立配置，结束后恢复正常会话。不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
 
 `release` 表示当前自动化全套，不代表所有物理环境已覆盖。混合 DPI、多屏热插拔、高对比度实屏、屏幕阅读器语音、特殊管理员令牌以及小时级常驻观察仍需独立环境验收。CI 没有当前交互桌面，执行 `quality` 与独立 `fault` 层，release workflow 另外执行全部单元测试；发布前在可用桌面运行 `release` 并审阅报告。仅构建优化二进制不会自动声称完成发布验收。
 
-发布层构建目录为 `target/release-validation`，避免旧会话直接运行 `target/release` 时锁住 Cargo 硬链接产物。不会为释放构建文件而结束其他会话。桌面专项仍复制产物到 live 后运行。
+发布层构建目录为 `target/release-validation`，避免旧会话直接运行 `target/release` 时锁住 Cargo 硬链接产物。实际候选来自显式指定的 `--release-binary`（如已下载的草稿资产），不会用重建结果替换它。桌面探针的 live 路径隔离在忽略目录，结束恢复显式指定的原运行路径、摘要、工作区与 Shell 登记，不覆盖原外壳文件，也不结束其他会话。
 
 更新层会将当前源码回移到隔离的 0.1.8 测试构建，以验证真实 0.1.9 目标的两版本交接；该 fixture 不是历史公开版。服务仅监听 loopback，验收报告明确记录两份二进制 SHA-256。后台助手只允许本用户/本会话，并等旧进程退出后才修改本测试安装。成功后清理本轮自建用例目录，保留事务事实与截图。
 
@@ -38,7 +39,7 @@
 
 原始数据写入每次唯一的 observation 目录，不覆盖上次实验。曲线依赖 matplotlib；采样本身只使用 Python 标准库。独立工具 `scripts/memory_probe.py` 也要求显式 PID 与时长。Private Working Set 只在确认支持的系统尝试，缺失值保持为空。当前层通过只代表工具和执行完整，不等于 0.1.10 的长期门槛已通过。
 
-`python scripts/test.py --layer fault` 当前覆盖 pin 文件超长/损坏/替换失败/外部修改/占用、交接清单读取边界、流式暂存故障保护，以及 loopback HTTP 大小/截断/状态码/预算与增量哈希验证。它不代表完整网络超时、跨进程交接或长跑矩阵；跨进程交接继续使用 update 层。发布长跑门禁尚待实现，现有 release 入口尚未声称覆盖新的 0.1.10 长跑要求。
+`python scripts/test.py --layer fault` 当前覆盖 pin 文件超长/损坏/替换失败/外部修改/占用、交接清单读取边界、流式暂存故障保护，以及 loopback HTTP 大小/截断/状态码/预算与增量哈希验证。它不代表完整网络超时、跨进程交接或长跑矩阵；跨进程交接继续使用 update 层。发布另要求 resource-gate 的真实证据；校验器自身使用合成数据测试，不能代替长跑。
 
 `python scripts/test.py --layer side-resize` 构建 debug，使用隔离偏好操作本会话任务栏内边缘，检查左右拖宽、取消、提交与重启持久化；finally 恢复原 live 二进制与环境。该层使用真实鼠标输入，不能与其他桌面层或长跑同时执行。
 
@@ -62,12 +63,13 @@
 python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario idle
 python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario settings
 python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario windows
-python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario soak --observe 28800 --repetitions 1
+python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario soak --subject candidate --observe 7200 --repetitions 1
+python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario soak --subject candidate --observe 28800 --repetitions 1
 ```
 
-默认基线为原正常 exe，也可显式指定 `--baseline`；须自行确认两份产物的构建配置，工具记录二进制摘要，不从文件名推断优化级别。默认三次新进程对照，交替先后顺序；5 分钟预热、15 分钟空闲操作期、10 分钟恢复。设置默认 200 个完整循环，窗口默认 300 次、最多同时 8 个本工具窗口；这些动作期间可有不等距采样，使用实际时间，不伪造每 5 秒都有样本。`--warmup 0 --observe 1 --recovery 0 --repetitions 1` 只用于 idle 驱动短测，不满足协议前提；settings/windows 还应指定很小的 --iterations。soak 最少两小时，示例八小时每个被测进程执行一次，基线和候选合计仍需十六小时以上；长跑结束不自动等于通过。
+默认基线为原正常 exe，也可显式指定 `--baseline`；须自行确认两份产物的构建配置，工具记录二进制摘要，不从文件名推断优化级别。默认三次新进程对照，交替先后顺序；5 分钟预热、15 分钟空闲操作期、10 分钟恢复。设置默认 200 个完整循环，窗口默认 300 次、最多同时 8 个本工具窗口；这些动作期间可有不等距采样，使用实际时间，不伪造每 5 秒都有样本。`--warmup 0 --observe 1 --recovery 0 --repetitions 1` 用于驱动短测，不满足资源验收前提；settings/windows 还应指定很小的 --iterations。soak 最少两小时，先完成 2h 再独立进行 8h；指定 `--subject candidate` 避免重复基线长跑，结束不自动等于通过。
 
-该入口会暂时正常关闭当前桌面的 winmgr，并在 finally 从原路径恢复，要求输入桌面可访问及普通用户权限，不使用全局鼠标/键盘，不修改注册或覆盖原二进制。当前真实生命周期尚待实机验证；先运行短测，再安排长观察，不能与其他桌面测试并发。控制器被强制结束时须参考本轮忽略目录内的恢复记录人工启动原实例。原始报告仅在 target；其中恢复记录有本地路径，禁止复制到公共文档。
+该入口会暂时正常关闭当前桌面的 winmgr，并在 finally 从原路径恢复，要求输入桌面可访问及普通用户权限，不使用全局鼠标/键盘，不修改注册或覆盖原二进制。真实短测恢复、四边最大化及中英文回收站打开已验证；正式资源对照与长观察仍待完成。不能与其他桌面测试并发。控制器被强制结束时须参考本轮忽略目录内的恢复记录人工启动原实例。原始报告仅在 target；其中恢复记录有本地路径，禁止复制到公共文档。
 
 `python scripts/test_scenario_probe.py` 的 10 项模拟生命周期检查不需要桌面，也纳入 quality 和 release。模拟通过只证明驱动控制流，不能证明 native 恢复成功或应用资源稳定。曲线可用现有 memory_probe 的 `--plot-only` 从每个 run 目录生成；缺少 matplotlib 时保留数据后再生成。
 

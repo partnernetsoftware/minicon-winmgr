@@ -2,7 +2,7 @@
 pub(crate) use crate::settings_panel::{allow_exit, filter, install, show, shutdown, toggle_from};
 use crate::win_util::wide;
 use windows::Win32::UI::WindowsAndMessaging::{
-    IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_OK, MB_YESNO, MessageBoxW,
+    IDOK, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_OK, MB_OKCANCEL, MessageBoxW,
 };
 use windows::core::PCWSTR;
 fn info_box(message: &str) {
@@ -28,7 +28,7 @@ pub(crate) fn do_replace() {
     }
     // Taking over is immediate now: the desktop shell that is running in this
     // session gets stopped, not just the registry value written. That closes
-    // the user's desktop, so it is confirmed first (default: No).
+    // the user's desktop, so it is confirmed first (default: Cancel).
     let text = wide(if crate::i18n::language() == crate::i18n::Language::En {
         "Replace the desktop shell with minicon-winmgr now?\n\nThe current shell (Explorer) will close, including its taskbar and desktop icons. Minicon will provide the taskbar and remain the shell at the next sign-in.\n\nContinue?"
     } else {
@@ -44,10 +44,10 @@ pub(crate) fn do_replace() {
             crate::settings_panel::owner(),
             PCWSTR(text.as_ptr()),
             PCWSTR(caption.as_ptr()),
-            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2,
+            MB_OKCANCEL | MB_ICONINFORMATION | MB_DEFBUTTON2,
         )
     };
-    if answer != IDYES {
+    if answer != IDOK {
         return;
     }
 
@@ -92,7 +92,7 @@ pub(crate) fn do_replace() {
 }
 
 pub(crate) fn do_rollback() {
-    // Confirm, defaulting to "No" — this hands the desktop back to Explorer.
+    // Confirm, defaulting to Cancel — this hands the desktop back to Explorer.
     // When *we* are the shell the handover completes at the next sign-in (our
     // own bar is holding the session and cannot restart Explorer under itself),
     // so say so instead of over-promising.
@@ -136,10 +136,10 @@ pub(crate) fn do_rollback() {
             crate::settings_panel::owner(),
             PCWSTR(text.as_ptr()),
             PCWSTR(caption.as_ptr()),
-            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2,
+            MB_OKCANCEL | MB_ICONINFORMATION | MB_DEFBUTTON2,
         )
     };
-    if answer != IDYES {
+    if answer != IDOK {
         return;
     }
     match crate::shell_swap::give_back() {

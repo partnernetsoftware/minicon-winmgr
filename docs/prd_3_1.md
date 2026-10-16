@@ -64,7 +64,7 @@ MINICON_CONFIRM_SHELL=yes "<repo>\target\debug\minicon-winmgr.exe" --shell-give-
 - **接管桌面（立即生效）**：先备份当前 `Shell` 到 exe 旁 `shell-backup.txt`（只写一次），
   再 `replace` 注册表，随后**停止本会话外壳**（见 §1b）。
 - **还原系统桌面（立即生效）**：读 `shell-backup.txt` → `restore` → 重新开启自动重启 → 脱附重启 `explorer.exe`；
-  **无备份则拒绝**。带 **MessageBox 二次确认（默认"否"）**。
+  **无备份则拒绝**。带 **MessageBox 二次确认**；0.1.10 改为确定/取消，默认取消，Esc 或关闭确认框不执行切换。
 
 ## 6. 开发期热替换
 `scripts/hotswap.py`：Windows 不能覆盖运行中的 exe，但能改名——脚本先**改名移走在跑的 exe**，
