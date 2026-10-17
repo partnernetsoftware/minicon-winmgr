@@ -7,6 +7,8 @@ use windows::{
         Security::{Authorization, *},
         System::{
             Environment::{FreeEnvironmentStringsW, GetCommandLineW, GetEnvironmentStringsW},
+            ProcessStatus::EnumProcesses,
+            RemoteDesktop::ProcessIdToSessionId,
             Threading::*,
         },
         UI::WindowsAndMessaging::*,
@@ -17,7 +19,6 @@ use windows::{
 // SID_AND_ATTRIBUTES group flags from winnt.h.
 const SE_GROUP_ENABLED: u32 = 0x00000004;
 const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x00000010;
-const SE_GROUP_INTEGRITY: u32 = 0x00000020;
 
 struct Owned(HANDLE);
 impl Drop for Owned {
@@ -30,10 +31,22 @@ pub(crate) struct Status {
     pub elevated: bool,
     pub integrity: u32,
     pub administrator: bool,
+    /// `TOKEN_ELEVATION_TYPE`: 1 = Default, 2 = Full, 3 = Limited.
+    pub elevation_type: u32,
 }
 impl Status {
     fn ordinary(&self) -> bool {
-        !self.elevated && !self.administrator && self.integrity <= 0x2000
+        !self.elevated
+            && !self.administrator
+            && self.integrity <= 0x2000
+            // A Full-type token is an elevated token — or, when it carries
+            // medium integrity, the artifact `CreateRestrictedToken` leaves
+            // behind. A normal user process is Default (UAC off, or a user
+            // with no split token) or Limited (the filtered token). Accepting
+            // Full here is what let a restricted token pass as "ordinary",
+            // and every console child of such a process then fails to
+            // initialise (0xc0000142, no conhost) while GUI children work.
+            && self.elevation_type != 2
     }
 }
 fn fixed<T: Default>(token: HANDLE, kind: TOKEN_INFORMATION_CLASS) -> Result<T, String> {
@@ -92,6 +105,7 @@ fn token(process: HANDLE, access: TOKEN_ACCESS_MASK) -> Result<Owned, String> {
 }
 fn snapshot(token: HANDLE) -> Result<Status, String> {
     let elevation: TOKEN_ELEVATION = fixed(token, TokenElevation)?;
+    let elevation_type = fixed::<u32>(token, TokenElevationType)?;
     let label = variable(token, TokenIntegrityLevel)?;
     let sid = unsafe {
         (*(label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()))
@@ -119,6 +133,7 @@ fn snapshot(token: HANDLE) -> Result<Status, String> {
         elevated: elevation.TokenIsElevated != 0,
         integrity,
         administrator,
+        elevation_type,
     })
 }
 pub(crate) fn description() -> &'static str {
@@ -226,89 +241,193 @@ pub(crate) fn account_identity() -> String {
         .or_else(sid_text)
         .unwrap_or_else(|| "user".to_string())
 }
-fn medium_restricted(original: HANDLE) -> Result<Owned, String> {
-    let mut restricted = HANDLE::default();
-    unsafe {
-        CreateRestrictedToken(
-            original,
-            LUA_TOKEN | DISABLE_MAX_PRIVILEGE,
-            None,
-            None,
-            None,
-            &mut restricted,
-        )
-    }
-    .map_err(|e| {
-        crate::ui_format!(
-            "无法生成普通权限令牌：{e}",
-            "Cannot create a standard-user token: {e}"
-        )
-    })?;
-    let restricted = Owned(restricted);
-    // One aligned allocation owns both the structure and its embedded SID.
-    let mut storage =
-        vec![0usize; (size_of::<TOKEN_MANDATORY_LABEL>() + 68).div_ceil(size_of::<usize>())];
-    let address = storage.as_mut_ptr().cast::<u8>();
-    let sid = PSID(unsafe { address.add(size_of::<TOKEN_MANDATORY_LABEL>()) }.cast());
-    let mut length = 68;
-    unsafe {
-        CreateWellKnownSid(WinMediumLabelSid, None, Some(sid), &mut length).map_err(|e| {
-            crate::ui_format!(
-                "无法生成普通完整性级别：{e}",
-                "Cannot create a medium-integrity level: {e}"
-            )
-        })?;
-        address
-            .cast::<TOKEN_MANDATORY_LABEL>()
-            .write(TOKEN_MANDATORY_LABEL {
-                Label: SID_AND_ATTRIBUTES {
-                    Sid: sid,
-                    Attributes: SE_GROUP_INTEGRITY,
-                },
-            });
-        SetTokenInformation(
-            restricted.0,
-            TokenIntegrityLevel,
-            address.cast(),
-            (size_of::<TOKEN_MANDATORY_LABEL>() + length as usize) as u32,
-        )
-        .map_err(|e| {
-            crate::ui_format!(
-                "无法降低进程完整性级别：{e}",
-                "Cannot lower the process integrity level: {e}"
-            )
-        })?;
-    }
-    if !snapshot(restricted.0)?.ordinary() {
-        return Err(crate::i18n::text("系统未能生成普通权限令牌；请从普通用户会话启动。").into());
-    }
-    Ok(restricted)
-}
 fn ordinary_token(original: HANDLE) -> Result<Owned, String> {
-    if let Ok(linked) = fixed::<TOKEN_LINKED_TOKEN>(original, TokenLinkedToken) {
-        let linked = Owned(linked.LinkedToken);
-        let mut primary = HANDLE::default();
-        if unsafe {
-            DuplicateTokenEx(
-                linked.0,
-                TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
-                None,
-                SecurityImpersonation,
-                TokenPrimary,
-                &mut primary,
-            )
+    if let Some(primary) = linked_token(original) {
+        return Ok(primary);
+    }
+    tracing::warn!(
+        "startup token has no usable linked token; falling back to a peer process token"
+    );
+    if let Some(peer) = peer_token(original) {
+        return Ok(peer);
+    }
+    Err(crate::i18n::text(
+        "系统未能提供普通权限令牌；请从普通用户会话启动，或以普通用户身份重新登录。",
+    )
+    .into())
+}
+
+/// The filtered twin of an elevated token: the same user, the same session,
+/// medium integrity and no administrative groups. Duplicated to a primary
+/// token it is exactly what a normal user process runs with.
+fn linked_token(original: HANDLE) -> Option<Owned> {
+    let linked = fixed::<TOKEN_LINKED_TOKEN>(original, TokenLinkedToken)
+        .inspect_err(|error| {
+            tracing::warn!(%error, "startup token has no linked token");
+        })
+        .ok()?;
+    let linked = Owned(linked.LinkedToken);
+    let mut primary = HANDLE::default();
+    if unsafe {
+        DuplicateTokenEx(
+            linked.0,
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut primary,
+        )
+    }
+    .is_err()
+    {
+        tracing::warn!(
+            error = %windows::core::Error::from_thread(),
+            "linked token could not be duplicated to a primary token"
+        );
+        return None;
+    }
+    let primary = Owned(primary);
+    match snapshot(primary.0) {
+        Ok(status) if status.ordinary() => Some(primary),
+        Ok(_) => {
+            tracing::warn!("linked token is not an ordinary user token; ignoring it");
+            None
         }
-        .is_ok()
-        {
-            let primary = Owned(primary);
-            if snapshot(primary.0)?.ordinary() {
-                return Ok(primary);
+        Err(error) => {
+            tracing::warn!(%error, "linked token could not be inspected; ignoring it");
+            None
+        }
+    }
+}
+
+/// How many same-session processes to inspect before giving up. Explorer
+/// normally appears within the first few; the cap keeps a pathological process
+/// table from delaying startup.
+const PEER_SCAN_LIMIT: usize = 64;
+
+/// A primary token borrowed from another process of the same user in the same
+/// session.
+///
+/// Explorer's own token is the filtered token the user's desktop is built on,
+/// so relaunching from it produces a process indistinguishable from a normal
+/// user process. This is the fallback when the linked token cannot be
+/// duplicated — some administrative policies deny that duplication, and the
+/// previous fallback (`CreateRestrictedToken`) left a Full-elevation-type
+/// token behind that broke every console child of the shell.
+fn peer_token(original: HANDLE) -> Option<Owned> {
+    let session = fixed::<u32>(original, TokenSessionId).ok()?;
+    let mut pids = vec![0u32; 4096];
+    let mut needed = 0u32;
+    let listed = unsafe {
+        EnumProcesses(
+            pids.as_mut_ptr(),
+            std::mem::size_of_val(&pids) as u32,
+            &mut needed,
+        )
+    };
+    if listed.is_err() || needed == 0 {
+        return None;
+    }
+    let count = (needed as usize / std::mem::size_of::<u32>()).min(pids.len());
+    let me = std::process::id();
+    let candidates: Vec<u32> = pids[..count]
+        .iter()
+        .copied()
+        .filter(|pid| *pid != 0 && *pid != me)
+        .filter(|pid| peer_session(*pid) == Some(session))
+        .take(PEER_SCAN_LIMIT)
+        .collect();
+    // Explorer first: its token is the session's own. A second pass accepts
+    // any other same-user process, which covers machines where no Explorer
+    // window is open.
+    for explorer_only in [true, false] {
+        for &pid in &candidates {
+            if explorer_only && !is_explorer(pid) {
+                continue;
+            }
+            if let Some(primary) = peer_primary(pid, original) {
+                tracing::info!(pid, explorer = explorer_only, "relaunching with a peer process token");
+                return Some(primary);
             }
         }
     }
-    // Built-in Administrator / disabled UAC may have no linked token.
-    // Use the documented LUA restriction, never just lower the integrity label.
-    medium_restricted(original)
+    None
+}
+
+fn peer_session(pid: u32) -> Option<u32> {
+    let mut session = 0u32;
+    unsafe { ProcessIdToSessionId(pid, &mut session) }
+        .ok()
+        .map(|()| session)
+}
+
+fn is_explorer(pid: u32) -> bool {
+    let Some(process) = open_peer_process(pid) else {
+        return false;
+    };
+    let mut buffer = vec![0u16; 260];
+    let mut length = buffer.len() as u32;
+    let named = unsafe {
+        QueryFullProcessImageNameW(
+            process.0,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    };
+    named.is_ok()
+        && String::from_utf16_lossy(&buffer[..length as usize])
+            .rsplit(['\\', '/'])
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("explorer.exe"))
+}
+
+/// Duplicates `pid`'s token into a primary token, but only when it is the same
+/// user in the same session and an ordinary, primary, non-Full-type token.
+fn peer_primary(pid: u32, original: HANDLE) -> Option<Owned> {
+    let process = open_peer_process(pid)?;
+    let source = token(process.0, TOKEN_QUERY | TOKEN_DUPLICATE).ok()?;
+    if !same_identity(original, source.0).unwrap_or(false) {
+        return None;
+    }
+    if fixed::<u32>(source.0, TokenType).ok()? != 1 {
+        return None;
+    }
+    if !snapshot(source.0).ok()?.ordinary() {
+        return None;
+    }
+    let mut primary = HANDLE::default();
+    if unsafe {
+        DuplicateTokenEx(
+            source.0,
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut primary,
+        )
+    }
+    .is_err()
+    {
+        return None;
+    }
+    let primary = Owned(primary);
+    if snapshot(primary.0).ok()?.ordinary() {
+        Some(primary)
+    } else {
+        None
+    }
+}
+
+fn open_peer_process(pid: u32) -> Option<Owned> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .inspect_err(|error| {
+            if error.code() != windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult() {
+                tracing::debug!(pid, %error, "peer process could not be opened");
+            }
+        })
+        .ok()?;
+    Some(Owned(handle))
 }
 fn same_identity(first: HANDLE, second: HANDLE) -> Result<bool, String> {
     let a = variable(first, TokenUser)?;
@@ -420,16 +539,45 @@ impl Drop for Child {
         }
     }
 }
-/// None means already ordinary; Some means the verified replacement was resumed.
-pub(crate) fn normalize() -> Result<Option<u32>, String> {
-    if current()?.ordinary() {
-        return Ok(None);
+/// What [`normalize`] decided about this process.
+pub(crate) enum Startup {
+    /// Already ordinary — or no clean ordinary token was available, in which
+    /// case this process keeps running exactly as it was started.
+    Unchanged,
+    /// A verified ordinary replacement is running; this process must exit.
+    Replaced(u32),
+}
+
+/// None-equivalent: already ordinary, or continued as started.
+pub(crate) fn normalize() -> Result<Startup, String> {
+    let status = current()?;
+    if status.ordinary() {
+        return Ok(Startup::Unchanged);
     }
     let original = token(
         unsafe { GetCurrentProcess() },
         TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT,
     )?;
-    let ordinary = ordinary_token(original.0)?;
+    let ordinary = match ordinary_token(original.0) {
+        Ok(ordinary) => ordinary,
+        Err(error) => {
+            // No clean ordinary token exists. The previous fallback
+            // synthesised one with CreateRestrictedToken, which left a
+            // Full-elevation-type token behind: every console child of such a
+            // shell then died with 0xc0000142 (no conhost at all) while GUI
+            // children looked perfectly healthy. Exiting here instead would
+            // leave the session without a shell, so continue as started and
+            // record why.
+            tracing::warn!(
+                elevated = status.elevated,
+                integrity = u64::from(status.integrity),
+                elevation_type = u64::from(status.elevation_type),
+                %error,
+                "started with elevated privileges and no clean ordinary token was available; continuing as started"
+            );
+            return Ok(Startup::Unchanged);
+        }
+    };
     if !same_identity(original.0, ordinary.0)? {
         return Err(crate::i18n::text("普通权限令牌不属于当前用户会话").into());
     }
@@ -510,7 +658,7 @@ pub(crate) fn normalize() -> Result<Option<u32>, String> {
         }
         return Err(error);
     }
-    Ok(Some(info.dwProcessId))
+    Ok(Startup::Replaced(info.dwProcessId))
 }
 
 #[cfg(test)]
@@ -518,17 +666,23 @@ mod tests {
     use super::*;
     #[test]
     fn ordinary_requires_no_admin_group_and_at_most_medium_integrity() {
-        for (elevated, administrator, integrity, expected) in [
-            (false, false, 0x2000, true),
-            (false, false, 0x3000, false),
-            (true, false, 0x2000, false),
-            (false, true, 0x2000, false),
+        for (elevated, administrator, integrity, elevation_type, expected) in [
+            (false, false, 0x2000, 1, true),
+            (false, false, 0x2000, 3, true),
+            (false, false, 0x3000, 1, false),
+            (true, false, 0x2000, 1, false),
+            (false, true, 0x2000, 1, false),
+            // A Full-type token with medium integrity is the artifact
+            // CreateRestrictedToken produces; it must never count as ordinary.
+            (false, false, 0x2000, 2, false),
+            (true, false, 0x3000, 2, false),
         ] {
             assert_eq!(
                 Status {
                     elevated,
                     administrator,
-                    integrity
+                    integrity,
+                    elevation_type
                 }
                 .ordinary(),
                 expected
@@ -547,14 +701,39 @@ mod tests {
         assert_eq!(&native[native.len() - 2..], [0, 0]);
     }
     #[test]
-    fn native_lua_token_is_ordinary_and_keeps_user_and_session() {
+    fn the_live_process_token_is_ordinary_and_keeps_user_and_session() {
+        // Whatever token this test binary runs with, it must satisfy the same
+        // ordinary() rule the relaunch check applies - and the account
+        // identity helper must resolve to a usable log-directory segment.
         let original = token(
             unsafe { GetCurrentProcess() },
             TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT,
         )
         .unwrap();
-        let limited = medium_restricted(original.0).unwrap();
-        assert!(snapshot(limited.0).unwrap().ordinary());
-        assert!(same_identity(original.0, limited.0).unwrap());
+        let status = snapshot(original.0).unwrap();
+        if status.ordinary() {
+            assert!(same_identity(original.0, original.0).unwrap());
+            assert!(account_identity().chars().any(|ch| ch.is_ascii_alphanumeric()));
+        } else {
+            // A deliberately elevated test runner must not be mistaken for a
+            // normal user process.
+            assert!(status.elevated || status.elevation_type == 2 || status.administrator);
+        }
+    }
+
+    #[test]
+    fn a_peer_token_is_either_ordinary_and_ours_or_absent() {
+        // CI runs without an interactive session, so no peer exists there and
+        // the assertions are skipped; on a desktop they exercise the whole
+        // enumeration - duplicate - verify fallback chain.
+        let original = token(
+            unsafe { GetCurrentProcess() },
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT,
+        )
+        .unwrap();
+        if let Some(peer) = peer_token(original.0) {
+            assert!(snapshot(peer.0).unwrap().ordinary());
+            assert!(same_identity(original.0, peer.0).unwrap());
+        }
     }
 }

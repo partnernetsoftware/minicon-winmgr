@@ -106,9 +106,25 @@ impl Cli {
 }
 
 fn main() {
+    // CLI invocations may need a console for their output; the shell run must
+    // stay console-free, so only attach when arguments are present.
+    if std::env::args_os().nth(1).is_some() {
+        attach_console_if_needed();
+    }
+
+    // Logging comes before privilege normalization on purpose: the relaunch
+    // decision (which token source was used, and why the others were refused)
+    // is exactly the evidence a startup failure report needs, and it used to
+    // be written before any subscriber existed - i.e. nowhere.
+    let _log_guard = logging::init();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "minicon-winmgr starting (companion mode)"
+    );
+
     match privilege::normalize() {
-        Ok(Some(_pid)) => return,
-        Ok(None) => {}
+        Ok(privilege::Startup::Replaced(_pid)) => return,
+        Ok(privilege::Startup::Unchanged) => {}
         Err(error) => {
             eprintln!("minicon-winmgr: {error}");
             unsafe {
@@ -125,17 +141,6 @@ fn main() {
             std::process::exit(1);
         }
     }
-    // CLI invocations may need a console for their output; the shell run must
-    // stay console-free, so only attach when arguments are present.
-    if std::env::args_os().nth(1).is_some() {
-        attach_console_if_needed();
-    }
-
-    let _log_guard = logging::init();
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "minicon-winmgr starting (companion mode)"
-    );
 
     let mut update_args = std::env::args_os().skip(1);
     match update_args.next().as_deref().and_then(|v| v.to_str()) {
