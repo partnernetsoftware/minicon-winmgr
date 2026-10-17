@@ -208,11 +208,73 @@ pub fn set_auto_restart(enabled: bool) -> Result<(), Box<dyn Error>> {
 
 /// True when the per-user `Shell` value points at this executable — i.e. we are
 /// running as the login shell (replacement mode), not as a companion.
+///
+/// An exact path match is the normal case. A *different copy of the same
+/// product* also counts: the registered shell is routinely the hot-swapped
+/// debug copy while the user runs a downloaded release build, and the intent
+/// behind the value is "this product is my shell", not "this one file is my
+/// shell". Treating another copy as a companion silently skips the tray host,
+/// and the notification strip then has no owner and stays empty.
 pub fn is_self_shell() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
     match current_shell() {
-        Ok(Some(configured)) => std::env::current_exe()
-            .map(|exe| configured.eq_ignore_ascii_case(&exe.display().to_string()))
-            .unwrap_or(false),
+        Ok(Some(configured)) => {
+            configured.eq_ignore_ascii_case(&exe.display().to_string())
+                || same_product_build(&configured, &exe.display().to_string())
+        }
         _ => false,
+    }
+}
+
+/// Every build of this product ships as `minicon-winmgr.exe` (the hot-swapped
+/// debug copy) or `minicon-winmgr-vX.Y.Z-....exe` (a release archive).
+const PRODUCT_STEM: &str = "minicon-winmgr";
+
+/// Whether both paths name a build of this product.
+fn same_product_build(configured: &str, running: &str) -> bool {
+    is_product_file_name(configured) && is_product_file_name(running)
+}
+
+/// The bare stem or the stem plus a `-version` / `.exe` suffix — never an
+/// unrelated program that merely starts with the same characters.
+fn is_product_file_name(path: &str) -> bool {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match name.strip_prefix(PRODUCT_STEM) {
+        Some(rest) => rest.is_empty() || rest.starts_with('.') || rest.starts_with('-'),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIVE: &str = r"D:\dev\partnernetsoftware\minicon-winmgr\target\debug\live\minicon-winmgr.exe";
+    const RELEASE: &str = r"D:\minicon-winmgr-v0.1.10-x86_64-windows.exe";
+
+    #[test]
+    fn another_copy_of_the_same_product_is_the_same_shell() {
+        assert!(same_product_build(LIVE, RELEASE));
+        assert!(same_product_build(RELEASE, LIVE));
+        assert!(same_product_build("minicon-winmgr.exe", LIVE));
+    }
+
+    #[test]
+    fn explorer_and_lookalike_names_are_not_this_product() {
+        assert!(!same_product_build(r"C:\Windows\explorer.exe", LIVE));
+        assert!(!same_product_build("explorer.exe", RELEASE));
+        assert!(!same_product_build(LIVE, r"C:\Windows\explorer.exe"));
+        // Same prefix characters, different file name: no separator after the
+        // stem, so this is another program entirely.
+        assert!(!same_product_build(r"C:\minicon-winmgrhelper.exe", LIVE));
+        assert!(!same_product_build(LIVE, r"C:\minicon-winmgrhelper.exe"));
+        // Empty or directory-only paths never name a build.
+        assert!(!same_product_build("", LIVE));
+        assert!(!same_product_build(r"D:\dev\", RELEASE));
     }
 }
