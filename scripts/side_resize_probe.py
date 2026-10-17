@@ -131,8 +131,11 @@ def main():
         drag_start('right', scaled(80))
         check('minimum_width_is_enforced_while_dragging', abs(width()-scaled(160)) <= 2)
         mouse(4); p.wait(lambda: preference() == 160)
-        drag_start('right', scaled(10000))
         expected_max = min(scaled(480), (reservation_base[2]-reservation_base[0])//3)
+        # Exceed the real width limit while keeping native mouse input on-screen.
+        # Remote desktops may discard moves to coordinates far outside the screen.
+        drag_start('right', min(reservation_base[2]-reservation_base[0]-1,
+                                expected_max+scaled(80)))
         check('maximum_width_leaves_desktop_space', abs(width()-expected_max) <= 2, width())
         mouse(4); time.sleep(.1)
         drag_start('right', scaled(320)); mouse(4)
