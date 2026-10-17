@@ -611,6 +611,9 @@ mod tests {
                     }
                 };
                 served.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Windows accepted sockets can inherit the listener's nonblocking
+                // mode. Only accept polls; request I/O uses the bounded timeouts.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
