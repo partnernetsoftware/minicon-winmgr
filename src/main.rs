@@ -570,7 +570,7 @@ fn print_help() {
            MINICON_NO_TASKBAR=1     hide the taskbar host window (shown by default)\n\
            MINICON_ACRYLIC=1        use the DWM acrylic backdrop (best-effort)\n\
            MINICON_HEARTBEAT_SECS=N heartbeat/snapshot interval (default 30)\n\
-           MINICON_LOG_DIR=path     log directory (default <exe_dir>/logs)\n\
+           MINICON_LOG_DIR=path     log directory (default <exe_dir>/logs/<account>)\n\
            MINICON_ALT_SHELL=path   exe for the 'alt' shell profile (optional)\n\
            MINICON_CONFIRM_SHELL=yes  required to run any --shell-* write command\n\
            RUST_LOG=...             tracing filter (default info)\n"

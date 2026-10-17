@@ -4,14 +4,14 @@ use std::os::windows::ffi::OsStrExt;
 use windows::{
     Win32::{
         Foundation::*,
-        Security::*,
+        Security::{Authorization, *},
         System::{
             Environment::{FreeEnvironmentStringsW, GetCommandLineW, GetEnvironmentStringsW},
             Threading::*,
         },
         UI::WindowsAndMessaging::*,
     },
-    core::{PCWSTR, PWSTR},
+    core::{HRESULT, PCWSTR, PWSTR},
 };
 
 // SID_AND_ATTRIBUTES group flags from winnt.h.
@@ -132,6 +132,99 @@ pub(crate) fn description() -> &'static str {
 
 pub(crate) fn current() -> Result<Status, String> {
     snapshot(token(unsafe { GetCurrentProcess() }, TOKEN_QUERY)?.0)
+}
+
+/// `TokenUser` of the current process. Callers read the SID out of the buffer
+/// while it is still alive.
+fn current_user() -> Option<Vec<usize>> {
+    let token = token(unsafe { GetCurrentProcess() }, TOKEN_QUERY).ok()?;
+    variable(token.0, TokenUser).ok()
+}
+
+/// Account name of the current process token, e.g. `wjc2022`.
+fn account_name() -> Option<String> {
+    let user = current_user()?;
+    let sid = unsafe { (*(user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+    let mut name = vec![0u16; 256];
+    let mut domain = vec![0u16; 256];
+    let mut kind = SID_NAME_USE::default();
+    let mut name_len = name.len() as u32;
+    let mut domain_len = domain.len() as u32;
+    let resolved = unsafe {
+        LookupAccountSidW(
+            None,
+            sid,
+            Some(PWSTR(name.as_mut_ptr())),
+            &mut name_len,
+            Some(PWSTR(domain.as_mut_ptr())),
+            &mut domain_len,
+            &mut kind,
+        )
+    };
+    let read = |name: &[u16], len: u32| String::from_utf16_lossy(&name[..len as usize]);
+    match resolved {
+        Ok(()) => Some(read(&name, name_len)),
+        // Only a too-small buffer is worth retrying; Windows reports the size
+        // it needs, so one pass covers any real account name.
+        Err(error)
+            if error.code() == HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0)
+                && name_len as usize > name.len() =>
+        {
+            name = vec![0u16; name_len as usize];
+            domain = vec![0u16; domain_len as usize];
+            let mut retry_name = name.len() as u32;
+            let mut retry_domain = domain.len() as u32;
+            unsafe {
+                LookupAccountSidW(
+                    None,
+                    sid,
+                    Some(PWSTR(name.as_mut_ptr())),
+                    &mut retry_name,
+                    Some(PWSTR(domain.as_mut_ptr())),
+                    &mut retry_domain,
+                    &mut kind,
+                )
+            }
+            .ok()
+            .map(|()| read(&name, retry_name))
+        }
+        Err(_) => None,
+    }
+}
+
+/// SID as text (`S-1-5-21-…-1001`): still unique per account, used when the
+/// account name cannot be resolved.
+fn sid_text() -> Option<String> {
+    let user = current_user()?;
+    let sid = unsafe { (*(user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+    let mut raw = PWSTR::null();
+    unsafe { Authorization::ConvertSidToStringSidW(sid, &mut raw) }.ok()?;
+    if raw.is_null() {
+        return None;
+    }
+    let mut length = 0usize;
+    unsafe {
+        while *raw.0.add(length) != 0 && length < 256 {
+            length += 1;
+        }
+    }
+    let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw.0, length) });
+    unsafe { LocalFree(Some(HLOCAL(raw.0.cast()))) };
+    Some(text)
+}
+
+/// Identity used to keep per-account state apart: the account name, the SID
+/// when the name cannot be resolved, and a fixed name as the last resort.
+///
+/// One executable can be started by several Windows accounts — every
+/// interactive session runs its own shell instance, and they all resolve to
+/// the same install directory. Anything written next to the executable (logs)
+/// must therefore be segmented per account, or two accounts' lines interleave
+/// in one file.
+pub(crate) fn account_identity() -> String {
+    account_name()
+        .or_else(sid_text)
+        .unwrap_or_else(|| "user".to_string())
 }
 fn medium_restricted(original: HANDLE) -> Result<Owned, String> {
     let mut restricted = HANDLE::default();

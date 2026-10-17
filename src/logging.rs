@@ -182,17 +182,80 @@ pub fn init() -> WorkerGuard {
     guard
 }
 
-/// Resolves the log directory: `MINICON_LOG_DIR` if set, else `<exe_dir>/logs`,
-/// else `./logs`. Directory creation is deferred to the file worker.
+/// Resolves the log directory. `MINICON_LOG_DIR` wins verbatim — support
+/// bundles and tests pin the exact directory.
+///
+/// The built-in path is segmented per Windows account. One executable can be
+/// started by more than one account: every interactive session runs its own
+/// shell instance, and all of them resolve to the same install directory.
+/// Sharing one directory interleaves their log lines — and even serialises
+/// them through one lock file — which makes a single user's failure report
+/// unreadable exactly when it matters.
+fn resolve_log_dir(explicit: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(explicit) = explicit {
+        return PathBuf::from(explicit);
+    }
+    let base = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join("logs")))
+        .unwrap_or_else(|| PathBuf::from("logs"));
+    base.join(user_segment())
+}
+
 fn log_dir() -> PathBuf {
-    std::env::var_os("MINICON_LOG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|parent| parent.join("logs")))
+    resolve_log_dir(std::env::var_os("MINICON_LOG_DIR"))
+}
+
+/// One path component naming the account this process runs as.
+fn user_segment() -> String {
+    let identity = crate::privilege::account_identity();
+    sanitize_component(&identity).unwrap_or_else(|| "user".to_string())
+}
+
+/// Longest account name kept verbatim; anything longer is digested.
+const SEGMENT_CHARS: usize = 48;
+
+/// Reduces an account identity to a single safe path component.
+///
+/// Account names may contain spaces, non-ASCII characters or separators. Every
+/// disallowed character becomes `_`, so the segment can never escape the log
+/// directory or collide with a reserved name. When the reduction is lossy a
+/// short digest of the original is appended: two names that collapse onto the
+/// same characters (`张 三` and `李 四`) must still get different directories,
+/// or the very sharing this fixes would come back through the back door.
+fn sanitize_component(raw: &str) -> Option<String> {
+    let mut mapped: String = raw
+        .chars()
+        .take(SEGMENT_CHARS)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
         })
-        .unwrap_or_else(|| PathBuf::from("logs"))
+        .collect();
+    let lossy = mapped.chars().ne(raw.chars());
+    if lossy {
+        mapped.push('-');
+        mapped.push_str(&format!("{:08x}", digest(raw)));
+    }
+    // Windows path components must not end in `.` and `.`/`..` are reserved.
+    let trimmed = mapped.trim_matches('.').to_string();
+    (!trimmed.is_empty() && trimmed != "." && trimmed != "..").then_some(trimmed)
+}
+
+/// FNV-1a over the UTF-16 code units: a short, stable discriminator appended
+/// when sanitisation changed the name.
+fn digest(raw: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for unit in raw.encode_utf16() {
+        for byte in unit.to_le_bytes() {
+            hash ^= u32::from(byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+    }
+    hash
 }
 
 /// Panic payloads and source paths may contain private data. Replacing the
@@ -215,6 +278,83 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_log_directory_is_used_verbatim() {
+        let pinned = std::ffi::OsString::from("D:/support-bundle/logs");
+        assert_eq!(resolve_log_dir(Some(pinned.clone())), PathBuf::from(&pinned));
+    }
+
+    #[test]
+    fn builtin_log_directory_is_segmented_per_account() {
+        let dir = resolve_log_dir(None);
+        let segment = dir
+            .file_name()
+            .expect("segment")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(segment, user_segment());
+        assert!(!segment.is_empty());
+        assert!(!segment.contains(['\\', '/', ':']));
+        assert!(!matches!(segment.as_str(), "." | ".."));
+        assert_eq!(
+            dir.parent()
+                .and_then(|parent| parent.file_name())
+                .map(|name| name.to_string_lossy().into_owned()),
+            Some("logs".to_string())
+        );
+    }
+
+    #[test]
+    fn plain_account_names_pass_through_unchanged() {
+        for raw in ["wjc2022", "user.name", "a_b-c", "User1"] {
+            assert_eq!(sanitize_component(raw).as_deref(), Some(raw));
+        }
+    }
+
+    #[test]
+    fn unsafe_account_names_are_reduced_and_disambiguated() {
+        let spaced = sanitize_component("张 三").expect("segment");
+        let other = sanitize_component("李 四").expect("segment");
+        for segment in [&spaced, &other] {
+            assert!(segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')));
+        }
+        // Same reduced characters, different account: the digest must keep the
+        // two directories apart.
+        assert_eq!(spaced.split('-').next(), other.split('-').next());
+        assert_ne!(spaced, other);
+        let separator = sanitize_component("..\\..\\evil").expect("segment");
+        assert!(!separator.contains(['\\', '/']));
+        assert_ne!(separator, sanitize_component("evil").expect("segment"));
+    }
+
+    #[test]
+    fn long_account_names_are_truncated_but_stay_unique() {
+        let long = "a".repeat(80);
+        let short = sanitize_component(&long).expect("segment");
+        assert!(short.len() <= 48 + 1 + 8);
+        assert_ne!(short, sanitize_component(&format!("{long}b")).expect("segment"));
+    }
+
+    #[test]
+    fn reserved_and_empty_identities_have_no_segment() {
+        for raw in ["", ".", "..", "..."] {
+            assert_eq!(sanitize_component(raw), None);
+        }
+        assert_eq!(
+            user_segment_for_test(""),
+            "user".to_string(),
+            "an unusable identity must fall back, never to an empty component"
+        );
+    }
+
+    /// `user_segment` reads the live token; this is the same fallback rule with
+    /// an identity that no token can produce.
+    fn user_segment_for_test(identity: &str) -> String {
+        sanitize_component(identity).unwrap_or_else(|| "user".to_string())
+    }
 
     #[test]
     fn formatted_events_are_utf8_bounded_and_the_next_event_still_works() {
