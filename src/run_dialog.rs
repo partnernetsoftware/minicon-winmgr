@@ -12,7 +12,7 @@ use windows::Win32::{
     System::Com::{
         COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
     },
-    UI::Controls::{DRAWITEMSTRUCT, EM_SETLIMITTEXT, EM_SETSEL, ODS_SELECTED},
+    UI::Controls::{DRAWITEMSTRUCT, EM_GETSEL, EM_SETLIMITTEXT, EM_SETSEL, ODS_SELECTED},
 };
 use windows::{
     Win32::{
@@ -60,6 +60,8 @@ struct State {
     query: u64,
     waiting: Option<Instant>,
     candidates: Vec<Candidate>,
+    preview_draft: Option<(String, u32, u32)>,
+    setting_preview: bool,
     expanded: bool,
     history: bool,
     clear_retry: bool,
@@ -304,6 +306,8 @@ fn prepare(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                 query: 0,
                 waiting: None,
                 candidates: Vec::new(),
+                preview_draft: None,
+                setting_preview: false,
                 expanded: false,
                 history: false,
                 clear_retry: false,
@@ -747,6 +751,7 @@ pub(crate) fn show() {
     enabled();
 }
 fn hide() {
+    cancel_preview();
     with(|s| {
         s.visible = false;
         s.composing = false;
@@ -791,6 +796,7 @@ fn internal_activation(next: HWND) -> bool {
 fn query() {
     let input = text(control(EDIT));
     with(|s| {
+        s.preview_draft = None;
         s.query = s.query.wrapping_add(1);
         s.pending = Some(Job::Query(s.query, input));
         s.changed = Instant::now();
@@ -801,23 +807,66 @@ fn query() {
     expand(false);
     enabled();
 }
-fn adopt() -> bool {
+fn selected_choice() -> Option<String> {
     let selected = send(control(LIST), LB_GETCURSEL, 0, 0).0;
-    let choice = with(|s| {
+    with(|s| {
         if s.expanded && selected >= 0 {
             s.candidates.get(selected as usize).map(|c| c.text.clone())
         } else {
             None
         }
     })
-    .flatten();
+    .flatten()
+}
+
+// SetWindowText synchronously sends EN_CHANGE. Preview updates must not start
+// a new query, clear the list, or invalidate an in-flight launch as an edit.
+fn preview_text(value: &str, start: u32, end: u32) {
+    with(|s| s.setting_preview = true);
+    set_text(control(EDIT), value);
+    with(|s| s.setting_preview = false);
+    send(control(EDIT), EM_SETSEL, start as usize, end as isize);
+}
+
+fn preview_selection() {
+    let Some(choice) = selected_choice() else {
+        return;
+    };
+    if with(|s| s.preview_draft.is_none()).unwrap_or(false) {
+        let input = text(control(EDIT));
+        let (mut start, mut end) = (0u32, 0u32);
+        send(
+            control(EDIT),
+            EM_GETSEL,
+            &mut start as *mut u32 as usize,
+            &mut end as *mut u32 as isize,
+        );
+        with(|s| s.preview_draft = Some((input, start, end)));
+    }
+    let end = choice.encode_utf16().count() as u32;
+    preview_text(&choice, end, end);
+    status("");
+    enabled();
+}
+
+fn cancel_preview() {
+    if let Some((draft, start, end)) = with(|s| s.preview_draft.take()).flatten() {
+        preview_text(&draft, start, end);
+    }
+}
+
+fn adopt() -> bool {
+    let choice = selected_choice();
     if let Some(choice) = choice {
-        set_text(control(EDIT), &choice);
+        let end = choice.encode_utf16().count() as u32;
+        preview_text(&choice, end, end);
         with(|s| {
+            s.preview_draft = None;
             s.pending = None;
             s.query = s.query.wrapping_add(1);
         });
         expand(false);
+        status("");
         unsafe {
             let _ = SetFocus(Some(control(EDIT)));
         }
@@ -1059,6 +1108,7 @@ fn key(hwnd: HWND, msg: u32, w: WPARAM) -> bool {
     }
     if code == VK_ESCAPE.0 {
         if with(|s| s.expanded).unwrap_or(false) {
+            cancel_preview();
             expand(false);
         } else {
             hide();
@@ -1077,6 +1127,9 @@ fn key(hwnd: HWND, msg: u32, w: WPARAM) -> bool {
         if code == VK_DOWN.0 || code == VK_UP.0 {
             if alt {
                 let expanded = with(|s| s.expanded).unwrap_or(false);
+                if expanded {
+                    cancel_preview();
+                }
                 expand(!expanded);
                 if !expanded {
                     query();
@@ -1100,7 +1153,7 @@ fn key(hwnd: HWND, msg: u32, w: WPARAM) -> bool {
                         }
                     };
                     send(control(LIST), LB_SETCURSEL, next as usize, 0);
-                    enabled();
+                    preview_selection();
                 }
             }
             return true;
@@ -1123,6 +1176,9 @@ fn key(hwnd: HWND, msg: u32, w: WPARAM) -> bool {
 }
 fn dropdown() {
     let expanded = with(|s| s.expanded).unwrap_or(false);
+    if expanded {
+        cancel_preview();
+    }
     expand(!expanded);
     if !expanded {
         query();
@@ -1132,6 +1188,7 @@ fn dropdown() {
     }
 }
 fn clear() {
+    cancel_preview();
     with(|s| {
         if !s.actions.iter().any(|job| matches!(job, Job::Clear)) {
             s.actions.push_back(Job::Clear);
@@ -1256,6 +1313,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                     let id = (w.0 & 0xffff) as u16;
                     let code = (w.0 >> 16) as u32;
                     if id == EDIT && code == EN_CHANGE {
+                        if with(|s| s.setting_preview).unwrap_or(false) {
+                            return LRESULT(0);
+                        }
                         with(|s| {
                             if s.busy {
                                 s.generation = s.generation.wrapping_add(1);
@@ -1319,6 +1379,7 @@ unsafe extern "system" fn child_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
         || {
             if msg == WM_IME_STARTCOMPOSITION {
                 with(|s| {
+                    s.preview_draft = None;
                     s.composing = true;
                     s.query = s.query.wrapping_add(1);
                     s.pending = None;
@@ -1370,6 +1431,101 @@ pub fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_candidate_navigation_previews_without_requery_and_restores_draft() {
+        let instance = HINSTANCE(unsafe {
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                .unwrap()
+                .0
+        });
+        prepare(instance).unwrap();
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                shutdown();
+            }
+        }
+        let _cleanup = Cleanup;
+        // Hidden native controls: no hotkey registration, external input,
+        // command execution, history writes or replacement of the live shell.
+        let choices = [
+            "mini first --name 张三",
+            "\"C:\\Program Files\\Mini App.exe\" --test",
+        ];
+        let fill = || {
+            with(|s| {
+                s.pending = None;
+                s.candidates = choices
+                    .iter()
+                    .map(|value| Candidate {
+                        text: (*value).into(),
+                        label: None,
+                        source: CandidateSource::History,
+                    })
+                    .collect();
+            });
+            send(control(LIST), LB_RESETCONTENT, 0, 0);
+            for value in choices {
+                send(
+                    control(LIST),
+                    LB_ADDSTRING,
+                    0,
+                    wide(value).as_ptr() as isize,
+                );
+            }
+            expand(true);
+        };
+        set_text(control(EDIT), "mini");
+        send(control(EDIT), EM_SETSEL, 1, 3);
+        fill();
+        let query_id = with(|s| s.query).unwrap();
+        let press = |code: VIRTUAL_KEY| {
+            send(control(EDIT), WM_KEYDOWN, code.0 as usize, 0);
+        };
+        press(VK_DOWN);
+        assert_eq!(text(control(EDIT)), choices[0]);
+        press(VK_DOWN);
+        assert_eq!(text(control(EDIT)), choices[1]);
+        press(VK_UP);
+        assert_eq!(text(control(EDIT)), choices[0]);
+        assert!(with(|s| s.expanded && s.query == query_id && s.pending.is_none()).unwrap());
+        assert_eq!(send(control(LIST), LB_GETCOUNT, 0, 0).0, 2);
+        press(VK_ESCAPE);
+        assert_eq!(text(control(EDIT)), "mini");
+        let (mut start, mut end) = (0u32, 0u32);
+        send(
+            control(EDIT),
+            EM_GETSEL,
+            &mut start as *mut u32 as usize,
+            &mut end as *mut u32 as isize,
+        );
+        assert_eq!((start, end), (1, 3));
+        assert!(!with(|s| s.expanded).unwrap());
+
+        fill();
+        press(VK_DOWN);
+        press(VK_RETURN);
+        assert_eq!(text(control(EDIT)), choices[0]);
+        assert!(with(|s| !s.expanded && s.preview_draft.is_none() && !s.busy).unwrap());
+
+        set_text(control(EDIT), "mini");
+        fill();
+        press(VK_DOWN);
+        send(control(EDIT), WM_CHAR, 'x' as usize, 0);
+        assert_eq!(text(control(EDIT)), format!("{}x", choices[0]));
+        assert!(with(|s| s.preview_draft.is_none() && s.pending.is_some() && !s.expanded).unwrap());
+        fill();
+        press(VK_DOWN);
+        hide();
+        assert_eq!(text(control(EDIT)), format!("{}x", choices[0]));
+
+        fill();
+        with(|s| s.composing = true);
+        let before = text(control(EDIT));
+        assert!(!key(control(EDIT), WM_KEYDOWN, WPARAM(VK_DOWN.0 as usize)));
+        assert_eq!(text(control(EDIT)), before);
+    }
+
     #[test]
     fn layouts_stay_inside_each_monitor_and_keep_actions_visible() {
         for dpi in [96, 144, 192] {

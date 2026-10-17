@@ -397,8 +397,8 @@ const CATALOG: &[(&str, &str)] = &[
     ),
     ("进程完整性级别无效", "Invalid process integrity level"),
     (
-        "系统未能生成普通权限令牌；请从普通用户会话启动。",
-        "Windows could not create a standard-user token. Start from a standard-user session.",
+        "系统未能提供普通权限令牌；请从普通用户会话启动，或以普通用户身份重新登录。",
+        "Windows could not provide a standard-user token. Start from a standard-user session or sign in again as a standard user.",
     ),
     (
         "无法继续普通权限进程，已终止该子进程。",

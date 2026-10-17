@@ -300,11 +300,6 @@ fn linked_token(original: HANDLE) -> Option<Owned> {
     }
 }
 
-/// How many same-session processes to inspect before giving up. Explorer
-/// normally appears within the first few; the cap keeps a pathological process
-/// table from delaying startup.
-const PEER_SCAN_LIMIT: usize = 64;
-
 /// A primary token borrowed from another process of the same user in the same
 /// session.
 ///
@@ -330,12 +325,14 @@ fn peer_token(original: HANDLE) -> Option<Owned> {
     }
     let count = (needed as usize / std::mem::size_of::<u32>()).min(pids.len());
     let me = std::process::id();
+    // The process enumeration is already bounded by pids.len(). Do not cut
+    // the same-session list to its first 64 entries: those can all be elevated
+    // while Explorer and ordinary applications occur later in the list.
     let candidates: Vec<u32> = pids[..count]
         .iter()
         .copied()
         .filter(|pid| *pid != 0 && *pid != me)
         .filter(|pid| peer_session(*pid) == Some(session))
-        .take(PEER_SCAN_LIMIT)
         .collect();
     // Explorer first: its token is the session's own. A second pass accepts
     // any other same-user process, which covers machines where no Explorer
@@ -346,7 +343,11 @@ fn peer_token(original: HANDLE) -> Option<Owned> {
                 continue;
             }
             if let Some(primary) = peer_primary(pid, original) {
-                tracing::info!(pid, explorer = explorer_only, "relaunching with a peer process token");
+                tracing::info!(
+                    pid,
+                    explorer = explorer_only,
+                    "relaunching with a peer process token"
+                );
                 return Some(primary);
             }
         }
@@ -541,43 +542,35 @@ impl Drop for Child {
 }
 /// What [`normalize`] decided about this process.
 pub(crate) enum Startup {
-    /// Already ordinary — or no clean ordinary token was available, in which
-    /// case this process keeps running exactly as it was started.
+    /// Already running with ordinary user privileges.
     Unchanged,
     /// A verified ordinary replacement is running; this process must exit.
     Replaced(u32),
 }
 
-/// None-equivalent: already ordinary, or continued as started.
+/// An elevated entry point must hand off to a verified ordinary process.
+/// Failure propagates to main before singleton ownership or UI initialization.
 pub(crate) fn normalize() -> Result<Startup, String> {
     let status = current()?;
+    normalize_status(&status, relaunch)
+}
+
+fn normalize_status(
+    status: &Status,
+    relaunch: impl FnOnce() -> Result<u32, String>,
+) -> Result<Startup, String> {
     if status.ordinary() {
         return Ok(Startup::Unchanged);
     }
+    relaunch().map(Startup::Replaced)
+}
+
+fn relaunch() -> Result<u32, String> {
     let original = token(
         unsafe { GetCurrentProcess() },
         TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT,
     )?;
-    let ordinary = match ordinary_token(original.0) {
-        Ok(ordinary) => ordinary,
-        Err(error) => {
-            // No clean ordinary token exists. The previous fallback
-            // synthesised one with CreateRestrictedToken, which left a
-            // Full-elevation-type token behind: every console child of such a
-            // shell then died with 0xc0000142 (no conhost at all) while GUI
-            // children looked perfectly healthy. Exiting here instead would
-            // leave the session without a shell, so continue as started and
-            // record why.
-            tracing::warn!(
-                elevated = status.elevated,
-                integrity = u64::from(status.integrity),
-                elevation_type = u64::from(status.elevation_type),
-                %error,
-                "started with elevated privileges and no clean ordinary token was available; continuing as started"
-            );
-            return Ok(Startup::Unchanged);
-        }
-    };
+    let ordinary = ordinary_token(original.0)?;
     if !same_identity(original.0, ordinary.0)? {
         return Err(crate::i18n::text("普通权限令牌不属于当前用户会话").into());
     }
@@ -658,12 +651,62 @@ pub(crate) fn normalize() -> Result<Startup, String> {
         }
         return Err(error);
     }
-    Ok(Startup::Replaced(info.dwProcessId))
+    Ok(info.dwProcessId)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_startup_does_not_relaunch() {
+        let status = Status {
+            elevated: false,
+            administrator: false,
+            integrity: 0x2000,
+            elevation_type: 3,
+        };
+        assert!(matches!(
+            normalize_status(&status, || panic!("ordinary startup must not relaunch")),
+            Ok(Startup::Unchanged)
+        ));
+    }
+
+    #[test]
+    fn elevated_startup_requires_a_successful_ordinary_replacement() {
+        let status = Status {
+            elevated: true,
+            administrator: true,
+            integrity: 0x3000,
+            elevation_type: 2,
+        };
+        assert!(matches!(
+            normalize_status(&status, || Ok(123)),
+            Ok(Startup::Replaced(123))
+        ));
+        for failure in [
+            "no ordinary token",
+            "create failed",
+            "verification failed",
+            "not ready",
+        ] {
+            assert!(matches!(
+                normalize_status(&status, || Err(failure.into())),
+                Err(error) if error == failure
+            ));
+        }
+    }
+
+    #[test]
+    fn a_restricted_full_token_cannot_bypass_the_relaunch_requirement() {
+        let status = Status {
+            elevated: false,
+            administrator: false,
+            integrity: 0x2000,
+            elevation_type: 2,
+        };
+        assert!(normalize_status(&status, || Err("not an ordinary token".into())).is_err());
+    }
+
     #[test]
     fn ordinary_requires_no_admin_group_and_at_most_medium_integrity() {
         for (elevated, administrator, integrity, elevation_type, expected) in [
@@ -713,7 +756,11 @@ mod tests {
         let status = snapshot(original.0).unwrap();
         if status.ordinary() {
             assert!(same_identity(original.0, original.0).unwrap());
-            assert!(account_identity().chars().any(|ch| ch.is_ascii_alphanumeric()));
+            assert!(
+                account_identity()
+                    .chars()
+                    .any(|ch| ch.is_ascii_alphanumeric())
+            );
         } else {
             // A deliberately elevated test runner must not be mistaken for a
             // normal user process.

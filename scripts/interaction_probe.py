@@ -95,7 +95,7 @@ def main():
             run_text('');time.sleep(.25)
             p.wait(lambda:p.u.IsWindowVisible(run_control(2006)));run_key(40)
             p.wait(lambda:p.text(run_control(2002))==use)
-            check(language+'_empty_input_can_adopt',p.u.IsWindowEnabled(run_control(2002)) and not p.text(run_control(2001)))
+            check(language+'_empty_input_previews_candidate',p.u.IsWindowEnabled(run_control(2002)) and p.text(run_control(2001))==candidate and p.u.IsWindowVisible(run_control(2006)))
             check(language+'_candidate_hint_visible','Enter' in p.text(run_control(2007)))
             p.capture_settings(OUT/('run_'+language+'_use.png'),run)
             run_key(13);p.wait(lambda:p.text(run_control(2001))==candidate and p.text(run_control(2002))==run_label and not p.text(run_control(2008)))

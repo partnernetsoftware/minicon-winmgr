@@ -282,7 +282,10 @@ mod tests {
     #[test]
     fn explicit_log_directory_is_used_verbatim() {
         let pinned = std::ffi::OsString::from("D:/support-bundle/logs");
-        assert_eq!(resolve_log_dir(Some(pinned.clone())), PathBuf::from(&pinned));
+        assert_eq!(
+            resolve_log_dir(Some(pinned.clone())),
+            PathBuf::from(&pinned)
+        );
     }
 
     #[test]
@@ -317,9 +320,11 @@ mod tests {
         let spaced = sanitize_component("张 三").expect("segment");
         let other = sanitize_component("李 四").expect("segment");
         for segment in [&spaced, &other] {
-            assert!(segment
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')));
+            assert!(
+                segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+            );
         }
         // Same reduced characters, different account: the digest must keep the
         // two directories apart.
@@ -335,7 +340,10 @@ mod tests {
         let long = "a".repeat(80);
         let short = sanitize_component(&long).expect("segment");
         assert!(short.len() <= 48 + 1 + 8);
-        assert_ne!(short, sanitize_component(&format!("{long}b")).expect("segment"));
+        assert_ne!(
+            short,
+            sanitize_component(&format!("{long}b")).expect("segment")
+        );
     }
 
     #[test]

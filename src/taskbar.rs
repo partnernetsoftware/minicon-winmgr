@@ -278,8 +278,8 @@ const D2_CEIL: i32 = 48;
 /// title-bearing tiers use, within the 20–24 range the PRD allows).
 const ICON_ONLY_SIZE: i32 = 20;
 const BTN_TOP: i32 = 6;
-/// Width of the clock text (`yy-mm-dd HH:MM`).
-const CLOCK_W: i32 = 132;
+/// Width of the clock text (`Www yyyy-mm-dd HH:MM`).
+const CLOCK_W: i32 = 164;
 /// Width of the overflow button shown when task buttons cannot all fit.
 const OVERFLOW_W: i32 = 44;
 /// The identity slot at the left of every task button: the application icon's
@@ -2877,13 +2877,11 @@ unsafe fn paint(hwnd: HWND) {
         // Right zone: clock and notification-panel entry, right-aligned and muted.
         SetTextColor(hdc, COLORREF(theme().muted));
         let now = GetLocalTime();
+        let weekday =
+            ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][usize::from(now.wDayOfWeek)];
         let clock = format!(
-            "{:02}-{:02}-{:02} {:02}:{:02}",
-            now.wYear % 100,
-            now.wMonth,
-            now.wDay,
-            now.wHour,
-            now.wMinute
+            "{weekday} {:04}-{:02}-{:02} {:02}:{:02}",
+            now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute
         );
         if vertical() {
             let mut text: Vec<u16> = clock.encode_utf16().collect();
@@ -3511,7 +3509,7 @@ mod tests {
         assert_eq!(bl.rects.len(), 4);
         for r in &bl.rects {
             assert!(
-                (45..=48).contains(&(r.right - r.left)),
+                (super::D2_FLOOR..=super::D2_CEIL).contains(&(r.right - r.left)),
                 "icon-only squares clamp to [40,48]"
             );
         }

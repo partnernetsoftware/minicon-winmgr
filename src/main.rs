@@ -126,6 +126,7 @@ fn main() {
         Ok(privilege::Startup::Replaced(_pid)) => return,
         Ok(privilege::Startup::Unchanged) => {}
         Err(error) => {
+            tracing::error!("ordinary-privilege startup handoff failed; refusing to run the shell");
             eprintln!("minicon-winmgr: {error}");
             unsafe {
                 windows::Win32::UI::WindowsAndMessaging::MessageBoxW(

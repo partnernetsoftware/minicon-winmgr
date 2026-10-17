@@ -501,8 +501,39 @@ pub fn open(target: &str) -> bool {
 mod tests {
     use super::{Launch, THIS_PC, is_bare_explorer, plan};
 
+    // Error wording must be deterministic even if another native fixture loads
+    // the user's Chinese configuration. A separate process avoids racing the
+    // process-wide UI language and never changes the user's preferences.
+    fn english_process(test: &str) -> bool {
+        const MARKER: &str = "MINICON_TEST_SHELL_LAUNCH_ENGLISH";
+        if std::env::var(MARKER).as_deref() == Ok(test) {
+            crate::i18n::set(crate::i18n::Language::En);
+            return true;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("shell_launch::tests::{test}"),
+                "--nocapture",
+            ])
+            .env(MARKER, test)
+            .env("MINICON_LANGUAGE", "en")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
     #[test]
     fn missing_associated_application_hresult_has_actionable_feedback() {
+        if !english_process("missing_associated_application_hresult_has_actionable_feedback") {
+            return;
+        }
         let error = super::error_from_code(super::CO_E_APPNOTFOUND.0);
         assert_eq!(error.code, Some(0x800401F5u32 as i32));
         assert!(error.message.contains("file association"));
@@ -627,6 +658,11 @@ mod tests {
 
     #[test]
     fn drive_and_root_relative_paths_do_not_inherit_hidden_working_directories() {
+        if !english_process(
+            "drive_and_root_relative_paths_do_not_inherit_hidden_working_directories",
+        ) {
+            return;
+        }
         assert_eq!(
             command(r"C:notes.txt").unwrap().file,
             r"C:\Users\u\notes.txt"
@@ -657,6 +693,9 @@ mod tests {
 
     #[test]
     fn relative_paths_have_an_explicit_base_and_quotes_fail_visibly() {
+        if !english_process("relative_paths_have_an_explicit_base_and_quotes_fail_visibly") {
+            return;
+        }
         assert_eq!(
             command(r".\notes.txt").unwrap().file,
             r"C:\Users\u\.\notes.txt"
@@ -688,6 +727,9 @@ mod tests {
 
     #[test]
     fn shell_errors_offer_specific_corrections() {
+        if !english_process("shell_errors_offer_specific_corrections") {
+            return;
+        }
         assert!(super::error_from_code(2).message.contains("not found"));
         assert!(
             super::error_from_code(3)

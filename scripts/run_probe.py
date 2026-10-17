@@ -41,7 +41,8 @@ def main(environment=None):
         s=summon();check('successful_command_recalled',ctrl(s,2001)['text']==command)
         gui.key('ALT+DOWN');wait(.5);s=state();check('history_dropdown',ctrl(s,2006)['visible'] and any(command in x for x in ctrl(s,2006)['items']))
         gui.capture('run-history.png')
-        gui.key('DOWN');gui.key('ENTER');wait(.2);s=state();check('adoption_does_not_execute',s['visible'] and not ctrl(s,2006)['visible'])
+        gui.key('DOWN');wait(.1);s=state();check('selection_previews_input_and_keeps_list',ctrl(s,2001)['text']==command and ctrl(s,2006)['visible'])
+        gui.key('ENTER');wait(.2);s=state();check('adoption_does_not_execute',s['visible'] and not ctrl(s,2006)['visible'])
         # Tab goes to clear history, then run, then cancel, then edit.
         focus=[]
         for _ in range(4):gui.key('TAB');wait(.05);focus.append(state()['focus'])
@@ -54,7 +55,8 @@ def main(environment=None):
             wait(.05)
         check('local_path_suggestions',ctrl(s,2006)['visible'] and any(x.startswith('[路径]') and 'Program Files' in x for x in ctrl(s,2006)['items']))
         gui.capture('run-path.png')
-        gui.key('ESC');wait(.1);check('escape_closes_only_candidates',state()['visible'] and not ctrl(state(),2006)['visible'])
+        gui.key('DOWN');wait(.1);s=state();check('path_selection_previews_input',ctrl(s,2001)['text']!=pathprefix and ctrl(s,2006)['visible'])
+        gui.key('ESC');wait(.1);check('escape_closes_only_candidates',state()['visible'] and not ctrl(state(),2006)['visible'] and ctrl(state(),2001)['text']==pathprefix)
         gui.key('ESC');wait(.1);check('second_escape_hides',not state()['visible'])
         s=summon();gui.key('ALT+F4');wait(.15);check('alt_f4_hides_reusable',not state()['visible']);s=summon();check('reopen_after_close',s['visible'])
         gui.click_control(2004);wait(.6);s=state();check('clear_history',not ctrl(s,2004)['enabled'] or not ctrl(s,2004)['visible'])

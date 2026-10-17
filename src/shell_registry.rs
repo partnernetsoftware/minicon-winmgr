@@ -254,7 +254,7 @@ fn is_product_file_name(path: &str) -> bool {
 mod tests {
     use super::*;
 
-    const LIVE: &str = r"D:\dev\partnernetsoftware\minicon-winmgr\target\debug\live\minicon-winmgr.exe";
+    const LIVE: &str = r"C:\Fixture\product\target\debug\live\minicon-winmgr.exe";
     const RELEASE: &str = r"D:\minicon-winmgr-v0.1.10-x86_64-windows.exe";
 
     #[test]
