@@ -316,6 +316,9 @@ $ids=@($shell.Windows() | ForEach-Object {
         for language,ident,caption,theme,theme_id,key in cases:
             desktop.send(p.message(),SETTINGS,pid=child.pid)
             panel=p.wait(lambda:p.panel() if p.panel() and p.pid(p.panel())==child.pid and p.u.IsWindowVisible(p.panel()) else None)
+            # The popup must inherit foreground rights from our own settings
+            # window, rather than competing with an unrelated remote client.
+            p.activate()
             desktop.send(p.controls().get(ident),0xF5,pid=child.pid)
             desktop.send(p.controls().get(theme_id),0xF5,pid=child.pid)
             observation.wait(desktop,.2)
@@ -337,7 +340,10 @@ $ids=@($shell.Windows() | ForEach-Object {
             # actual button subclass and Space key-up, without global input.
             for ident in [1,2,6]:
                 desktop.send(p.u.GetDlgItem(notification,ident),0x100,9,pid=child.pid)
-            if p.focus()!=button:raise RuntimeError('Tab did not reach the recycle-bin shortcut')
+            # A notification refresh may rebuild buttons while preserving the
+            # focused control ID. Compare the current native control, not a stale HWND.
+            button=p.wait(lambda:(current:=p.u.GetDlgItem(notification,7))
+                          and p.focus()==current and current)
             code=13 if key=='enter' else 32
             desktop.send(button,0x100,code,pid=child.pid)
             desktop.send(button,0x101,code,pid=child.pid)

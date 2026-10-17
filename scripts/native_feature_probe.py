@@ -101,6 +101,11 @@ def main():
                 check(language+'_'+theme+'_close_hides_diagnostics',not p.u.IsWindowVisible(diagnostic))
                 desktop.send(info,16,pid=p.pid(p.message()))
             desktop.send(p.panel(),16,pid=p.pid(p.message()))
+        # Keep real pointer injection on the owned test desktop surface after
+        # closing diagnostic windows, rather than an unrelated remote client.
+        p.key('ALT')
+        p.u.SetForegroundWindow(fixture)
+        until(lambda:p.u.GetForegroundWindow()==fixture)
         preview=hover();wait(.25)
         capture(folder/'preview.png',preview)
         from PIL import Image
