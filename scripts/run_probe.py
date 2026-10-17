@@ -16,7 +16,21 @@ def main(environment=None):
         if not condition:raise AssertionError(name)
     def ctrl(s,id):return s['controls'][str(id)]
     def replace(value):gui.key('CTRL+A');gui.key('BACK');gui.typing(value);wait(.2)
-    def summon():gui.key('WIN+R');wait(.12);return state()
+    def summon():
+        # Keep injected global keys on the owned fixture. An unrelated foreground
+        # application (including remote clients) may consume the Windows key.
+        if not state()['visible']:
+            import settings_probe
+            settings_probe.show()
+        gui.key('WIN+R')
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline:
+            current=state()
+            if (current['visible'] and current['foreground']==current['hwnd']
+                    and current['focus']==current['controls'].get('2001',{}).get('hwnd')):
+                return current
+            wait(.02)
+        return state()
     try:
         s=summon();check('hotkey_focus',s['visible'] and s['foreground']==s['hwnd'] and s['focus']==ctrl(s,2001)['hwnd'])
         replace('');s=state();check('empty_disabled',not ctrl(s,2002)['enabled'])
