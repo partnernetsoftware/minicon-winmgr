@@ -4,7 +4,7 @@
 
 | 用户路径 | 主要实现 | 规格/证据 |
 |---|---|---|
-| 启动、权限、消息与生命周期 | `main`、`window`、`privilege`、`single_instance`、`instance_switch`、`hub`、`window_events`、`session` | [可靠性约束](prd_2_1.md)、[0.1.11](plan_0_1_11.md) |
+| 启动、权限、消息与生命周期 | `main`、`window`、`privilege`、`single_instance`、`instance_switch`、`hub`、`window_events`、`session` | [可靠性约束](prd_2_1.md)、[0.1.11](archive/plan_0_1_11.md) |
 | 设置、配置、语言与主题 | `config`、`settings_store`、`settings_ui`、`settings_panel`、`settings_info`、`i18n`、`appearance` | [设置规格](prd_6_1_1.md)、[当前设计](design.md) |
 | 几何、枚举窗口与任务切换 | `taskbar`、`dock`、`monitor`、`grouping`、`model`、`task_list`、`window_snapshot`、`hotkeys`、`win_util`、`dwm` | [任务栏策略](prd_6_1.md)、[测试分层](testing.md) |
 | 启动、Run、历史、路径建议 | `launcher`、`launcher_ui`、`run_dialog`、`run_history`、`shell_launch` | [Run 规格](prd_1_1_1.md) |
@@ -38,7 +38,7 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 - `src/i18n.rs`：English/中文界面目录、默认语言和自有窗口标题/控件本地化；不转换命令或用户输入。
 
-文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](archive/plan_0_1_9.md)；历史：[0.1.10 资源与稳健性](archive/plan_0_1_10.md)；当前公开版：[0.1.11](plan_0_1_11.md)。
+文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](archive/plan_0_1_9.md)；历史：[0.1.10 资源与稳健性](archive/plan_0_1_10.md)；当前公开版：[0.1.11](archive/plan_0_1_11.md)。
 
 0.1.8：Run 快捷键路由在 `window`，窗口与 worker 在首次 `run_dialog::show` 创建；`run_history` 提供有界本地应用发现与路径/环境变量建议。主题化原生候选行保留完整 LB 字符串。`win_util::force_foreground` 处理跨权限 restore，`taskbar` 按点击坐标命中任务；专项脚本 `interaction_probe.py` / `taskmgr_probe.py` 纳入发布层。
 
@@ -53,6 +53,6 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 更新兼容分开保留证据：`update_probe.main()` 使用当前更新器回移构建验证状态/故障；发布层另显式传入 `previous_artifact`，以真正公开的旧版更新器操作同一准确候选。两组结果各存独立忽略目录，不能用回移构建冒充历史公开版。
 
-0.1.11 工作树：管理员启动必须通过真实普通权限令牌完成自重启；失败不进入外壳主路径。任务栏时钟为 `Www yyyy-mm-dd HH:MM`，Run 增加上下键文本预览及草稿恢复；本地检查与未完成验收见[版本计划](plan_0_1_11.md)。
+0.1.11 工作树：管理员启动必须通过真实普通权限令牌完成自重启；失败不进入外壳主路径。任务栏时钟为 `Www yyyy-mm-dd HH:MM`，Run 增加上下键文本预览及草稿恢复；本地检查与未完成验收见[版本计划](archive/plan_0_1_11.md)。
 
 0.1.12 实施：`shell_recovery` 负责账户操作互斥与身份绑定的原始登记记录；`shell_registry` 保留原始类型/字节并复读写入结果；`settings_ui` 的后台交接通过 `window` 消息让 UI 线程安装/释放通知宿主。`window::complete_startup` 统一成功信号，失败不写更新回执。

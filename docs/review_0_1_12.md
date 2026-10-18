@@ -8,6 +8,8 @@
 
 发布后补记（2026-10-18）：0.1.11 已合入 main 并[公开发布](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.11)，下列检查表仍保留审阅当时的结果。C03 涉及的格式、语言隔离和公开路径检查已在发布分支修复；完整检查、准确候选及公开旧版更新结果以[0.1.11 验收记录](validation_0_1_11.md)为准，不再按本次历史失败重复排期。
 
+0.1.12 实施补记（2026-10-18）：C01、C02、C07、C06 的 Shell 记录部分及 C03 基线已按[选定范围](plan_0_1_12.md)实现；准确候选与发布状态见[验收记录](validation_0_1_12.md)。下文仍保留发现时的历史证据，源码链接固定到 0.1.11 发布提交，不把已修复问题继续当作当前待办。
+
 ## 1. 项目现状
 
 - 当前纳入版本控制的 Rust 源文件 56 个、约 2.93 万行，含测试；正式 Python 脚本 26 个、约 4283 行。忽略目录中的个人工具不计作可复现交付。
@@ -39,7 +41,7 @@
 
 ### C01 · P0：接管没有把成功备份作为前置条件
 
-已确认调用链：[`shell_swap::record_backup`](../src/shell_swap.rs#L283) 返回 `()`，路径取得失败、已有路径或写入失败都不向调用者报告。`take_over` 读取旧 Shell 失败也只记警告，随后仍可能 `replace` 登记并 `stop_shell`。
+已确认调用链：[`shell_swap::record_backup`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/shell_swap.rs#L283) 返回 `()`，路径取得失败、已有路径或写入失败都不向调用者报告。`take_over` 读取旧 Shell 失败也只记警告，随后仍可能 `replace` 登记并 `stop_shell`。
 
 具体风险场景：程序目录只读、备份文件不可写，而 HKCU Shell 可写时，接管可能成功但没有可用回滚记录。此后 `give_back` 又因缺少记录拒绝恢复。这里与“受控接管、可回滚”的产品目标不一致；本轮未在用户会话执行该故障。
 
@@ -47,7 +49,7 @@
 
 ### C02 · P0：成功回执与“必要界面就绪”不是同一门槛
 
-已确认顺序：[`window::run`](../src/window.rs#L236) 在设置 owner 存在时就调用 `confirm_startup`，随后才执行 `on_ready(taskbar_ready && settings_owner)` 并设置 `STARTUP_READY`。[`Session::ready`](../src/instance_switch.rs#L48) 又只在存在旧实例回退记录时拒绝不可用界面。
+已确认顺序：[`window::run`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/window.rs#L236) 在设置 owner 存在时就调用 `confirm_startup`，随后才执行 `on_ready(taskbar_ready && settings_owner)` 并设置 `STARTUP_READY`。[`Session::ready`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/instance_switch.rs#L48) 又只在存在旧实例回退记录时拒绝不可用界面。
 
 因此存在应注入验证的场景：任务栏应开启但创建失败、设置窗口成功时，更新启动回执可能已经写出；更新助手看到回执便可认定成功，统一就绪检查却尚未完成。普通首次启动与不同入口的失败策略也不完全一致。正常环境通过不能排除这条分支。
 
@@ -55,7 +57,7 @@
 
 ### C03 · P0：测试与交付检查不能稳定脱离个人环境
 
-本轮可复现全量 suite 的 4 个语言相关失败；固定英文后全量通过。[`config::runtime`](../src/config.rs#L582) 会加载实际偏好并设置进程级语言，若测试初始化真实 UI/主题便可能触达它；多个错误测试则断言英文子串。具体哪条测试最先初始化依赖仍须继续定位，不能仅凭失败顺序下结论。
+本轮可复现全量 suite 的 4 个语言相关失败；固定英文后全量通过。[`config::runtime`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/config.rs#L582) 会加载实际偏好并设置进程级语言，若测试初始化真实 UI/主题便可能触达它；多个错误测试则断言英文子串。具体哪条测试最先初始化依赖仍须继续定位，不能仅凭失败顺序下结论。
 
 此外，格式检查失败、公开材料检查命中测试常量；当前 quality 层只挑选日志和 Python 检查，普通 CI 的 fault 层也不能代替完整 unit suite。
 
@@ -63,7 +65,7 @@
 
 ### C04 · P1：不显示的伴随托盘镜像仍在 UI 心跳读取
 
-已确认：[`window`](../src/window.rs#L350) 启动和心跳调用 `tray::sample_mirror`；非宿主时执行跨进程 toolbar 读取。[`tray::read_buttons`](../src/tray.rs#L295) 的项目没有 owner，而 [`notification_parts`](../src/taskbar.rs#L777) 和面板入口只保留带 owner 的项目。这些镜像不会成为当前可交互的应用图标。
+已确认：[`window`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/window.rs#L350) 启动和心跳调用 `tray::sample_mirror`；非宿主时执行跨进程 toolbar 读取。[`tray::read_buttons`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/tray.rs#L295) 的项目没有 owner，而 [`notification_parts`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/taskbar.rs#L777) 和面板入口只保留带 owner 的项目。这些镜像不会成为当前可交互的应用图标。
 
 读取仍在消息线程，单条消息 250ms 超时，按 toolbar 返回的数量遍历，未设置整轮时间或数量上限。慢宿主下有累加延迟风险；本轮未测得一次真实卡顿，因此不提供卡顿毫秒数。
 
@@ -71,15 +73,15 @@
 
 ### C05 · P1：快捷启动刷新和旧启动器仍有同步 I/O
 
-已确认：[`taskbar::refresh_inner`](../src/taskbar.rs#L1630) 每次清路径图标缓存，再读取 pin 文件和调用 [`window_icon::for_path`](../src/window_icon.rs#L60) 的 `ExtractIconExW`。窗口事件驱动刷新时，即使 pin 没变也会重复做这些工作。
+已确认：[`taskbar::refresh_inner`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/taskbar.rs#L1630) 每次清路径图标缓存，再读取 pin 文件和调用 [`window_icon::for_path`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/window_icon.rs#L60) 的 `ExtractIconExW`。窗口事件驱动刷新时，即使 pin 没变也会重复做这些工作。
 
-[`launcher_ui::refresh_results`](../src/launcher_ui.rs#L254) 还会在首次调用 `items()` 时同步递归扫描快捷方式；空查询排名读 recents，启动前同步记录 recents 并打开目标。Run 的应用发现已经有独立 worker 和检查预算，两套实现的约束不一致。以上是调用链事实；实际慢盘延迟待测。
+[`launcher_ui::refresh_results`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/launcher_ui.rs#L254) 还会在首次调用 `items()` 时同步递归扫描快捷方式；空查询排名读 recents，启动前同步记录 recents 并打开目标。Run 的应用发现已经有独立 worker 和检查预算，两套实现的约束不一致。以上是调用链事实；实际慢盘延迟待测。
 
 建议：先选一个高频路径做窄改动，优先保留未变 pin 的 owned 图标快照、使文件变更独立失效；随后再统一应用发现的后台边界。保持原有外部 pin 文件变更和 Explorer 保护语义。不要一次重写全部菜单/启动器。
 
 ### C06 · P1：持久化状态的账户/会话边界尚未统一
 
-用户偏好已迁至用户目录、日志已按账户分目录；但 [`shell_swap::backup_path`](../src/shell_swap.rs#L276)、[`taskbar::workarea_state_path`](../src/taskbar.rs#L530)、quick-launch 和 recents 的默认状态仍在 exe 旁。同一安装路径可供多个账户/会话共用。
+用户偏好已迁至用户目录、日志已按账户分目录；但 [`shell_swap::backup_path`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/shell_swap.rs#L276)、[`taskbar::workarea_state_path`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/taskbar.rs#L530)、quick-launch 和 recents 的默认状态仍在 exe 旁。同一安装路径可供多个账户/会话共用。
 
 外壳备份尤其依赖“只记录一次”：其他账户留下的同名文件可能被当作本用户的回滚依据。工作区记录没有用户/会话标识，只比较矩形，目录不可写时也可能无法保留恢复信息。这是存储隔离缺口，不等于本轮已重现跨账户错误恢复。
 
@@ -87,13 +89,13 @@
 
 ### C07 · P1：运行中接管后，通知宿主的初始化没有形成闭环
 
-[`tray_host::install`](../src/tray_host.rs#L144) 仅在 `window::run` 启动时调用。伴随启动因 Explorer 已存在而跳过宿主后，设置里的 `take_over` 可关闭 Explorer，但当前调用链没有重新安装通知宿主和广播图标重注册。
+[`tray_host::install`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/tray_host.rs#L144) 仅在 `window::run` 启动时调用。伴随启动因 Explorer 已存在而跳过宿主后，设置里的 `take_over` 可关闭 Explorer，但当前调用链没有重新安装通知宿主和广播图标重注册。
 
 建议：用隔离 fixture 复核“伴随 → 接管 → 图标重注册”的生命周期，设计同一 UI 线程上的明确转换。不要根据启动时的宿主状态推断整场会话。是否随 0.1.12 实施，取决于接管功能的本版范围。
 
 ### C08 · P1：Run 体验尚未形成用户认可的交互模型
 
-已实现上下键文本预览、取消恢复和编辑后重查；用户反馈为“暂时能接受”，不能记作 UX 已完成。现有 [`run_dialog::key/run/adopt`](../src/run_dialog.rs) 保留第一次 Enter 采纳、第二次 Enter 执行，输入框、列表、按钮和展开状态共同决定动作；这可能是体验不直接的原因之一，尚不能代替具体使用观察。
+已实现上下键文本预览、取消恢复和编辑后重查；用户反馈为“暂时能接受”，不能记作 UX 已完成。现有 [`run_dialog::key/run/adopt`](https://github.com/partnernetsoftware/minicon-winmgr/blob/43b3d35078346afac303580e0fa8f88ddfab2e6d/src/run_dialog.rs) 保留第一次 Enter 采纳、第二次 Enter 执行，输入框、列表、按钮和展开状态共同决定动作；这可能是体验不直接的原因之一，尚不能代替具体使用观察。
 
 建议：只围绕 5 个真实任务走查：运行短命令、重用带参数历史、选择后追加参数、进入文件夹继续补全、失败后修正。比较保留两次确认与单次 Enter 执行选中项两种方案，由用户讨论决定；不顺手增加浏览、提权、联网搜索等入口。用户已要求暂时接受当前行为，本轮没有继续改 UX。
 
@@ -109,4 +111,4 @@
 
 入口按职责保留：README 说明怎么用；PRD/子规格定义行为；代码地图定位实现；版本计划定义范围；validation 保存实际证据；archive 只追溯。新增[0.1.12 草案](plan_0_1_12.md)明确待讨论，不把候选项写成已承诺需求。
 
-此前未完成的 2h/8h、空闲/设置对照、物理多屏/DPI、高对比度、屏幕阅读器、特殊令牌及公网故障矩阵继续引用 [0.1.11 遗留项](plan_0_1_11.md)。不重复创建第二套长清单，也不恢复已归档的 0.2.0 排期。
+此前未完成的 2h/8h、空闲/设置对照、物理多屏/DPI、高对比度、屏幕阅读器、特殊令牌及公网故障矩阵继续引用 [0.1.11 遗留项](archive/plan_0_1_11.md)。不重复创建第二套长清单，也不恢复已归档的 0.2.0 排期。
