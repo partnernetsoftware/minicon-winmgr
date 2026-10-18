@@ -1,6 +1,6 @@
 # 代码与文档地图
 
-> 2026-10-17 · 仓库记录的公开版 0.1.10，当前工作树 0.1.11；实际检查与风险见[本轮梳理](review_0_1_12.md)，下一版为[0.1.12 讨论稿](plan_0_1_12.md)。
+> 2026-10-18 · 当前公开版 0.1.11，0.1.12 正在发布；实际范围见[实施计划](plan_0_1_12.md)，证据与限制见[验收记录](validation_0_1_12.md)。[本轮梳理](review_0_1_12.md)保留开发前发现。
 
 | 用户路径 | 主要实现 | 规格/证据 |
 |---|---|---|
@@ -11,11 +11,11 @@
 | 通知宿主、图标、面板 | `tray_host`、`tray`、`tray_bar`、`tray_popup` | [通知规格](prd_1_1_2.md)、[验收数据](validation.md) |
 | 悬停标题/缩略图、图标 | `bar_tip`、`hover_preview`、`window_icon`、`window_icon_worker` | [资源审计与开发状态](resources_0_1_10.md) |
 | 兼容的旧菜单、快捷固定项、文件夹 | `start_menu`、`quick_launch`、`folder_stack`、`recents` | [后续清单](prd_5_1.md)；默认 UI 入口已退役 |
-| 外壳接管与回滚 | `shell_registry`、`shell_swap` | [外壳规格](prd_3_1.md)、[待收敛边界](review_0_1_12.md) |
+| 外壳接管与回滚 | `shell_registry`、`shell_recovery`、`shell_swap` | [外壳规格](prd_3_1.md)、[待收敛边界](review_0_1_12.md) |
 | 手动更新与交接 | `update`、`update_cancel`、`update_http`、`update_install`、`update_stream` | [更新设计](archive/plan_0_1_9.md) |
 | 诊断、导出、指标与日志 | `diagnostics`、`diagnostic_ui`、`diagnostic_export`、`metrics`、`logging`、`log_store` | [资源审计](resources_0_1_10.md)、[已验范围](validation_0_1_10.md) |
 
-`lib.rs` 目前为空；实际产品模块由 `main.rs` 组装。表中覆盖当前 56 个 Rust 源文件，重叠职责以调用链判断，不把文件数量当作重构目标。
+`lib.rs` 目前为空；实际产品模块由 `main.rs` 组装。重叠职责以调用链判断，不把文件数量当作重构目标。
 
 ## 已交付基础与覆盖边界
 
@@ -32,7 +32,7 @@
 
 UI 消息线程拥有窗口；模块间通过 hub 请求刷新，避免设置/任务栏反向耦合。文件 IO 不持 `bars/tasks` 锁；耗时启动与 Run 历史已有有界工作线程。HICON/窗口/计时器资源需明确所有权与清理。接管/回滚不因调整设置界面改变权限、确认或备份语义。
 
-以上是维护边界，不代表所有旧路径均已满足。接管备份失败仍继续、更新回执早于必要界面判定、无消费方的伴随镜像、pin 图标重取及语言相关测试失败，详见[审阅发现](review_0_1_12.md)。
+以上是维护边界，不代表所有旧路径均已满足。0.1.12 已修复接管恢复记录、必要界面就绪与测试隔离；伴随镜像、pin 图标重取等仍在后续备选范围，历史问题与当前去向见[审阅发现](review_0_1_12.md)和[实施计划](plan_0_1_12.md)。
 
 CI 与 release workflow 分别负责质量检查和产物发布。历史测试数量是版本证据，不代表此次已运行。实际物理多屏、混合 DPI、长跑覆盖必须单独记录，不能由单测替代。
 
@@ -53,6 +53,6 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 更新兼容分开保留证据：`update_probe.main()` 使用当前更新器回移构建验证状态/故障；发布层另显式传入 `previous_artifact`，以真正公开的旧版更新器操作同一准确候选。两组结果各存独立忽略目录，不能用回移构建冒充历史公开版。
 
-0.1.11 工作树：管理员启动必须通过真实普通权限令牌完成自重启；失败不进入外壳主路径。任务栏时钟为 `Www yyyy-mm-dd HH:MM`，Run 增加上下键文本预览及草稿恢复；本地检查与未完成验收见[版本计划](archive/plan_0_1_11.md)。
+0.1.11 已公开：管理员启动必须通过真实普通权限令牌完成自重启；失败不进入外壳主路径。任务栏时钟为 `Www yyyy-mm-dd HH:MM`，Run 增加上下键文本预览及草稿恢复；检查与覆盖限制见[验收记录](validation_0_1_11.md)。
 
 0.1.12 实施：`shell_recovery` 负责账户操作互斥与身份绑定的原始登记记录；`shell_registry` 保留原始类型/字节并复读写入结果；`settings_ui` 的后台交接通过 `window` 消息让 UI 线程安装/释放通知宿主。`window::complete_startup` 统一成功信号，失败不写更新回执。
