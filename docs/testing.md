@@ -1,6 +1,6 @@
 # 分层测试
 
-> 2026-10-17 工作树基线提醒：全仓格式检查和已暂存内容的公开路径检查存在未解决项；全量 debug 单元有 4 个受语言环境影响的英文断言失败。固定英文的对照运行通过只用于定位，不等于修复；检查结果和后续建议见[0.1.12 前梳理](review_0_1_12.md)。以下分层命令仍是正式入口，历史通过数量不能替代本次运行结果。
+> 0.1.12 基线：0.1.11 已修复旧格式、公开路径与英文断言隔离问题；0.1.12 增加中英/并发完整隔离矩阵和有界 HTTP 测试夹具。旧失败保留在[历史梳理](review_0_1_12.md)，当前准确候选与覆盖范围见[验收记录](validation_0_1_12.md)。
 
 开发期按修改范围选择一层；默认只做格式和编译检查，不运行整套回归。每次运行会在 `target/test-reports/<层>/summary.json` 记录步骤、耗时与结果；旧的其他层结果不代表本次也执行过。
 
@@ -9,6 +9,7 @@
 | `python scripts/test.py` | `check`：格式、cargo check；日常快速反馈 |
 | `python scripts/test.py --layer unit --filter config::tests` | 指定 Rust 模块或测试名；只跑相关测试 |
 | `python scripts/test.py --layer unit` | 全部单元测试；跨模块调整时使用 |
+| `python scripts/unit_matrix.py` | 中英 × 默认并发/串行完整普通单元，临时配置和用户目录隔离；加 `--release` 验证优化构建 |
 | `python scripts/test.py --layer quality` | 格式、严格 Clippy；提交前与 CI 静态检查 |
 | `python scripts/test.py --layer layout --restore-exe <normal-running-exe>` | 构建 debug；默认英文/中英切换与持久化、双语明暗截图、标签与选项同行、窄宽恢复、页脚可达；只改设置布局时使用 |
 | `python scripts/test.py --layer appearance --restore-exe <normal-running-exe>` | 构建 debug；明暗 × 四边原生窗口、工作区、保存读回、环境只读与切换资源专项 |
@@ -21,7 +22,7 @@
 
 会替换实例的桌面层均要求显式 `--restore-exe`，指向当前实际运行文件，并由隔离上下文先核对同用户/会话、文件路径和摘要；依赖当前可用的 Windows 输入桌面、Python Pillow（截图）和 PowerShell 7（UIA）。开发层默认构建到 `target/desktop-validation`，只在忽略目录内的副本上运行，正常退出后从原路径恢复并核对工作区及 Shell。不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
 
-`release` 表示当前自动化全套，不代表所有物理环境已覆盖。混合 DPI、多屏热插拔、高对比度实屏、屏幕阅读器语音、特殊管理员令牌以及小时级常驻观察仍需独立环境验收。CI 没有当前交互桌面，执行 `quality` 与独立 `fault` 层，release workflow 另外执行全部单元测试；发布前在可用桌面运行 `release` 并审阅报告。仅构建优化二进制不会自动声称完成发布验收。
+`release` 表示当前自动化全套，不代表所有物理环境已覆盖。混合 DPI、多屏热插拔、高对比度实屏、屏幕阅读器语音、特殊管理员令牌以及小时级常驻观察仍需独立环境验收。CI 没有当前交互桌面，执行 `quality`、完整隔离普通单元矩阵与独立 `fault` 层，candidate workflow 执行优化矩阵，release workflow 另外执行全部优化普通单元；发布前在可用桌面运行 `release` 并审阅报告。仅构建优化二进制不会自动声称完成发布验收。
 
 发布层构建目录为 `target/release-validation`，避免旧会话直接运行 `target/release` 时锁住 Cargo 硬链接产物。实际候选来自显式指定的 `--release-binary`（如已下载的草稿资产），不会用重建结果替换它。桌面探针的 live 路径隔离在忽略目录，结束恢复显式指定的原运行路径、摘要、工作区与 Shell 登记，不覆盖原外壳文件，也不结束其他会话。
 
@@ -111,3 +112,6 @@ python scripts/test.py --layer settings --restore-exe <normal-running-exe> --can
 发布功能层与扩展资源认证分离：`release` 不要求等待小时级 campaign，但仍要求准确候选、公开基线（用于真实历史更新）、官方 0.1.4 及原实例恢复路径，并跑全部自动化功能项。不传 `--campaign` 时报告明确记录 `long_observation_completed=false`；不等于长期资源认证。若提供 campaign 则仍调用原严格资源门槛，缺失/不完整证据照常拒绝。`resource-gate` 的三轮、2h/8h、原始 CSV 核对标准未降低。公开内存结论只引用实际完成的场景与时长。
 
 Run 的既有 22 项桌面回归现由 `scripts/run_probe.py`、`run_probe_input.py` 和版本化 Rust 小程序 fixture 提供，所有输出进入忽略的 target；发布层强制调用，不再因本机忽略目录缺脚本而静默跳过。它验证 Unicode 参数，不等同于真实 IME 组合输入矩阵。路径候选按有限超时等候异步就绪，不以固定短睡眠代替条件检查。
+
+
+0.1.12 原生故障专项由 `scripts/isolated_tray_probe.py --test-exe <cargo 输出的测试 exe> --test <场景>` 执行；先用 `cargo test --bin minicon-winmgr --no-run`（可加 `--release --target-dir target/release-validation`）取得对应测试程序。场景为 `tray`、`startup`、`takeover`、`collision`、`companion-collision`。它们创建从不激活的私有桌面；接管故障只在测试进程重映射的临时 HKCU 键上执行，保留已有热键所有者，不关闭真实外壳。该证明属于测试二进制，不能替代正式候选的真实桌面回归。普通单元中的 ignored 专项须按对应资源/诊断/私有桌面层单独记录，不因普通 suite 绿色就全部记为通过。

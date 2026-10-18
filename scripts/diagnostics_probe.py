@@ -74,7 +74,13 @@ def main(cases=None, *, release=False):
                         ready=json.loads(line.split(' ',1)[1]);owner=ready['owner'];hwnd=ready['window'];info=ready['info'];break
                 check(f'{language}-{theme}: owned fixture',p.pid(owner)==process.pid and p.pid(hwnd)==process.pid)
                 ctrl = lambda ident:p.u.GetDlgItem(hwnd,ident)
-                click = lambda ident:p.u.PostMessageW(ctrl(ident),0xF5,0,0)
+                def click(ident):
+                    # A recreated top-level HWND is discoverable before its
+                    # child controls and ShowWindow have completed.
+                    button=p.wait(lambda:ctrl(ident) if ctrl(ident) and p.u.IsWindowVisible(hwnd) and p.u.IsWindowEnabled(ctrl(ident)) else 0)
+                    assert p.pid(button)==process.pid
+                    p.u.SetForegroundWindow(hwnd)
+                    assert p.u.PostMessageW(button,0xF5,0,0)
                 state = lambda:p.u.SendMessageW(owner,0x8000+202,0,0)
                 count = lambda:(state()>>8)&0xffff
                 active = lambda:bool(state()&2)
