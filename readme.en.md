@@ -82,7 +82,7 @@ Shell takeover immediately closes the current session's desktop shell and change
 - [Code and documentation map](docs/code-map.md): module boundaries, gaps, and evidence.
 - [Implementation plan](docs/archive/plan_0_1_6.md): settings usability and feedback, including the 0.1.7 release follow-up.
 - [0.1.8 design and delivery](docs/archive/plan_0_1_8.md): on-demand startup and daily interactions.
-- [0.1.9 update design](docs/plan_0_1_9.md): Check / Update / Restart.
+- [0.1.9 update design](docs/archive/plan_0_1_9.md): Check / Update / Restart.
 - [Future capabilities](docs/prd_5_1.md): unscheduled requirements and prerequisites.
 - [Archive](docs/archive/README.md): historical plans, roadmaps, and documentation.
 

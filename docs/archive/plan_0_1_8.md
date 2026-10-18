@@ -1,6 +1,6 @@
 # 0.1.8 设计与交付计划
 
-> 历史记录：保留当时方案和验收边界，不能作为当前待办。当前状态见[文档索引](../README.md)与[0.1.9 记录](../plan_0_1_9.md)。
+> 历史记录：保留当时方案和验收边界，不能作为当前待办。当前状态见[文档索引](../README.md)与[0.1.9 记录](plan_0_1_9.md)。
 
 状态：[v0.1.8 已公开发布](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.8)，完整发布验收通过，下载附件 SHA-256 同时匹配校验文件与 GitHub 摘要。详见[发布核验](../validation.md)。基线为已发布的 [v0.1.7](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.7)。用户对当前设置暂基本接受；本轮保留紧凑、克制的暖色视觉方向。
 

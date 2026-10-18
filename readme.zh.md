@@ -80,7 +80,7 @@ Alt+反引号聚焦任务栏，方向键选择、Home/End 到首尾、Enter/Spac
 - [代码与文档地图](docs/code-map.md)：模块边界、已知差距和证据入口。
 - [0.1.6 计划](docs/archive/plan_0_1_6.md)：设置日常可用与反馈闭环。
 - [0.1.8 设计与交付](docs/archive/plan_0_1_8.md)：按需启动与日常交互。
-- [0.1.9 更新功能设计](docs/plan_0_1_9.md)：Check / Update / Restart。
+- [0.1.9 更新功能设计](docs/archive/plan_0_1_9.md)：Check / Update / Restart。
 - [后续能力清单](docs/prd_5_1.md)：未排期需求及实施前提。
 - [历史归档](docs/archive/README.md)：旧版本计划、旧路线图和整理前 README。
 

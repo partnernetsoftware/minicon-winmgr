@@ -12,7 +12,7 @@
 | 悬停标题/缩略图、图标 | `bar_tip`、`hover_preview`、`window_icon`、`window_icon_worker` | [资源审计与开发状态](resources_0_1_10.md) |
 | 兼容的旧菜单、快捷固定项、文件夹 | `start_menu`、`quick_launch`、`folder_stack`、`recents` | [后续清单](prd_5_1.md)；默认 UI 入口已退役 |
 | 外壳接管与回滚 | `shell_registry`、`shell_swap` | [外壳规格](prd_3_1.md)、[待收敛边界](review_0_1_12.md) |
-| 手动更新与交接 | `update`、`update_cancel`、`update_http`、`update_install`、`update_stream` | [更新设计](plan_0_1_9.md) |
+| 手动更新与交接 | `update`、`update_cancel`、`update_http`、`update_install`、`update_stream` | [更新设计](archive/plan_0_1_9.md) |
 | 诊断、导出、指标与日志 | `diagnostics`、`diagnostic_ui`、`diagnostic_export`、`metrics`、`logging`、`log_store` | [资源审计](resources_0_1_10.md)、[已验范围](validation_0_1_10.md) |
 
 `lib.rs` 目前为空；实际产品模块由 `main.rs` 组装。表中覆盖当前 56 个 Rust 源文件，重叠职责以调用链判断，不把文件数量当作重构目标。
@@ -38,13 +38,13 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 - `src/i18n.rs`：English/中文界面目录、默认语言和自有窗口标题/控件本地化；不转换命令或用户输入。
 
-文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](plan_0_1_9.md)；当前公开版：[0.1.10 资源与稳健性](plan_0_1_10.md)。
+文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](archive/plan_0_1_9.md)；历史：[0.1.10 资源与稳健性](archive/plan_0_1_10.md)；当前公开版：[0.1.11](plan_0_1_11.md)。
 
 0.1.8：Run 快捷键路由在 `window`，窗口与 worker 在首次 `run_dialog::show` 创建；`run_history` 提供有界本地应用发现与路径/环境变量建议。主题化原生候选行保留完整 LB 字符串。`win_util::force_foreground` 处理跨权限 restore，`taskbar` 按点击坐标命中任务；专项脚本 `interaction_probe.py` / `taskmgr_probe.py` 纳入发布层。
 
 0.1.9：`update` 管理手动状态与一次性 worker；`update_http` 封装有界 WinHTTP/CNG；`update_install` 负责暂存、同版本助手、进程退出等待、备份替换、启动回执与回滚；`settings_panel` 呈现三按钮和双语状态，不在渲染路径联网。`scripts/update_probe.py` 为隔离真实交接层，并纳入 release。
 
-0.1.10：`memory_probe.py` 提供外部有界采样；`window_icon_worker` 合并查询、拒绝过期结果，UI 只绘制 owned 图像；`log_store` 固定日志保留预算；`settings_store` 默认持久化用户目录偏好并兼容迁移。完整范围与待办以[版本计划](plan_0_1_10.md)为准。
+0.1.10：`memory_probe.py` 提供外部有界采样；`window_icon_worker` 合并查询、拒绝过期结果，UI 只绘制 owned 图像；`log_store` 固定日志保留预算；`settings_store` 默认持久化用户目录偏好并兼容迁移。完整范围与待办以[版本计划](archive/plan_0_1_10.md)为准。
 
 0.1.10 更新路径：`update_http::get_into` 有界分块交付；`update_stream` 负责增量 CNG 哈希、PE 文件校验和复制；`update_install` 只持小清单与固定缓冲，不再同时保留新旧 exe 的完整 Vec。`update-memory` 为独立组件对照层，update 层继续验证真实交接与回滚。
 

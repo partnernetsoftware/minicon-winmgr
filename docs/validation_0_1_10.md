@@ -62,7 +62,7 @@
 
 完整功能层通过不自动代表所有环境稳定。2h/8h、空闲/设置的整应用三轮、物理混合 DPI、多屏热插拔、高对比度、屏幕阅读器语音、特殊管理员令牌、真实 IME 组合输入矩阵及公网 DNS/代理/TLS 故障尚未全部完成。源文件 I/O 仍非所有路径可硬取消，备份恢复受文件系统权限影响，不承诺零泄漏或全场景硬实时。
 
-按[当前计划](plan_0_1_10.md#验收范围调整2026-10-16当前有效)，扩展资源认证独立执行，不阻塞本次修复发布；未完成项目不记为通过。原始证据仍留本地，旧阶段结果见[归档](archive/validation_0_1_10_development.md)。
+按[当前计划](archive/plan_0_1_10.md#验收范围调整2026-10-16当前有效)，扩展资源认证独立执行，不阻塞本次修复发布；未完成项目不记为通过。原始证据仍留本地，旧阶段结果见[归档](archive/validation_0_1_10_development.md)。
 
 [v0.1.10 已公开发布](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.10)，发布于 2026-10-16 15:02:54 UTC，已设为 latest，非草稿、非预发布。[发布工作流](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/38919823843)及最终提交的质量 CI 均成功。
 
