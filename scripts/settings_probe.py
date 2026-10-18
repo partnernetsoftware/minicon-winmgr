@@ -198,8 +198,21 @@ def stop():
 
 def start(environment, args=()):
     flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | 0x01000000
-    subprocess.Popen([str(LIVE), *args], cwd=LIVE.parent, env=environment, creationflags=flags, close_fds=True)
-    wait(message); wait(panel); time.sleep(.4)
+    child = subprocess.Popen([str(LIVE), *args], cwd=LIVE.parent, env=environment, creationflags=flags, close_fds=True)
+    # HWND discovery can precede settings initialization and the message pump.
+    # Use the product's readiness response from the exact child we started.
+    u.SendMessageTimeoutW.argtypes = [w.HWND,w.UINT,w.WPARAM,w.LPARAM,w.UINT,w.UINT,c.POINTER(c.c_size_t)]
+    u.SendMessageTimeoutW.restype = c.c_ssize_t
+    def ready():
+        if child.poll() is not None:
+            raise RuntimeError('Test executable exited before readiness')
+        hwnd = message()
+        if not hwnd or pid(hwnd) != child.pid:
+            return False
+        result = c.c_size_t()
+        return (u.SendMessageTimeoutW(hwnd, 0x8000 + 142, 0, 0, 0x22, 250, c.byref(result))
+                and result.value == 1 and panel() and pid(panel()) == child.pid)
+    wait(ready, timeout=12)
 
 def main(*, include_run_regression=True, build=True):
     u.OpenInputDesktop.argtypes = [w.DWORD, w.BOOL, w.DWORD]

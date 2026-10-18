@@ -119,6 +119,7 @@ def main():
             check(language+'_app_adoption_preserves_quoted_full_path',p.text(run_control(2001)).startswith('"') and p.text(run_control(2001)).endswith('"') and p.u.IsWindowVisible(run))
             p.capture_settings(OUT/('run_'+language+'_app_ready.png'),run)
             p.u.SendMessageW(run,0x312,3,0)
+            p.wait(lambda:p.u.IsWindowVisible(run) and p.u.GetForegroundWindow()==run)
             value=str(paths)+'\\';buffer=c.create_unicode_buffer(value);p.u.SendMessageW(run_control(2001),0xC,0,c.addressof(buffer))
             p.wait(lambda:p.u.IsWindowVisible(run_control(2006)) and any('Alpha document.txt' in item for item in suggestions()))
             check(language+'_typing_shows_local_path',any('Alpha document.txt' in item for item in suggestions()))
