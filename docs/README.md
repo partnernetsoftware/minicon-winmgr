@@ -1,12 +1,13 @@
 # 文档索引
 
-当前公开版：[v0.1.10](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.10)。使用入口：[English](../readme.en.md) / [中文](../readme.zh.md)。
+当前公开版：[v0.1.11](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.11)。使用入口：[English](../readme.en.md) / [中文](../readme.zh.md)。
 
 | 需要了解 | 当前文档 |
 |---|---|
 | 产品需求与模块规格 | [PRD](prd.md) |
 | 界面和交互规则 | [当前设计规范](design.md) |
 | 代码入口与边界 | [代码地图](code-map.md) |
+| 0.1.11 范围与发布证据 | [交付计划](plan_0_1_11.md)、[验收记录](validation_0_1_11.md) |
 | 0.1.10 资源归因 | [资源所有权审计](resources_0_1_10.md) |
 | 0.1.10 发布证据 | [已验证内容与未完成项](validation_0_1_10.md) |
 | 0.1.9 更新功能 | [交付计划](plan_0_1_9.md) |

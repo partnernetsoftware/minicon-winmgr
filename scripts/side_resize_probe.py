@@ -64,17 +64,30 @@ def main():
     def mouse(flags):
         value = p.INPUT(0, p.UNION(mouse=p.MOUSE(0, 0, 0, flags, 0, 0)))
         assert p.u.SendInput(1, c.byref(value), c.sizeof(value)) == 1
+        p.wait(lambda:bool(p.u.GetAsyncKeyState(1)&0x8000)==(flags==2))
 
     def drag_start(edge, target_pixels):
+        # These are independent drags, not a double-click. The taskbar class
+        # uses CS_DBLCLKS, so a second press inside the system interval would
+        # become WM_LBUTTONDBLCLK instead of starting a resize.
+        time.sleep((p.u.GetDoubleClickTime()+20)/1000)
+        p.activate()
         rect = p.rect(bar())
         x = rect[2]-2 if edge == 'left' else rect[0]+2
         y = rect[1]+min(120, (rect[3]-rect[1])//2)
         assert p.u.SetCursorPos(x,y)
         time.sleep(.05)
-        mouse(2); time.sleep(.06)
+        mouse(2)
+        def captured():
+            info=p.GTI();info.size=c.sizeof(info)
+            return (p.u.GetGUIThreadInfo(p.u.GetWindowThreadProcessId(bar(),None),c.byref(info))
+                    and info.capture==bar())
+        p.wait(captured)
         target_x = rect[0]+target_pixels if edge == 'left' else rect[2]-target_pixels
         assert p.u.SetCursorPos(target_x,y)
-        time.sleep(.15)
+        expected=max(scaled(160),min(target_pixels,scaled(480),
+                                    (reservation_base[2]-reservation_base[0])//3))
+        p.wait(lambda:abs(width()-expected)<=2)
 
     try:
         p.stop()

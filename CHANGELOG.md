@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.11
+
+- Require same-user, same-session standard-privilege relaunch before elevated startup can initialize the desktop; exit on failure.
+- Recognize another installed product build as the login shell for notification hosting.
+- Show `Www yyyy-mm-dd HH:MM` in the taskbar clock.
+- Preview Run candidates while navigating, with draft restoration and explicit adoption.
+- Separate default logs per Windows account; isolate localized launch-error tests.
+
 ## 0.1.10 — 2026-10-16
 
 - 左右任务条可拖动调整宽度；默认用户目录 winmgr.cnf 记住设置，重启自动恢复。修复换到左右侧后最大化窗口底部留空。
