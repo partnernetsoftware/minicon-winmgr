@@ -15,7 +15,7 @@
 产品原则：**用不上的可选功能，默认不加载。** 0.1.8 中，旧菜单默认不初始化，缩略预览默认不创建窗口，Run 的窗口和工作线程首次使用时才创建；通知宿主按外壳身份和显式配置决定初始化。详见 [0.1.8 设计与验收](docs/archive/plan_0_1_8.md)。
 
 
-当前版本 **[0.1.12](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.12)**。版本事实见 [发布说明](docs/releases/v0.1.12.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.12 计划](docs/plan_0_1_12.md)。
+当前公开版 **[0.1.12](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.12)**。版本事实见 [发布说明](docs/releases/v0.1.12.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.12 计划](docs/plan_0_1_12.md)。
 
 0.1.12 接管前校验可靠恢复记录，运行中交接补齐通知宿主，统一必要界面的启动就绪门槛；设置分开显示当前会话、下次登录与恢复依据。
 

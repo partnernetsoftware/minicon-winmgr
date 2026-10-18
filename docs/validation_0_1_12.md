@@ -1,6 +1,6 @@
 # 0.1.12 验收记录
 
-状态：**准确候选的源码、组件、完整桌面与历史交接验收完成；发布结果在下方更新。** [计划](plan_0_1_12.md)列出实际实现与顺延项。
+状态：**已合 main 并公开发布；附件与验收候选一致，真实公开 .11 → .12 更新七项通过，原运行环境恢复。** [计划](plan_0_1_12.md)列出实际实现与顺延项。
 
 ## 最终候选身份
 
@@ -15,7 +15,7 @@
 | 范围 | 实际结果及边界 |
 |---|---|
 | 质量 | fmt、严格 Clippy、10 项日志测试及 41 项 Python 控制流/合成检查通过；公开材料检查通过。 |
-| 普通单元 | 候选 CI 优化构建按中英 × 默认并发/串行执行，四组各 328 passed、0 failed；本地最终 release 层优化普通单元另一次 328 passed、0 failed、12 ignored。 |
+| 普通单元 | 候选 CI 优化构建与发布提交的 main CI debug 均按中英 × 默认并发/串行执行，四组各 328 passed、0 failed；发布 CI 及本地 release 层优化普通单元各另一次 328 passed、0 failed、12 ignored。 |
 | Win32 原始登记 | 仅在临时测试键验证缺失、空值、REG_EXPAND_SZ、空白、引号与原始字节的实际往返；没有改真实 Winlogon Shell。 |
 | 恢复记录与条件写入 | 临时目录/抽象层覆盖不可写目的地、缺失/空/损坏/异身份记录、原记录不可覆盖、外部改动拒绝覆盖、写后校验失败的条件恢复。 |
 | 私有桌面通知协议 | 公开宿主发现、空会话就绪、重复安装、真实 Shell_NotifyIcon 登记/修改/删除、拥有的图像、点击回调及陈旧登记拒绝通过。 |
@@ -50,7 +50,13 @@
 
 ## 发布
 
-首次 tag CI 39134649105 与 main CI 39134649136 因 Rust 1.99 新增 Clippy 固定分块规则失败；已等价改用 as_chunks::<2>()，不关闭警告。最终候选 CI 39135089528（Rust 1.99.1）及准确 exe 分段验收已通过。待 tag 原样晋升、草稿附件核验与真正公网 .11 → .12 更新，不记为已公开。
+首次 tag CI 39134649105 与 main CI 39134649136 因 Rust 1.99 新增 Clippy 固定分块规则失败；已等价改用 as_chunks::<2>()，不关闭警告。最终候选 CI 39135089528（Rust 1.99.1）及准确 exe 分段验收通过后重新晋升。
+
+- [公开 Release](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.12)：2026-10-18 14:53:52 UTC（北京时间 22:53:52），Latest、非草稿、非预发布；未登录的公开 latest API 同样返回 v0.1.12。
+- 发布 tag：c805cc192c4a95cb7f04227e42f93b9dd91a6961，main 包含该提交，发布分支已合入。
+- [发布 CI 39137591628](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39137591628) 与同提交 [main CI 39137591559](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39137591559) 均成功；发布 CI 核验来源后原样晋升候选，没有重新编译替换附件。
+- 草稿三个附件已重新下载，与候选 exe、SHA256SUMS.txt、BUILDINFO.toml 逐字节比较一致后公开；exe 摘要为上方 479655b4…fcdce09。
+- 真正公开 0.1.11 更新器通过实际 GitHub 完成检查、下载校验、暂存摘要核对、显式重启和成功回执，旧版备份及新版身份均正确，七项全部通过；原运行程序及桌面环境恢复。旧版 exe 摘要为 eaa1a4ac89bf619c994f34ec13641f3fd42e88894a65e412cb1c800fb71af0f0。没有使用本地更新端点冒充公网。
 
 ## 开发期修正与旧候选
 

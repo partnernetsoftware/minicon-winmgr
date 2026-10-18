@@ -15,7 +15,7 @@ A lightweight Windows desktop shell built with Rust and Win32, designed as a rep
 Product principle: **Optional features you do not need should not load by default.** In 0.1.8, the legacy menu is not initialized by default, previews do not create a window until enabled, and Run creates its window and workers on first use. The notification host initializes according to shell identity and explicit configuration. See the [0.1.8 design and acceptance](docs/archive/plan_0_1_8.md).
 
 
-Version: **[0.1.12](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.12)**. See the [release notes](docs/releases/v0.1.12.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_12.md). Linked design and specification documents are currently primarily in Chinese.
+Current release: **[0.1.12](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.12)**. See the [release notes](docs/releases/v0.1.12.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_12.md). Linked design and specification documents are currently primarily in Chinese.
 
 Version 0.1.12 verifies recovery records before takeover, installs the notification host during runtime handover, and uses one essential startup-readiness gate. Desktop management distinguishes this session, next sign-in and recovery status.
 

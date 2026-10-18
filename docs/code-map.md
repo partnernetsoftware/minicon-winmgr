@@ -1,6 +1,6 @@
 # 代码与文档地图
 
-> 2026-10-18 · 当前公开版 0.1.11，0.1.12 正在发布；实际范围见[实施计划](plan_0_1_12.md)，证据与限制见[验收记录](validation_0_1_12.md)。[本轮梳理](review_0_1_12.md)保留开发前发现。
+> 2026-10-18 · 当前公开版 0.1.12；实际范围见[实施计划](plan_0_1_12.md)，证据与限制见[验收记录](validation_0_1_12.md)。[本轮梳理](review_0_1_12.md)保留开发前发现。
 
 | 用户路径 | 主要实现 | 规格/证据 |
 |---|---|---|
@@ -11,7 +11,7 @@
 | 通知宿主、图标、面板 | `tray_host`、`tray`、`tray_bar`、`tray_popup` | [通知规格](prd_1_1_2.md)、[验收数据](validation.md) |
 | 悬停标题/缩略图、图标 | `bar_tip`、`hover_preview`、`window_icon`、`window_icon_worker` | [资源审计与开发状态](resources_0_1_10.md) |
 | 兼容的旧菜单、快捷固定项、文件夹 | `start_menu`、`quick_launch`、`folder_stack`、`recents` | [后续清单](prd_5_1.md)；默认 UI 入口已退役 |
-| 外壳接管与回滚 | `shell_registry`、`shell_recovery`、`shell_swap` | [外壳规格](prd_3_1.md)、[待收敛边界](review_0_1_12.md) |
+| 外壳接管与回滚 | `shell_registry`、`shell_recovery`、`shell_swap` | [外壳规格](prd_3_1.md)、[验收边界](validation_0_1_12.md) |
 | 手动更新与交接 | `update`、`update_cancel`、`update_http`、`update_install`、`update_stream` | [更新设计](archive/plan_0_1_9.md) |
 | 诊断、导出、指标与日志 | `diagnostics`、`diagnostic_ui`、`diagnostic_export`、`metrics`、`logging`、`log_store` | [资源审计](resources_0_1_10.md)、[已验范围](validation_0_1_10.md) |
 
@@ -38,7 +38,7 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 - `src/i18n.rs`：English/中文界面目录、默认语言和自有窗口标题/控件本地化；不转换命令或用户输入。
 
-文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](archive/plan_0_1_9.md)；历史：[0.1.10 资源与稳健性](archive/plan_0_1_10.md)；当前公开版：[0.1.11](archive/plan_0_1_11.md)。
+文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](archive/plan_0_1_9.md)；历史：[0.1.10 资源与稳健性](archive/plan_0_1_10.md)、[0.1.11](archive/plan_0_1_11.md)；当前公开版：[0.1.12](plan_0_1_12.md)。
 
 0.1.8：Run 快捷键路由在 `window`，窗口与 worker 在首次 `run_dialog::show` 创建；`run_history` 提供有界本地应用发现与路径/环境变量建议。主题化原生候选行保留完整 LB 字符串。`win_util::force_foreground` 处理跨权限 restore，`taskbar` 按点击坐标命中任务；专项脚本 `interaction_probe.py` / `taskmgr_probe.py` 纳入发布层。
 

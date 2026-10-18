@@ -2,9 +2,9 @@
 
 产品方向（2026-10-18）：完成 0.1.x 的基本可用与可靠收尾，优先修复已确认问题。后续版本草案仅作备选，不默认逐版实施，不启动 macOS 扩展。0.1.12 的[产品设计讨论稿](design_0_1_12.md)保留失败/恢复边界，实际实施范围从必要修复中选定。
 
-当前公开版：[v0.1.11](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.11)。使用入口：[English](../readme.en.md) / [中文](../readme.zh.md)。
+当前公开版：[v0.1.12](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.12)。使用入口：[English](../readme.en.md) / [中文](../readme.zh.md)。
 
-当前开发版：**0.1.12**，接管恢复依据、统一启动就绪和运行中通知宿主转换已实现；最终同文件验收已完成，发布流程进行中。范围见[实施计划](plan_0_1_12.md)，真实进度见[验收记录](validation_0_1_12.md)。
+**0.1.12 已合 main 并公开发布**：接管恢复依据、统一启动就绪和运行中通知宿主转换已交付；附件原样晋升准确 CI 候选，真实公开 .11 → .12 更新七项通过。范围见[实施计划](plan_0_1_12.md)，证据与覆盖限制见[验收记录](validation_0_1_12.md)。
 
 0.1.11 已公开发布，范围与此前未完成事项见 [0.1.11 计划](archive/plan_0_1_11.md)，实测与覆盖限制见[验收记录](validation_0_1_11.md)。
 
