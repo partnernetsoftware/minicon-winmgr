@@ -44,4 +44,8 @@
 
 ## 发布
 
-功能验收与准确构建清单已备妥；正式 tag、公开附件和真实 GitHub 更新验证的结果在发布后补充。
+[v0.1.11 已公开发布](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.11)，发布时间 2026-10-18 02:50:39 UTC；非草稿、非预发布，公开 API 的 latest 已为 v0.1.11。远程 main 与 tag 均指向发布提交 `43b3d35078346afac303580e0fa8f88ddfab2e6d`。
+
+[发布工作流 39091298772](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39091298772)及 [main CI 39091298893](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39091298893)均成功。草稿的 exe、BUILDINFO.toml、SHA256SUMS.txt 已实际下载，与准确 CI 候选逐字节一致，公开后附件大小/摘要未变。exe 为 2,857,472 字节，SHA-256 与本页构建身份相同。
+
+真正公开的 0.1.10 在隔离安装上，通过实际 GitHub 服务完成检查、下载、SHA 匹配、显式重启、新版回执与旧版备份核对，七项检查全部通过；最终安装文件与准确候选 SHA 相同，原实例/工作区/登录 Shell 已恢复，未覆盖用户原安装。该成功路径不代表所有公网故障矩阵已完成。

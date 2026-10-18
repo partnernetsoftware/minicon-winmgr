@@ -15,7 +15,7 @@
 产品原则：**用不上的可选功能，默认不加载。** 0.1.8 中，旧菜单默认不初始化，缩略预览默认不创建窗口，Run 的窗口和工作线程首次使用时才创建；通知宿主按外壳身份和显式配置决定初始化。详见 [0.1.8 设计与验收](docs/archive/plan_0_1_8.md)。
 
 
-当前版本 **[0.1.11](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.11)**。版本事实见 [CHANGELOG](CHANGELOG.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.11 计划](docs/plan_0_1_11.md)。
+当前版本 **[0.1.11](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.11)**。版本事实见 [发布说明](docs/releases/v0.1.11.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.11 计划](docs/plan_0_1_11.md)。
 
 0.1.11 加固普通权限启动，时钟改为 `Www yyyy-mm-dd HH:MM`，Run 上下选择候选时同步预览到输入框。0.1.10 会记住你的布局，左右侧栏可拖宽，点击时间可打开回收站，换版本启动前会先询问。修复任务条换到侧边后最大化窗口底部留空。保留手动检查/更新/重启、默认英文的中英界面、白天/黑夜/自动主题与按需功能；检测到自身提升权限后以同用户普通权限重新启动，不主动请求 UAC。实测与覆盖限制见 [0.1.10 验收](docs/validation_0_1_10.md)。
 
@@ -86,4 +86,4 @@ Alt+反引号聚焦任务栏，方向键选择、Home/End 到首尾、Enter/Spac
 
 开发期使用 `python scripts/test.py` 快速检查；`--layer unit --filter config::tests` 只跑指定模块，`--layer appearance --restore-exe <normal-running-exe>` / `settings --restore-exe <normal-running-exe>` 在隔离副本中运行对应桌面专项；可加 `--candidate-exe <existing-exe>` 复用已有构建。准备发布时用 `--layer release` 跑全部自动化，并测试 release 产物。分层内容与环境要求见[测试说明](docs/testing.md)。Windows CI 执行 `quality` 与有界 `fault` 检查；手动触发 candidate workflow 跑优化单元并构建待验收文件。打 tag 时复核构建身份，把同一份已测文件晋升为草稿；证据和截图审阅后再公开，代码签名尚未纳入。构建工具链如在自定义位置，设置对应 `RUSTUP_HOME` / `CARGO_HOME` 并把 Cargo bin 加入 PATH。
 
-0.1.9 发布验收见 [完整发布记录](docs/validation.md)；0.1.6 的历史自动化与桌面证据见 [版本计划](docs/archive/plan_0_1_6.md) 和 [验收数据](docs/validation.md)。物理混合 DPI、多屏热插拔、屏幕阅读器语音、高对比度和小时级长跑未覆盖。
+发布验收见 [完整发布记录](docs/validation.md)，本版详见 [0.1.10 验收](docs/validation_0_1_10.md)；0.1.6 的历史自动化与桌面证据见 [版本计划](docs/archive/plan_0_1_6.md) 和 [验收数据](docs/validation.md)。物理混合 DPI、多屏热插拔、屏幕阅读器语音、高对比度和小时级长跑未覆盖。
