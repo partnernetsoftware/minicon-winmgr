@@ -268,7 +268,7 @@ fn linked_token(original: HANDLE) -> Option<Owned> {
         .ok()?;
     let linked = Owned(linked.LinkedToken);
     let mut primary = HANDLE::default();
-    if unsafe {
+    if let Err(error) = unsafe {
         DuplicateTokenEx(
             linked.0,
             TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
@@ -277,11 +277,10 @@ fn linked_token(original: HANDLE) -> Option<Owned> {
             TokenPrimary,
             &mut primary,
         )
-    }
-    .is_err()
-    {
+    } {
         tracing::warn!(
-            error = %windows::core::Error::from_thread(),
+            hresult = error.code().0,
+            %error,
             "linked token could not be duplicated to a primary token"
         );
         return None;
@@ -311,32 +310,14 @@ fn linked_token(original: HANDLE) -> Option<Owned> {
 /// token behind that broke every console child of the shell.
 fn peer_token(original: HANDLE) -> Option<Owned> {
     let session = fixed::<u32>(original, TokenSessionId).ok()?;
-    let mut pids = vec![0u32; 4096];
-    let mut needed = 0u32;
-    let listed = unsafe {
-        EnumProcesses(
-            pids.as_mut_ptr(),
-            std::mem::size_of_val(&pids) as u32,
-            &mut needed,
-        )
-    };
-    if listed.is_err() || needed == 0 {
-        return None;
-    }
-    let count = (needed as usize / std::mem::size_of::<u32>()).min(pids.len());
+    let pids = process_ids().ok()?;
     let me = std::process::id();
-    // The process enumeration is already bounded by pids.len(). Do not cut
-    // the same-session list to its first 64 entries: those can all be elevated
-    // while Explorer and ordinary applications occur later in the list.
-    let candidates: Vec<u32> = pids[..count]
-        .iter()
-        .copied()
+    let candidates: Vec<u32> = pids
+        .into_iter()
         .filter(|pid| *pid != 0 && *pid != me)
         .filter(|pid| peer_session(*pid) == Some(session))
         .collect();
-    // Explorer first: its token is the session's own. A second pass accepts
-    // any other same-user process, which covers machines where no Explorer
-    // window is open.
+    // Explorer first; other verified ordinary peers also work without Explorer.
     for explorer_only in [true, false] {
         for &pid in &candidates {
             if explorer_only && !is_explorer(pid) {
@@ -353,6 +334,26 @@ fn peer_token(original: HANDLE) -> Option<Owned> {
         }
     }
     None
+}
+
+fn process_ids() -> windows::core::Result<Vec<u32>> {
+    let mut pids = vec![0u32; 4096];
+    loop {
+        let bytes = std::mem::size_of_val(pids.as_slice());
+        let mut needed = 0u32;
+        unsafe { EnumProcesses(pids.as_mut_ptr(), bytes as u32, &mut needed) }?;
+        if (needed as usize) < bytes {
+            pids.truncate(needed as usize / std::mem::size_of::<u32>());
+            return Ok(pids);
+        }
+        // A full buffer may be truncated. Grow within a fixed memory budget.
+        if pids.len() == 65536 {
+            return Err(windows::core::Error::from_hresult(
+                ERROR_INSUFFICIENT_BUFFER.to_hresult(),
+            ));
+        }
+        pids.resize(pids.len() * 2, 0);
+    }
 }
 
 fn peer_session(pid: u32) -> Option<u32> {
@@ -657,6 +658,26 @@ fn relaunch() -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_process_enumeration_reaches_the_running_test_process() {
+        assert!(process_ids().unwrap().contains(&std::process::id()));
+    }
+
+    #[test]
+    fn native_ordinary_process_token_can_be_duplicated_with_identity_intact() {
+        let original = token(
+            unsafe { GetCurrentProcess() },
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+        )
+        .unwrap();
+        if !snapshot(original.0).unwrap().ordinary() {
+            return; // This case is specifically for an ordinary desktop token.
+        }
+        let duplicate = peer_primary(std::process::id(), original.0)
+            .expect("a known ordinary source must not be accepted as absent");
+        assert!(snapshot(duplicate.0).unwrap().ordinary());
+        assert!(same_identity(original.0, duplicate.0).unwrap());
+    }
     #[test]
     fn ordinary_startup_does_not_relaunch() {
         let status = Status {

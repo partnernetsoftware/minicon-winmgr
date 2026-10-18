@@ -472,8 +472,8 @@ const CATALOG: &[(&str, &str)] = &[
         "Unable to open configuration details: {error}",
     ),
     (
-        "minicon-winmgr {} · {}\n\n任务栏唤出配置：{}（实际注册结果见日志）\n\n配置来源（启动时）\n",
-        "minicon-winmgr {} · {}\n\nTaskbar hotkey: {} (registration results are recorded in the log)\n\nConfiguration sources at startup\n",
+        "minicon-winmgr {} · {}\n\n程序路径：{}\n更新保留安装路径和文件名；版本以本页显示为准。\n\n任务栏唤出配置：{}（实际注册结果见日志）\n\n配置来源（启动时）\n",
+        "minicon-winmgr {} · {}\n\nExecutable: {}\nUpdates preserve the installation path and filename; the version shown here is authoritative.\n\nTaskbar hotkey: {} (registration results are recorded in the log)\n\nConfiguration sources at startup\n",
     ),
     (
         "{title}：{value}\n来源：{}\n\n",
