@@ -58,6 +58,10 @@ static EDIT: AtomicIsize = AtomicIsize::new(0);
 static LIST: AtomicIsize = AtomicIsize::new(0);
 static ORIG_EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
 static VISIBLE: AtomicBool = AtomicBool::new(false);
+static HOTKEY_READY: AtomicBool = AtomicBool::new(false);
+pub(crate) fn reachable() -> bool {
+    HOTKEY_READY.load(Ordering::SeqCst)
+}
 
 fn hwnd_from(raw: isize) -> HWND {
     HWND(raw as *mut core::ffi::c_void)
@@ -193,7 +197,10 @@ pub fn init(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         ORIG_EDIT_PROC.store(previous, Ordering::SeqCst);
 
         match RegisterHotKey(Some(hwnd), HOTKEY_ID, MOD_ALT, VK_SPACE.0 as u32) {
-            Ok(()) => tracing::info!("launcher hotkey registered (Alt+Space)"),
+            Ok(()) => {
+                HOTKEY_READY.store(true, Ordering::SeqCst);
+                tracing::info!("launcher hotkey registered (Alt+Space)");
+            }
             Err(err) => {
                 tracing::warn!(%err, "launcher hotkey registration failed (Alt+Space taken?)");
             }
@@ -407,6 +414,7 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         WM_DESTROY => {
+            HOTKEY_READY.store(false, Ordering::SeqCst);
             // SAFETY: `hwnd` is our live popup; teardown of its own hotkey.
             unsafe {
                 let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);

@@ -38,6 +38,34 @@ pub(crate) const SHELL_RESULT_MESSAGE: u32 = 0x8000 + 147;
 const TRAY_TRANSITION_MESSAGE: u32 = 0x8000 + 148;
 const TAKEOVER_MESSAGE: u32 = 0x8000 + 145;
 const EXECUTE_TAKEOVER_MESSAGE: u32 = 0x8000 + 146;
+static RUN_LAUNCH_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static MENU_LAUNCH_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) fn standalone_launch_ready() -> bool {
+    RUN_LAUNCH_READY.load(std::sync::atomic::Ordering::SeqCst)
+        || crate::launcher_ui::reachable()
+        || (MENU_LAUNCH_READY.load(std::sync::atomic::Ordering::SeqCst)
+            && crate::config::current().start_menu
+            && crate::taskbar::running())
+}
+pub(crate) fn ready_for_handover() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{SMTO_ABORTIFHUNG, SendMessageTimeoutW};
+    let Some(hwnd) = hub::shell_hwnd() else {
+        return false;
+    };
+    let mut result = 0;
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            STARTUP_READY_MESSAGE,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            1000,
+            Some(&mut result),
+        )
+    };
+    sent.0 != 0 && result == 1
+}
 static STARTUP_TAKEOVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub(crate) fn takeover_on_startup() {
     STARTUP_TAKEOVER.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -233,7 +261,7 @@ pub fn run(
 
         // Launcher popup (Alt+Space) — self-contained window + hotkey.
         let launcher_ready = match crate::launcher_ui::init(hinstance) {
-            Ok(()) => true,
+            Ok(()) => crate::launcher_ui::reachable(),
             Err(error) => {
                 tracing::warn!(%error, "launcher initialization failed");
                 false
@@ -241,9 +269,14 @@ pub fn run(
         };
 
         // Start menu (ORB) — opened from the taskbar brand dot.
-        if let Err(err) = crate::start_menu::install(hinstance) {
-            tracing::error!(%err, "start menu init failed; continuing without it");
-        }
+        let menu_ready = match crate::start_menu::install(hinstance) {
+            Ok(()) => crate::config::current().start_menu,
+            Err(err) => {
+                tracing::error!(%err, "start menu init failed; continuing without it");
+                false
+            }
+        };
+        MENU_LAUNCH_READY.store(menu_ready, std::sync::atomic::Ordering::SeqCst);
 
         // Run dialog (Win+R).
         let run_ready = match crate::run_dialog::install(hinstance) {
@@ -253,6 +286,8 @@ pub fn run(
                 false
             }
         };
+
+        RUN_LAUNCH_READY.store(run_ready, std::sync::atomic::Ordering::SeqCst);
 
         // Settings window (opened from the taskbar's settings button).
         let settings_ready = match crate::settings_ui::install(hinstance) {
@@ -327,7 +362,10 @@ pub fn run(
             crate::settings_ui::show();
         }
         crate::appearance::refresh();
-        let usable = taskbar_ready && settings_ready && tray_ready && (launcher_ready || run_ready);
+        let usable = taskbar_ready
+            && settings_ready
+            && tray_ready
+            && (standalone_launch_ready() || crate::shell_swap::foreign_shell_running());
         if !usable {
             tracing::error!(
                 taskbar_ready,
@@ -561,6 +599,81 @@ mod readiness_tests {
     use super::*;
     use std::cell::RefCell;
     #[test]
+    #[ignore = "private desktop with owned hotkey competitor; use isolated_tray_probe.py --test collision"]
+    fn native_rejects_all_launch_hotkeys_taken() {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MINICON_NO_TASKBAR").as_deref(), Ok("1"));
+        let companion = std::env::var_os("MINICON_TEST_COMPANION").is_some();
+        let class = if companion {
+            "Shell_TrayWnd"
+        } else {
+            "minicon_fixture_hotkeys"
+        };
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "shell_swap::tests::private_foreign_host",
+                "--nocapture",
+            ])
+            .env("MINICON_TEST_OCCUPY_LAUNCH_KEYS", "1")
+            .env(
+                "MINICON_TEST_ONLY_HOTKEYS",
+                if companion { "0" } else { "1" },
+            )
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let competitor = loop {
+            if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR(wide(class).as_ptr()), PCWSTR::null()) } {
+                break hwnd;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let mut competitor_ready = 0;
+        while std::time::Instant::now() < deadline {
+            let _ = unsafe {
+                SendMessageTimeoutW(
+                    competitor,
+                    WM_APP + 219,
+                    WPARAM(0),
+                    LPARAM(0),
+                    SMTO_ABORTIFHUNG,
+                    100,
+                    Some(&mut competitor_ready),
+                )
+            };
+            if competitor_ready == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(competitor_ready, 1);
+        let before = crate::shell_registry::current_raw().unwrap();
+        let result = run(false, |usable| {
+            assert_eq!(usable, companion);
+            if companion {
+                assert!(!standalone_launch_ready());
+                assert!(crate::shell_swap::take_over().is_err());
+                assert_eq!(crate::shell_registry::current_raw().unwrap(), before);
+                unsafe { PostMessageW(crate::hub::shell_hwnd(), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+                    .unwrap();
+            }
+            Ok(())
+        });
+        assert_eq!(result.is_ok(), companion);
+        assert_eq!(STARTUP_READY.get(), companion);
+        assert!(!crate::launcher_ui::reachable());
+        unsafe { PostMessageW(Some(competitor), WM_CLOSE, WPARAM(0), LPARAM(0)) }.unwrap();
+        assert!(owner.wait().unwrap().success());
+        crate::settings_ui::shutdown();
+        crate::run_dialog::shutdown();
+        crate::tray_popup::shutdown();
+        crate::tray_host::shutdown();
+    }
+    #[test]
     #[ignore = "private-desktop startup/UI worker fixture; use isolated_tray_probe.py --test startup"]
     fn native_startup_and_worker_host_transition() {
         assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
@@ -570,6 +683,7 @@ mod readiness_tests {
             receiver
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap();
+            assert!(ready_for_handover());
             assert!(crate::tray_host::is_installed());
             transition_tray(false).unwrap();
             assert!(!crate::tray_host::is_installed());

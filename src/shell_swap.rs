@@ -292,6 +292,15 @@ pub fn take_over() -> Result<Takeover, Box<dyn Error>> {
     ) {
         return Err("Notification hosting is explicitly disabled; takeover was cancelled".into());
     }
+    if !crate::window::standalone_launch_ready() {
+        return Err("No reachable Minicon launch entry is available; the existing desktop was left unchanged".into());
+    }
+    if !crate::window::ready_for_handover() {
+        return Err(
+            "Minicon is not ready for desktop handover; the existing desktop was left unchanged"
+                .into(),
+        );
+    }
     let operation = crate::shell_recovery::begin()?;
     let before = shell_registry::current_raw()?;
     let restore_explorer = foreign_shell_is_explorer();
@@ -405,12 +414,16 @@ mod tests {
             core::PCWSTR,
         };
         assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         unsafe extern "system" fn procedure(
             window: HWND,
             message: u32,
             wp: WPARAM,
             lp: LPARAM,
         ) -> LRESULT {
+            if message == WM_APP + 219 {
+                return LRESULT(isize::from(READY.load(std::sync::atomic::Ordering::SeqCst)));
+            }
             if message == WM_DESTROY || message == WM_TIMER {
                 unsafe {
                     PostQuitMessage(0);
@@ -421,7 +434,13 @@ mod tests {
         }
         unsafe {
             let module = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
-            let name = crate::win_util::wide("Shell_TrayWnd");
+            let name = crate::win_util::wide(
+                if std::env::var("MINICON_TEST_ONLY_HOTKEYS").as_deref() == Ok("1") {
+                    "minicon_fixture_hotkeys"
+                } else {
+                    "Shell_TrayWnd"
+                },
+            );
             let class = WNDCLASSW {
                 lpfnWndProc: Some(procedure),
                 hInstance: HINSTANCE(module.0),
@@ -445,6 +464,26 @@ mod tests {
             )
             .unwrap();
             SetTimer(Some(hwnd), 1, 15000, None);
+            if std::env::var_os("MINICON_TEST_OCCUPY_LAUNCH_KEYS").is_some() {
+                use windows::Win32::UI::Input::KeyboardAndMouse::*;
+                for (id, modifiers, key) in [
+                    (701, MOD_ALT, VK_SPACE),
+                    (702, MOD_WIN, VK_R),
+                    (703, MOD_CONTROL | MOD_ALT, VK_R),
+                ] {
+                    if let Err(error) =
+                        RegisterHotKey(Some(hwnd), id, modifiers | MOD_NOREPEAT, key.0 as u32)
+                    {
+                        // A system-reserved/already-owned key is unavailable too;
+                        // retain its owner and verify the parent's actual result.
+                        assert_eq!(
+                            error.code(),
+                            windows::core::HRESULT::from_win32(ERROR_HOTKEY_ALREADY_REGISTERED.0)
+                        );
+                    }
+                }
+            }
+            READY.store(true, std::sync::atomic::Ordering::SeqCst);
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).0 > 0 {
                 DispatchMessageW(&message);

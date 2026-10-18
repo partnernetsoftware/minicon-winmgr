@@ -26,7 +26,7 @@ class Process(c.Structure):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--test-exe', type=Path, required=True)
-    parser.add_argument('--test', choices=['tray', 'startup', 'takeover'], default='tray')
+    parser.add_argument('--test', choices=['tray', 'startup', 'takeover', 'collision', 'companion-collision'], default='tray')
     args = parser.parse_args()
     executable = args.test_exe.resolve(strict=True)
     root = Path(__file__).resolve().parents[1]
@@ -59,12 +59,16 @@ def main():
                            MINICON_LOG_DIR=str(folder/'logs'))
         block = c.create_unicode_buffer('\0'.join(f'{k}={v}' for k, v in sorted(environment.items()))+'\0\0')
         environment['LOCALAPPDATA'] = str(folder/'appdata')
+        if args.test == 'companion-collision':
+            environment['MINICON_TEST_COMPANION']='1'
         if args.test == 'takeover':
             environment.pop('MINICON_TRAY_HOST', None)
         block = c.create_unicode_buffer('\0'.join(f'{k}={v}' for k, v in sorted(environment.items()))+'\0\0')
         test = {'tray': 'tray_host::tests::native_public_host_lifecycle',
                 'startup': 'window::readiness_tests::native_startup_and_worker_host_transition',
-                'takeover': 'shell_swap::tests::native_private_desktop_takeover'}[args.test]
+                'takeover': 'shell_swap::tests::native_private_desktop_takeover',
+                'collision': 'window::readiness_tests::native_rejects_all_launch_hotkeys_taken',
+                'companion-collision': 'window::readiness_tests::native_rejects_all_launch_hotkeys_taken'}[args.test]
         command = c.create_unicode_buffer(subprocess.list2cmdline([
             str(executable), '--ignored', '--exact',
             test, '--nocapture']))
