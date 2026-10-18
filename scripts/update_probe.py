@@ -72,7 +72,7 @@ def main(*,release=False,previous_artifact=None):
     def wait_idle():p.wait(lambda:enabled(CHECK) or enabled(RESTART),timeout=15)
     def start_case(binary):
         p.stop()
-        folder=Path(tempfile.mkdtemp(prefix='case-',dir=output));created.append(folder);exe=folder/'winmgr.exe';exe.write_bytes(binary)
+        folder=Path(tempfile.mkdtemp(prefix='case-',dir=output));created.append(folder);exe=folder/'minicon-winmgr-v0.1.10-x86_64-windows.exe';exe.write_bytes(binary)
         cfg=folder/'settings.txt';cfg.write_text('ui.language=en\nappearance.mode=light\ntaskbar.position=bottom\ntaskbar.menu=false\n',encoding='utf-8')
         env=original.copy()
         for key in ['MINICON_LANGUAGE','MINICON_TASKBAR','MINICON_NO_TASKBAR','MINICON_START_MENU','MINICON_THEME_MODE','MINICON_TASKBAR_POSITION','MINICON_WINMGR_UPDATE_RECOVERED']:

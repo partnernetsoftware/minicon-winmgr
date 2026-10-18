@@ -268,6 +268,7 @@ def main(*, include_run_regression=True, build=True):
         wait(lambda: u.IsWindowVisible(info))
         edit = u.GetDlgItem(info, 1)
         check('configuration_details_show_values_sources_and_save_path', '配置来源' in text(edit) and '下次启动' in text(edit) and str(CONFIG) in text(edit))
+        check('configuration_details_identify_executable_and_preserved_filename', str(LIVE) in text(edit) and '更新保留安装路径和文件名' in text(edit))
         key('CTRL+A')
         check('configuration_details_support_native_text_selection', u.SendMessageW(edit, 0xB0, 0, 0) != 0)
         key('ESC'); wait(lambda: not u.IsWindowVisible(info))
