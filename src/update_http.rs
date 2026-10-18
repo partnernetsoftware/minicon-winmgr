@@ -510,10 +510,39 @@ mod tests {
         ] {
             let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/stream", server.local_addr().unwrap());
+            server.set_nonblocking(true).unwrap();
+            let (finished, stop) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || {
-                let (mut stream, _) = server.accept().unwrap();
+                let started = Instant::now();
+                let (mut stream, _) = loop {
+                    match server.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if !matches!(stop.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
+                                || started.elapsed() > Duration::from_secs(4)
+                            {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("test accept failed: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
                 let mut request = [0u8; 8192];
-                assert!(stream.read(&mut request).unwrap() > 0);
+                let read = stream.read(&mut request);
+                // The 20ms client deadline may expire before it sends anything.
+                // That is still a valid budget failure; never wait forever for it.
+                if mode == "budget" && !matches!(read, Ok(count) if count > 0) {
+                    return;
+                }
+                assert!(read.unwrap() > 0);
                 let header = if mode.starts_with("unknown-") {
                     "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".into()
                 } else {
@@ -561,6 +590,7 @@ mod tests {
                     Ok(())
                 },
             );
+            let _ = finished.send(());
             worker.join().unwrap();
             if matches!(mode, "ok" | "unknown-length") {
                 assert_eq!(result.unwrap(), 100_000);
