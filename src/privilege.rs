@@ -209,7 +209,7 @@ fn account_name() -> Option<String> {
 
 /// SID as text (`S-1-5-21-…-1001`): still unique per account, used when the
 /// account name cannot be resolved.
-fn sid_text() -> Option<String> {
+pub(crate) fn sid_text() -> Option<String> {
     let user = current_user()?;
     let sid = unsafe { (*(user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
     let mut raw = PWSTR::null();

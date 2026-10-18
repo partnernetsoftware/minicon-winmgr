@@ -124,6 +124,9 @@ fn icons_store() -> &'static Mutex<Vec<TrayIconHandle>> {
 
 /// HWND of the sink window we created, or 0 when the host is not installed.
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_INSTALL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Whether we are currently hosting the notification area.
 ///
@@ -137,11 +140,18 @@ pub(crate) fn is_installed() -> bool {
 /// Installs the tray host when we are the shell (or `MINICON_TRAY_HOST=1`);
 /// otherwise a no-op.
 ///
-/// When installed we create a hidden `Shell_TrayWnd` window (falling back to a
-/// private `TinyShellTraySink` class if the former cannot be created) so that
+/// When installed we create a hidden `Shell_TrayWnd` window (failing if the public
+/// host cannot be created) so that
 /// other processes' `Shell_NotifyIcon` calls reach [`tray_wndproc`]. Every
 /// failure path logs and returns gracefully — this never panics.
 pub(crate) fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
+    if is_installed() {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if FAIL_NEXT_INSTALL.swap(false, Ordering::SeqCst) {
+        return Err("Injected notification host creation failure".into());
+    }
     if !host_requested() {
         tracing::debug!(
             "tray host disabled (not the shell and MINICON_TRAY_HOST unset); staying inert"
@@ -160,11 +170,20 @@ pub(crate) fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Er
     // `extern "system"` function.
     let hwnd = unsafe { create_sink(hinstance) };
     let Some(hwnd) = hwnd else {
-        tracing::warn!("tray host window could not be created; continuing without it");
-        return Ok(());
+        return Err(format!(
+            "Public notification host creation failed (Win32 {})",
+            unsafe { GetLastError().0 }
+        )
+        .into());
     };
 
     TRAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+    if unsafe { FindWindowW(PCWSTR(wide("Shell_TrayWnd").as_ptr()), PCWSTR::null()) }.ok()
+        != Some(hwnd)
+    {
+        shutdown();
+        return Err("The public notification host is not discoverable".into());
+    }
     let _ = unsafe { SetTimer(Some(hwnd), 1, 1000, None) };
     tracing::info!(hwnd = ?hwnd, "tray host sink window created");
 
@@ -175,11 +194,26 @@ pub(crate) fn install(hinstance: HINSTANCE) -> Result<(), Box<dyn std::error::Er
         let name = wide("TaskbarCreated");
         let msg = RegisterWindowMessageW(PCWSTR(name.as_ptr()));
         if msg != 0 {
-            let _ = PostMessageW(Some(HWND_BROADCAST), msg, WPARAM(0), LPARAM(0));
+            if let Err(error) = PostMessageW(Some(HWND_BROADCAST), msg, WPARAM(0), LPARAM(0)) {
+                shutdown();
+                return Err(error.into());
+            }
             tracing::debug!(msg, "broadcast TaskbarCreated");
+        } else {
+            shutdown();
+            return Err("TaskbarCreated registration failed".into());
         }
     }
     Ok(())
+}
+
+pub(crate) fn shutdown() {
+    let raw = TRAY_HWND.swap(0, Ordering::SeqCst);
+    if raw != 0 {
+        let _ =
+            unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(HWND(raw as *mut _)) };
+    }
+    lock_or_recover(icons_store()).clear();
 }
 
 /// Current hosted icons (empty when the host is not installed).
@@ -218,7 +252,7 @@ fn host_requested() -> bool {
     }
 }
 
-/// Creates the tray sink window: `Shell_TrayWnd` first, then a private class.
+/// Creates the publicly discoverable `Shell_TrayWnd`; no private fallback.
 ///
 /// # Safety
 /// Calls Win32 window APIs; all class-name buffers stay alive across the calls.
@@ -245,28 +279,7 @@ unsafe fn create_sink(hinstance: HINSTANCE) -> Option<HWND> {
         ) {
             return Some(hwnd);
         }
-        tracing::warn!(
-            error = GetLastError().0,
-            "CreateWindowEx(Shell_TrayWnd) failed; trying TinyShellTraySink"
-        );
-
-        let fallback = wide("TinyShellTraySink");
-        register_class(hinstance, PCWSTR(fallback.as_ptr()), "TinyShellTraySink");
-        CreateWindowExW(
-            WS_EX_TOOLWINDOW,
-            PCWSTR(fallback.as_ptr()),
-            PCWSTR(empty.as_ptr()),
-            WS_POPUP,
-            0,
-            0,
-            1,
-            1,
-            None,
-            None,
-            Some(hinstance),
-            None,
-        )
-        .ok()
+        None
     }
 }
 
@@ -553,6 +566,107 @@ unsafe extern "system" fn tray_wndproc_inner(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "private-desktop notification protocol fixture; use isolated_tray_probe.py"]
+    fn native_public_host_lifecycle() {
+        use super::*;
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::{Shell::*, WindowsAndMessaging::*};
+        assert_eq!(
+            std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(),
+            Ok("1"),
+            "Private desktop launcher is required"
+        );
+        let instance = HINSTANCE(
+            unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }
+                .unwrap()
+                .0,
+        );
+        assert!(
+            unsafe { FindWindowW(PCWSTR(wide("Shell_TrayWnd").as_ptr()), PCWSTR::null()) }.is_err()
+        );
+        install(instance).unwrap();
+        assert!(is_installed());
+        assert!(handles().is_empty()); // An empty session is ready.
+        install(instance).unwrap(); // Idempotent.
+        let owner = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                PCWSTR(wide("STATIC").as_ptr()),
+                PCWSTR::null(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(instance),
+                None,
+            )
+        }
+        .unwrap();
+        let mut icon = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: owner,
+            uID: 49,
+            uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+            uCallbackMessage: WM_APP + 211,
+            hIcon: unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap(),
+            ..Default::default()
+        };
+        for (to, from) in icon.szTip.iter_mut().zip("private fixture".encode_utf16()) {
+            *to = from;
+        }
+        assert!(unsafe { Shell_NotifyIconW(windows::Win32::UI::Shell::NIM_ADD, &icon) }.as_bool());
+        assert_eq!(handles().len(), 1);
+        let item = crate::tray::items().into_iter().next().unwrap();
+        assert!(item.is_forwardable());
+        assert!(item.image.is_some());
+        assert!(crate::tray_bar::forward_at(
+            &item,
+            crate::tray_bar::MouseEvent::LeftUp,
+            POINT { x: 10, y: 10 }
+        ));
+        let mut message = MSG::default();
+        assert!(
+            unsafe {
+                PeekMessageW(
+                    &mut message,
+                    Some(owner),
+                    icon.uCallbackMessage,
+                    icon.uCallbackMessage,
+                    PM_REMOVE,
+                )
+            }
+            .as_bool()
+        );
+        assert_eq!(message.lParam.0 as u32, WM_LBUTTONUP);
+        icon.uFlags = NIF_TIP;
+        icon.szTip.fill(0);
+        for (to, from) in icon.szTip.iter_mut().zip("changed".encode_utf16()) {
+            *to = from;
+        }
+        assert!(
+            unsafe { Shell_NotifyIconW(windows::Win32::UI::Shell::NIM_MODIFY, &icon) }.as_bool()
+        );
+        assert_eq!(handles()[0].tooltip, "changed");
+        assert!(
+            unsafe { Shell_NotifyIconW(windows::Win32::UI::Shell::NIM_DELETE, &icon) }.as_bool()
+        );
+        assert!(handles().is_empty());
+        assert!(!crate::tray_bar::forward_at(
+            &item,
+            crate::tray_bar::MouseEvent::LeftUp,
+            POINT::default()
+        ));
+        shutdown();
+        assert!(!is_installed());
+        assert!(
+            unsafe { FindWindowW(PCWSTR(wide("Shell_TrayWnd").as_ptr()), PCWSTR::null()) }.is_err()
+        );
+        let _ = unsafe { DestroyWindow(owner) };
+    }
     use super::*;
 
     /// Native x64 callers also send DWORD handles in this marshalled envelope.

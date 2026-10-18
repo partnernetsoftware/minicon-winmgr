@@ -43,10 +43,10 @@ pub(crate) struct Session {
 }
 impl Session {
     pub(crate) fn ready(&mut self, usable: bool) -> Result<(), String> {
-        if self.rollback.is_some() && !usable {
+        if !usable {
             return Err(error(
-                "The replacement could not create its essential interface. Restoring the previous executable.",
-                "新实例未能创建必要界面，将尝试恢复原程序。",
+                "Minicon could not initialize its essential interface. Startup was not acknowledged.",
+                "Minicon 未能初始化必要界面，未确认启动成功。",
             ));
         }
         self.rollback = None;
@@ -255,4 +255,18 @@ pub(crate) fn acquire(show_settings: bool) -> Result<Option<Session>, String> {
         guard: Some(guard),
         rollback: Some(old),
     }))
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    #[test]
+    fn ordinary_startup_must_not_acknowledge_an_unusable_interface() {
+        let mut session = Session {
+            guard: None,
+            rollback: None,
+        };
+        assert!(session.ready(false).is_err());
+        assert!(session.ready(true).is_ok());
+    }
 }

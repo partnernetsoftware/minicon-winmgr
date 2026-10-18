@@ -33,7 +33,81 @@ const HEARTBEAT_TIMER_ID: usize = 1;
 const DEFAULT_HEARTBEAT_SECS: u64 = 30;
 const SETTINGS_MESSAGE: u32 = 0x8000 + 141;
 pub(crate) const STARTUP_READY_MESSAGE: u32 = 0x8000 + 142;
+const COMMIT_STARTUP_MESSAGE: u32 = 0x8000 + 144;
+pub(crate) const SHELL_RESULT_MESSAGE: u32 = 0x8000 + 147;
+const TRAY_TRANSITION_MESSAGE: u32 = 0x8000 + 148;
+const TAKEOVER_MESSAGE: u32 = 0x8000 + 145;
+const EXECUTE_TAKEOVER_MESSAGE: u32 = 0x8000 + 146;
+static STARTUP_TAKEOVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) fn takeover_on_startup() {
+    STARTUP_TAKEOVER.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+pub(crate) fn request_takeover() -> Result<bool, String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, GetWindowThreadProcessId, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
+    };
+    let hwnd = unsafe {
+        FindWindowExW(
+            Some(HWND_MESSAGE),
+            None,
+            PCWSTR(wide(CLASS_NAME).as_ptr()),
+            None,
+        )
+    }
+    .unwrap_or_default();
+    if hwnd.is_invalid() {
+        return Ok(false);
+    }
+    let mut pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    if !crate::single_instance::same_user_session(pid) {
+        return Err("The running instance does not belong to this account/session".into());
+    }
+    let mut result = 0;
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            TAKEOVER_MESSAGE,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            1000,
+            Some(&mut result),
+        )
+    };
+    if sent.0 == 0 || result != 1 {
+        return Err(
+            "The running instance is not ready or did not accept the takeover request".into(),
+        );
+    }
+    // Never start a second process when an existing instance is present.
+    Ok(true)
+}
 thread_local! { static STARTUP_READY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+pub(crate) fn transition_tray(install: bool) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{SMTO_ABORTIFHUNG, SendMessageTimeoutW};
+    let hwnd = hub::shell_hwnd().ok_or("The UI thread is unavailable")?;
+    let mut result = 0;
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            TRAY_TRANSITION_MESSAGE,
+            WPARAM(usize::from(install)),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            5000,
+            Some(&mut result),
+        )
+    };
+    if sent.0 != 0 && result == 1 {
+        Ok(())
+    } else {
+        Err("The UI thread could not complete the notification-host transition".into())
+    }
+}
 
 pub(crate) fn request_settings() -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
@@ -158,9 +232,13 @@ pub fn run(
         hub::set_taskbar_state(crate::taskbar::running, crate::taskbar::cancel_hover);
 
         // Launcher popup (Alt+Space) — self-contained window + hotkey.
-        if let Err(err) = crate::launcher_ui::init(hinstance) {
-            tracing::error!(%err, "launcher UI init failed; continuing without it");
-        }
+        let launcher_ready = match crate::launcher_ui::init(hinstance) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "launcher initialization failed");
+                false
+            }
+        };
 
         // Start menu (ORB) — opened from the taskbar brand dot.
         if let Err(err) = crate::start_menu::install(hinstance) {
@@ -168,14 +246,22 @@ pub fn run(
         }
 
         // Run dialog (Win+R).
-        if let Err(err) = crate::run_dialog::install(hinstance) {
-            tracing::error!(%err, "run dialog init failed; continuing without it");
-        }
+        let run_ready = match crate::run_dialog::install(hinstance) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "Run hotkeys unavailable");
+                false
+            }
+        };
 
         // Settings window (opened from the taskbar's settings button).
-        if let Err(err) = crate::settings_ui::install(hinstance) {
-            tracing::error!(%err, "settings init failed; continuing without it");
-        }
+        let settings_ready = match crate::settings_ui::install(hinstance) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::error!(%err, "settings init failed; continuing without it");
+                false
+            }
+        };
 
         // Hover window-preview popup (shown by the taskbar on hover).
         if let Err(err) = crate::hover_preview::install(hinstance) {
@@ -183,9 +269,13 @@ pub fn run(
         }
 
         // Tray host is inert unless MINICON_TRAY_HOST=1 (replacement mode).
-        if let Err(err) = crate::tray_host::install(hinstance) {
-            tracing::error!(%err, "tray host install failed; continuing without it");
-        }
+        let tray_ready = match crate::tray_host::install(hinstance) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::error!(%err, "tray host install failed; continuing without it");
+                false
+            }
+        };
         if let Err(err) = crate::tray_popup::install(hinstance) {
             tracing::error!(%err, "notification panel install failed");
         }
@@ -233,15 +323,23 @@ pub fn run(
         }
 
         window_snapshot::log_snapshot();
-        if crate::settings_panel::owner().is_some() {
-            crate::update_install::confirm_startup();
-        }
         if show_settings {
             crate::settings_ui::show();
         }
         crate::appearance::refresh();
-        on_ready(taskbar_ready && crate::settings_panel::owner().is_some())?;
-        STARTUP_READY.set(true);
+        let usable = taskbar_ready && settings_ready && tray_ready && (launcher_ready || run_ready);
+        if !usable {
+            tracing::error!(
+                taskbar_ready,
+                settings_ready,
+                tray_ready,
+                launcher_ready,
+                run_ready,
+                "essential startup capability check failed"
+            );
+        }
+        let mut on_ready = Some(on_ready);
+        PostMessageW(Some(hwnd), COMMIT_STARTUP_MESSAGE, WPARAM(0), LPARAM(0))?;
         loop {
             let ret = GetMessageW(&mut msg, None, 0, 0);
             match ret.0 {
@@ -252,6 +350,20 @@ pub fn run(
                 }
                 0 => break, // WM_QUIT
                 _ => {}
+            }
+            // Commit only once the message pump has actually received work.
+            // All startup protocols consume this same essential-capability result.
+            if msg.hwnd == hwnd && msg.message == COMMIT_STARTUP_MESSAGE {
+                if let Some(ready) = on_ready.take() {
+                    complete_startup(usable, ready, || {
+                        STARTUP_READY.set(true);
+                        crate::update_install::confirm_startup();
+                    })?;
+                    if STARTUP_TAKEOVER.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        PostMessageW(Some(hwnd), EXECUTE_TAKEOVER_MESSAGE, WPARAM(0), LPARAM(0))?;
+                    }
+                }
+                continue;
             }
             if crate::settings_ui::filter(&msg) {
                 continue;
@@ -296,6 +408,35 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         STARTUP_READY_MESSAGE => LRESULT(isize::from(STARTUP_READY.get())),
+        SHELL_RESULT_MESSAGE => {
+            crate::settings_ui::complete_shell_operation();
+            LRESULT(0)
+        }
+        TRAY_TRANSITION_MESSAGE => {
+            if wparam.0 == 0 {
+                crate::tray_host::shutdown();
+                crate::taskbar::refresh();
+                return LRESULT(1);
+            }
+            let ready = unsafe { GetModuleHandleW(None) }
+                .ok()
+                .is_some_and(|m| crate::tray_host::install(HINSTANCE(m.0)).is_ok());
+            crate::taskbar::refresh();
+            LRESULT(isize::from(ready && crate::tray_host::is_installed()))
+        }
+        TAKEOVER_MESSAGE => {
+            if !STARTUP_READY.get() {
+                return LRESULT(0);
+            }
+            LRESULT(isize::from(
+                unsafe { PostMessageW(Some(hwnd), EXECUTE_TAKEOVER_MESSAGE, WPARAM(0), LPARAM(0)) }
+                    .is_ok(),
+            ))
+        }
+        EXECUTE_TAKEOVER_MESSAGE => {
+            crate::settings_ui::execute_takeover();
+            LRESULT(0)
+        }
         windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY
             if wparam.0 == crate::run_dialog::HOTKEY_ID =>
         {
@@ -353,6 +494,11 @@ unsafe extern "system" fn wndproc_inner(
                 crate::tray::sample_mirror();
                 crate::taskbar::refresh();
                 crate::shell_swap::check_foreign_shell();
+                if crate::tray_host::is_installed() && crate::shell_swap::foreign_shell_running() {
+                    crate::tray_host::shutdown();
+                    crate::taskbar::refresh();
+                }
+                crate::settings_ui::complete_shell_operation();
                 crate::metrics::log_sample();
             }
             LRESULT(0)
@@ -395,4 +541,98 @@ fn heartbeat_interval() -> std::time::Duration {
         .unwrap_or(DEFAULT_HEARTBEAT_SECS)
         .max(1);
     std::time::Duration::from_secs(secs)
+}
+
+/// Every entry consumes the same result; no success protocol runs after failure.
+fn complete_startup(
+    usable: bool,
+    ready: impl FnOnce(bool) -> Result<(), String>,
+    confirm: impl FnOnce(),
+) -> Result<(), String> {
+    ready(usable)?;
+    if !usable {
+        return Err("Essential startup capabilities are unavailable".into());
+    }
+    confirm();
+    Ok(())
+}
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    use std::cell::RefCell;
+    #[test]
+    #[ignore = "private-desktop startup/UI worker fixture; use isolated_tray_probe.py --test startup"]
+    fn native_startup_and_worker_host_transition() {
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MINICON_NO_TASKBAR").as_deref(), Ok("1"));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            assert!(crate::tray_host::is_installed());
+            transition_tray(false).unwrap();
+            assert!(!crate::tray_host::is_installed());
+            transition_tray(true).unwrap();
+            assert!(crate::tray_host::is_installed());
+            let hwnd = hub::shell_hwnd().unwrap();
+            unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.unwrap();
+        });
+        run(false, |usable| {
+            assert!(usable);
+            sender.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        worker.join().unwrap();
+        crate::settings_ui::shutdown();
+        crate::run_dialog::shutdown();
+        crate::tray_popup::shutdown();
+        crate::tray_host::shutdown();
+    }
+    #[test]
+    fn failure_never_acknowledges_even_if_a_caller_accepts_it() {
+        let events = RefCell::new(Vec::new());
+        assert!(
+            complete_startup(
+                false,
+                |usable| {
+                    assert!(!usable);
+                    events.borrow_mut().push("ready-rejected");
+                    Ok(())
+                },
+                || events.borrow_mut().push("receipt")
+            )
+            .is_err()
+        );
+        assert_eq!(*events.borrow(), ["ready-rejected"]);
+    }
+    #[test]
+    fn caller_failure_preserves_recovery_and_prevents_all_success_signals() {
+        let events = RefCell::new(Vec::new());
+        assert!(
+            complete_startup(
+                true,
+                |_| Err("handoff failure".into()),
+                || events.borrow_mut().push("receipt")
+            )
+            .is_err()
+        );
+        assert!(events.borrow().is_empty());
+    }
+    #[test]
+    fn only_usable_and_accepted_startup_confirms_after_ready() {
+        let events = RefCell::new(Vec::new());
+        complete_startup(
+            true,
+            |usable| {
+                assert!(usable);
+                events.borrow_mut().push("ready");
+                Ok(())
+            },
+            || events.borrow_mut().push("receipt"),
+        )
+        .unwrap();
+        assert_eq!(*events.borrow(), ["ready", "receipt"]);
+    }
 }

@@ -1,208 +1,195 @@
-//! M5 — optional, reversible Explorer-shell replacement.
-//!
-//! SAFETY CONTRACT (see `docs/prd.md` §8 risk "替换破坏性" and
-//! `docs/prd_3_1.md`):
-//! - This module *reads* the current per-user shell value freely.
-//! - It only ever *writes* when [`replace`] / [`restore`] are called explicitly,
-//!   and the CLI layer additionally requires a second human confirmation token.
-//! - The default companion run never calls the write paths, so the registry is
-//!   left untouched.
-//!
-//! The relevant value is `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Shell`
-//! (per-user, so it is reversible without machine-wide impact).
-
+//! Per-user login shell access. All explicit writes share the recovery guard.
+use crate::win_util::wide;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
-
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_SZ,
-    REG_VALUE_TYPE, RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ,
+    REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::core::PCWSTR;
-
-use crate::win_util::wide;
-
 const SUBKEY: &str = r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon";
 const VALUE_NAME: &str = "Shell";
+const MAX_VALUE: usize = 65536;
 
-/// Machine-wide Winlogon key, home of `AutoRestartShell`.
-const MACHINE_SUBKEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
-const AUTO_RESTART_VALUE: &str = "AutoRestartShell";
-
-/// Reads the current per-user `Shell` value. `Ok(None)` means the value is not
-/// set (Windows falls back to `explorer.exe`).
+/// Preserve absence, an empty value, exact UTF-16 data and registry type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawShell {
+    pub(crate) kind: u32,
+    pub(crate) data: Vec<u8>,
+}
+impl RawShell {
+    pub(crate) fn string(value: &str) -> Self {
+        Self {
+            kind: REG_SZ.0,
+            data: sz_bytes(value),
+        }
+    }
+    pub(crate) fn text(&self) -> Result<String, Box<dyn Error>> {
+        if !matches!(self.kind, n if n == REG_SZ.0 || n == REG_EXPAND_SZ.0)
+            || self.data.len() > MAX_VALUE
+            || !self.data.len().is_multiple_of(2)
+        {
+            return Err("Shell value has an unsupported type or invalid size".into());
+        }
+        let units: Vec<_> = self
+            .data
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let value = String::from_utf16(&units)?
+            .trim_end_matches('\0')
+            .to_string();
+        if value.contains('\0') {
+            return Err("Shell value contains an embedded NUL".into());
+        }
+        Ok(value)
+    }
+}
 pub fn current_shell() -> Result<Option<String>, Box<dyn Error>> {
-    let subkey = wide(SUBKEY);
-    let value = wide(VALUE_NAME);
-
-    // SAFETY: buffers outlive their calls; handles are closed before returning.
+    current_raw()?.map(|v| v.text()).transpose()
+}
+pub(crate) fn current_raw() -> Result<Option<RawShell>, Box<dyn Error>> {
+    read_value(HKEY_CURRENT_USER, SUBKEY, VALUE_NAME)
+}
+pub(crate) fn machine_identity() -> Result<String, Box<dyn Error>> {
+    read_value(
+        HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\Cryptography",
+        "MachineGuid",
+    )?
+    .ok_or_else(|| "Machine identity is unavailable".into())
+    .and_then(|v| v.text())
+}
+fn read_value(root: HKEY, subkey: &str, name: &str) -> Result<Option<RawShell>, Box<dyn Error>> {
     unsafe {
-        let mut hkey = HKEY::default();
+        let mut key = HKEY::default();
         let rc = RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(subkey.as_ptr()),
+            root,
+            PCWSTR(wide(subkey).as_ptr()),
             Some(0),
             KEY_READ,
-            &mut hkey,
+            &mut key,
         );
         if rc == ERROR_FILE_NOT_FOUND {
             return Ok(None);
         }
         if rc != ERROR_SUCCESS {
-            return Err(format!("RegOpenKeyExW failed (Win32 error {})", rc.0).into());
+            return Err(format!("Shell read/open failed (Win32 {})", rc.0).into());
         }
-
-        let result = query_string(hkey, &value);
-        let _ = RegCloseKey(hkey);
+        let result = query_raw(key, name);
+        let _ = RegCloseKey(key);
         result
     }
 }
-
-/// Sets the per-user `Shell` value to `shell_path`.
-///
-/// Callers MUST have obtained explicit human confirmation; the CLI gate in
-/// `main` enforces this before reaching here.
-pub fn replace(shell_path: &str) -> Result<(), Box<dyn Error>> {
-    write_string(Some(shell_path))
-}
-
-/// Restores the `Shell` value: `Some(v)` to set a specific value, or `None` to
-/// delete the value (reverting to the Windows default of `explorer.exe`).
-pub fn restore(previous: Option<&str>) -> Result<(), Box<dyn Error>> {
-    match previous {
-        Some(v) => write_string(Some(v)),
-        None => write_string(None),
-    }
-}
-
-/// Encodes a UTF-16, null-terminated REG_SZ payload.
-fn sz_bytes(s: &str) -> Vec<u8> {
-    let mut units: Vec<u16> = s.encode_utf16().collect();
-    units.push(0);
-    units.iter().flat_map(|u| u.to_le_bytes()).collect()
-}
-
-unsafe fn query_string(hkey: HKEY, value: &[u16]) -> Result<Option<String>, Box<dyn Error>> {
-    let mut ty = REG_VALUE_TYPE::default();
-    let mut len = 0u32;
+fn query_raw(key: HKEY, name: &str) -> Result<Option<RawShell>, Box<dyn Error>> {
+    let name = wide(name);
+    let mut kind = REG_VALUE_TYPE::default();
+    let mut length = 0;
     let rc = unsafe {
         RegQueryValueExW(
-            hkey,
-            PCWSTR(value.as_ptr()),
+            key,
+            PCWSTR(name.as_ptr()),
             None,
-            Some(&mut ty),
+            Some(&mut kind),
             None,
-            Some(&mut len),
+            Some(&mut length),
         )
     };
     if rc == ERROR_FILE_NOT_FOUND {
         return Ok(None);
     }
-    if rc != ERROR_SUCCESS {
-        return Err(format!("RegQueryValueExW(size) failed (Win32 error {})", rc.0).into());
+    if rc != ERROR_SUCCESS || length as usize > MAX_VALUE {
+        return Err(format!("Shell read/size failed (Win32 {})", rc.0).into());
     }
-
-    let mut buf = vec![0u8; len as usize];
+    let mut data = vec![0; length as usize];
     let rc = unsafe {
         RegQueryValueExW(
-            hkey,
-            PCWSTR(value.as_ptr()),
+            key,
+            PCWSTR(name.as_ptr()),
             None,
-            Some(&mut ty),
-            Some(buf.as_mut_ptr()),
-            Some(&mut len),
+            Some(&mut kind),
+            Some(data.as_mut_ptr()),
+            Some(&mut length),
         )
     };
     if rc != ERROR_SUCCESS {
-        return Err(format!("RegQueryValueExW(data) failed (Win32 error {})", rc.0).into());
+        return Err(format!("Shell read/data failed (Win32 {})", rc.0).into());
     }
-
-    let units: Vec<u16> = buf
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| u16::from_le_bytes(*c))
-        .collect();
-    let s = String::from_utf16_lossy(&units)
-        .trim_end_matches('\0')
-        .to_string();
-    Ok(Some(s))
+    data.truncate(length as usize);
+    Ok(Some(RawShell { kind: kind.0, data }))
 }
-
-fn write_string(value: Option<&str>) -> Result<(), Box<dyn Error>> {
-    let subkey = wide(SUBKEY);
-    let name = wide(VALUE_NAME);
-
-    // SAFETY: buffers outlive their calls; the key is closed before returning.
+pub fn replace(value: &str) -> Result<(), Box<dyn Error>> {
+    crate::shell_recovery::set_login(Some(RawShell::string(value)))
+}
+pub fn restore(value: Option<&str>) -> Result<(), Box<dyn Error>> {
+    crate::shell_recovery::set_login(value.map(RawShell::string))
+}
+fn sz_bytes(s: &str) -> Vec<u8> {
+    s.encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+/// Internal primitive. Callers hold the account-wide operation guard.
+pub(crate) fn write_raw(value: Option<&RawShell>) -> Result<(), Box<dyn Error>> {
+    if let Some(v) = value {
+        v.text()?;
+    }
     unsafe {
-        let mut hkey = HKEY::default();
-        let rc = RegOpenKeyExW(
+        let mut key = HKEY::default();
+        let rc = RegCreateKeyExW(
             HKEY_CURRENT_USER,
-            PCWSTR(subkey.as_ptr()),
+            PCWSTR(wide(SUBKEY).as_ptr()),
             Some(0),
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
             KEY_SET_VALUE,
-            &mut hkey,
+            None,
+            &mut key,
+            None,
         );
         if rc != ERROR_SUCCESS {
-            return Err(format!("RegOpenKeyExW failed (Win32 error {})", rc.0).into());
+            return Err(format!("Shell write/open failed (Win32 {})", rc.0).into());
         }
+        let name = wide(VALUE_NAME);
+        let rc = write_value(key, &name, value);
+        let _ = RegCloseKey(key);
+        if rc != ERROR_SUCCESS {
+            return Err(format!("Shell write failed (Win32 {})", rc.0).into());
+        }
+    }
+    if current_raw()?.as_ref() != value {
+        return Err("Shell write verification failed".into());
+    }
+    Ok(())
+}
 
-        let rc = match value {
-            Some(v) => {
-                let data = sz_bytes(v);
-                RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_SZ, Some(&data))
-            }
-            // `None` means "restore the Windows default", so the value must be
-            // *deleted* — writing an empty REG_SZ would leave a broken value.
+fn write_value(
+    key: HKEY,
+    name: &[u16],
+    value: Option<&RawShell>,
+) -> windows::Win32::Foundation::WIN32_ERROR {
+    unsafe {
+        match value {
+            Some(v) => RegSetValueExW(
+                key,
+                PCWSTR(name.as_ptr()),
+                None,
+                REG_VALUE_TYPE(v.kind),
+                Some(&v.data),
+            ),
             None => {
-                let deleted = RegDeleteValueW(hkey, PCWSTR(name.as_ptr()));
-                if deleted == ERROR_FILE_NOT_FOUND {
+                let rc = RegDeleteValueW(key, PCWSTR(name.as_ptr()));
+                if rc == ERROR_FILE_NOT_FOUND {
                     ERROR_SUCCESS
                 } else {
-                    deleted
+                    rc
                 }
             }
-        };
-        let _ = RegCloseKey(hkey);
-
-        if rc != ERROR_SUCCESS {
-            return Err(format!("RegSetValueExW failed (Win32 error {})", rc.0).into());
         }
-        Ok(())
-    }
-}
-
-/// Enables or disables the machine-wide shell auto-restart
-/// (`HKLM\...\Winlogon\AutoRestartShell`).
-///
-/// With auto-restart left on, Windows re-launches a shell shortly after the
-/// running one is stopped, which would immediately undo a takeover. The value
-/// lives under `HKLM`, so this needs elevation; callers treat failure as a
-/// warning rather than a hard error.
-pub fn set_auto_restart(enabled: bool) -> Result<(), Box<dyn Error>> {
-    let subkey = wide(MACHINE_SUBKEY);
-    let name = wide(AUTO_RESTART_VALUE);
-    let data = u32::from(enabled).to_le_bytes();
-
-    // SAFETY: buffers outlive their calls; the key is closed before returning.
-    unsafe {
-        let mut hkey = HKEY::default();
-        let rc = RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(subkey.as_ptr()),
-            Some(0),
-            KEY_SET_VALUE,
-            &mut hkey,
-        );
-        if rc != ERROR_SUCCESS {
-            return Err(format!("RegOpenKeyExW(HKLM) failed (Win32 error {})", rc.0).into());
-        }
-        let rc = RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_DWORD, Some(&data));
-        let _ = RegCloseKey(hkey);
-        if rc != ERROR_SUCCESS {
-            return Err(format!("RegSetValueExW failed (Win32 error {})", rc.0).into());
-        }
-        Ok(())
     }
 }
 
@@ -221,7 +208,10 @@ pub fn is_self_shell() -> bool {
     };
     match current_shell() {
         Ok(Some(configured)) => {
-            configured.eq_ignore_ascii_case(&exe.display().to_string())
+            configured
+                .trim()
+                .trim_matches('"')
+                .eq_ignore_ascii_case(&exe.display().to_string())
                 || same_product_build(&configured, &exe.display().to_string())
         }
         _ => false,
@@ -234,18 +224,42 @@ const PRODUCT_STEM: &str = "minicon-winmgr";
 
 /// Whether both paths name a build of this product.
 fn same_product_build(configured: &str, running: &str) -> bool {
-    is_product_file_name(configured) && is_product_file_name(running)
+    is_product_command(configured) && is_product_command(running)
 }
 
 /// The bare stem or the stem plus a `-version` / `.exe` suffix — never an
 /// unrelated program that merely starts with the same characters.
+pub(crate) fn is_product_command(path: &str) -> bool {
+    let path = path.trim();
+    let path = if let Some(rest) = path.strip_prefix('"') {
+        let Some(end) = rest.find('"') else {
+            return false;
+        };
+        if !rest[end + 1..].trim().is_empty() {
+            return false;
+        }
+        &rest[..end]
+    } else {
+        path
+    };
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|exe| path.eq_ignore_ascii_case(&exe.to_string_lossy()))
+        || is_product_file_name(path)
+}
+
 fn is_product_file_name(path: &str) -> bool {
     let name = std::path::Path::new(path)
         .file_name()
         .map(|n| n.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     match name.strip_prefix(PRODUCT_STEM) {
-        Some(rest) => rest.is_empty() || rest.starts_with('.') || rest.starts_with('-'),
+        Some(rest) => {
+            rest == ".exe"
+                || (rest.starts_with("-v")
+                    && rest.ends_with(".exe")
+                    && rest.as_bytes().get(2).is_some_and(u8::is_ascii_digit))
+        }
         None => false,
     }
 }
@@ -253,6 +267,67 @@ fn is_product_file_name(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_registry_round_trip_preserves_absence_empty_type_and_exact_bytes() {
+        struct Fixture {
+            key: HKEY,
+            path: String,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = unsafe { RegCloseKey(self.key) };
+                assert!(self.path.starts_with(r"Software\minicon-winmgr\test-"));
+                let _ = unsafe {
+                    windows::Win32::System::Registry::RegDeleteTreeW(
+                        HKEY_CURRENT_USER,
+                        PCWSTR(wide(&self.path).as_ptr()),
+                    )
+                };
+            }
+        }
+        let path = format!(
+            r"Software\minicon-winmgr\test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut key = HKEY::default();
+        assert_eq!(
+            unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    PCWSTR(wide(&path).as_ptr()),
+                    Some(0),
+                    PCWSTR::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_READ | KEY_SET_VALUE,
+                    None,
+                    &mut key,
+                    None,
+                )
+            },
+            ERROR_SUCCESS
+        );
+        let fixture = Fixture { key, path };
+        let mut expanded = RawShell::string("  %SystemRoot%\\explorer.exe  ");
+        expanded.kind = REG_EXPAND_SZ.0;
+        let name = wide("Shell");
+        for value in [
+            None,
+            Some(RawShell::string("")),
+            Some(expanded),
+            Some(RawShell::string("\"third-party.exe\" --arg  ")),
+            None,
+        ] {
+            assert_eq!(
+                write_value(fixture.key, &name, value.as_ref()),
+                ERROR_SUCCESS
+            );
+            assert_eq!(query_raw(fixture.key, "Shell").unwrap(), value);
+        }
+    }
 
     const LIVE: &str = r"C:\Fixture\product\target\debug\live\minicon-winmgr.exe";
     const RELEASE: &str = r"D:\minicon-winmgr-v0.1.10-x86_64-windows.exe";

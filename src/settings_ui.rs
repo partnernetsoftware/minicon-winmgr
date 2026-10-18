@@ -1,5 +1,65 @@
 //! Settings entry points and the separately confirmed desktop-management actions.
-pub(crate) use crate::settings_panel::{allow_exit, filter, install, show, shutdown, toggle_from};
+pub(crate) use crate::settings_panel::{filter, install, show, shutdown, toggle_from};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
+static SHELL_BUSY: AtomicBool = AtomicBool::new(false);
+enum ShellResult {
+    Takeover(Result<crate::shell_swap::Takeover, String>),
+    Restore(Result<crate::shell_swap::GiveBack, String>),
+}
+static SHELL_RESULT: OnceLock<Mutex<Option<ShellResult>>> = OnceLock::new();
+pub(crate) fn shell_busy() -> bool {
+    SHELL_BUSY.load(Ordering::SeqCst)
+}
+pub(crate) fn allow_exit() -> bool {
+    !shell_busy() && crate::settings_panel::allow_exit()
+}
+fn start_shell_operation(takeover: bool) {
+    if SHELL_BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    crate::settings_panel::refresh_shell_status();
+    let thread = std::thread::Builder::new()
+        .name("desktop-handover".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(|| if takeover {
+                ShellResult::Takeover(crate::shell_swap::take_over().map_err(|e| e.to_string()))
+            } else {
+                ShellResult::Restore(crate::shell_swap::give_back().map_err(|e| e.to_string()))
+            }).unwrap_or_else(|_| if takeover { ShellResult::Takeover(Err("Desktop operation failed unexpectedly. Check current login settings before retrying.".into())) } else { ShellResult::Restore(Err("Desktop restoration failed unexpectedly. Check current login settings before retrying.".into())) });
+            *crate::win_util::lock_or_recover(SHELL_RESULT.get_or_init(|| Mutex::new(None))) =
+                Some(result);
+            if let Some(hwnd) = crate::hub::shell_hwnd() {
+                let _ = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                        Some(hwnd),
+                        crate::window::SHELL_RESULT_MESSAGE,
+                        windows::Win32::Foundation::WPARAM(0),
+                        windows::Win32::Foundation::LPARAM(0),
+                    )
+                };
+            }
+        });
+    if let Err(error) = thread {
+        SHELL_BUSY.store(false, Ordering::SeqCst);
+        crate::settings_panel::refresh_shell_status();
+        info_box(&error.to_string());
+    }
+}
+pub(crate) fn complete_shell_operation() {
+    let result =
+        crate::win_util::lock_or_recover(SHELL_RESULT.get_or_init(|| Mutex::new(None))).take();
+    if let Some(result) = result {
+        SHELL_BUSY.store(false, Ordering::SeqCst);
+        crate::settings_panel::refresh_shell_status();
+        match result {
+            ShellResult::Takeover(result) => show_takeover_result(result),
+            ShellResult::Restore(result) => show_restore_result(result),
+        }
+    }
+}
 use crate::win_util::wide;
 use windows::Win32::UI::WindowsAndMessaging::{
     IDOK, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_OK, MB_OKCANCEL, MessageBoxW,
@@ -16,6 +76,9 @@ fn info_box(message: &str) {
     }
 }
 pub(crate) fn do_replace() {
+    if shell_busy() {
+        return;
+    }
     // Already the shell? Nothing to hand over — and stopping the session's
     // shell would stop *us* (we own the tray host's `Shell_TrayWnd`). Refuse
     // before the confirmation so the user is never asked to approve a no-op.
@@ -51,7 +114,14 @@ pub(crate) fn do_replace() {
         return;
     }
 
-    match crate::shell_swap::take_over() {
+    execute_takeover();
+}
+
+pub(crate) fn execute_takeover() {
+    start_shell_operation(true);
+}
+fn show_takeover_result(result: Result<crate::shell_swap::Takeover, String>) {
+    match result {
         Ok(report) => {
             tracing::info!(
                 exe = %report.exe,
@@ -70,15 +140,11 @@ pub(crate) fn do_replace() {
                     report.stopped
                 ));
             }
-            if !report.auto_restart_disabled {
-                message.push_str(
-                    "注意：未能关闭系统外壳自动重启（需要管理员权限），\
-                     Windows 可能随后重新拉起 explorer。\n",
-                );
-            }
-            message.push_str(crate::i18n::text(
-                "\n可用「还原系统桌面（立即生效）」一键恢复。",
-            ));
+            message.push_str(if crate::i18n::language() == crate::i18n::Language::En {
+                "\nRestore pre-takeover settings changes the next sign-in; Minicon continues managing this session."
+            } else {
+                "\n恢复接管前设置会更改下次登录；当前会话继续由 Minicon 管理。"
+            });
             info_box(&message);
         }
         Err(err) => {
@@ -92,42 +158,28 @@ pub(crate) fn do_replace() {
 }
 
 pub(crate) fn do_rollback() {
+    if shell_busy() {
+        return;
+    }
     // Confirm, defaulting to Cancel — this hands the desktop back to Explorer.
     // When *we* are the shell the handover completes at the next sign-in (our
     // own bar is holding the session and cannot restart Explorer under itself),
     // so say so instead of over-promising.
-    let we_are_shell = crate::shell_swap::self_is_shell();
-    let tail = if we_are_shell {
-        crate::i18n::text("当前正是本程序在充当桌面外壳，切换将在下次登录时完成。")
-    } else {
-        crate::i18n::text("将立即重新启动 explorer。")
-    };
-    // Distinguish "no takeover was ever recorded" (give-back refuses, so we stop
-    // up front rather than promising a restore we will not perform) from a
-    // recorded-but-empty value (which restores the Windows default shell).
-    let backed_up = crate::shell_swap::backup_path().and_then(|p| std::fs::read_to_string(p).ok());
-    let message = match backed_up
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(v) => crate::ui_format!(
-            "还原系统桌面：把外壳还原为\n{v}\n{tail}\n\n确定？",
-            "Restore the desktop shell to:\n{v}\n{tail}\n\nContinue?"
-        ),
-        None if backed_up.is_some() => {
-            crate::ui_format!(
-                "还原系统桌面：把外壳还原为系统默认（explorer）\n{tail}\n\n确定？",
-                "Restore the default desktop shell (Explorer).\n{tail}\n\nContinue?"
-            )
-        }
-        None => {
-            info_box(crate::i18n::text(
-                "没有记录到接管前的桌面外壳（本程序未曾接管过桌面），无法还原。",
+    let original = match crate::shell_recovery::original_text() {
+        Ok(value) => value,
+        Err(error) => {
+            info_box(&crate::ui_format!(
+                "恢复记录不可用：{error}。旧记录不会被自动采用；可用显式确认的 --shell-rollback <原值|default> 手工选择下次登录设置。",
+                "Recovery record unavailable: {error}. Legacy records are not adopted automatically. An explicitly confirmed --shell-rollback <value|default> can select next-sign-in settings."
             ));
             return;
         }
     };
+    let target = original.as_deref().unwrap_or("Windows default (Explorer)");
+    let message = crate::ui_format!(
+        "恢复接管前的下次登录设置：\n{target}\n当前会话由现有宿主管理；不会自动执行第三方外壳命令。\n\n确定？",
+        "Restore pre-takeover settings for the next sign-in:\n{target}\nThe existing host continues to manage this session. Third-party shell commands are not run automatically.\n\nContinue?"
+    );
     let text = wide(&message);
     let caption = wide(crate::i18n::text("还原系统桌面"));
     // SAFETY: both buffers outlive the call.
@@ -142,24 +194,28 @@ pub(crate) fn do_rollback() {
     if answer != IDOK {
         return;
     }
-    match crate::shell_swap::give_back() {
+    start_shell_operation(false);
+}
+fn show_restore_result(result: Result<crate::shell_swap::GiveBack, String>) {
+    let we_are_shell = crate::shell_swap::self_is_shell();
+    match result {
         Ok(report) => {
             tracing::info!(
                 restored = ?report.restored,
                 started = report.started,
                 "settings: shell given back"
             );
-            let mut message = if we_are_shell {
-                String::from(crate::i18n::text("已还原系统桌面设置。\n"))
-            } else {
-                String::from(crate::i18n::text("已还原系统桌面（立即生效）。\n"))
-            };
+            let mut message = String::from(crate::i18n::text("已还原系统桌面设置。\n"));
             message.push_str(if report.started {
                 crate::i18n::text("已重新启动 explorer。")
             } else if we_are_shell {
-                crate::i18n::text("下次登录将由 explorer 接管桌面。")
-            } else {
+                if crate::i18n::language() == crate::i18n::Language::En { "Next sign-in will use the pre-takeover settings. Minicon continues managing this session." } else { "下次登录使用接管前设置，当前会话继续由 Minicon 管理。" }
+            } else if crate::shell_swap::foreign_shell_running() {
                 crate::i18n::text("本会话已有桌面外壳在运行。")
+            } else if crate::i18n::language() == crate::i18n::Language::En {
+                "Next-sign-in settings restored. No desktop host is currently observed; third-party commands were not started."
+            } else {
+                "已恢复下次登录设置。当前未检测到桌面宿主，未启动第三方命令。"
             });
             message.push_str(crate::i18n::text("\n若桌面外观未恢复，注销重登即可。"));
             info_box(&message);
@@ -171,5 +227,74 @@ pub(crate) fn do_rollback() {
                 "Desktop restoration failed: {err}"
             ));
         }
+    }
+}
+
+pub(crate) fn shell_status_text() -> String {
+    let en = crate::i18n::language() == crate::i18n::Language::En;
+    if shell_busy() {
+        return if en {
+            "Desktop handover in progress… Settings remain available."
+        } else {
+            "桌面交接正在执行…设置仍可使用。"
+        }
+        .into();
+    }
+    let session = if crate::shell_swap::self_is_shell() {
+        if en { "Minicon" } else { "Minicon 管理" }
+    } else if crate::shell_swap::foreign_shell_running() {
+        if en {
+            "With existing desktop"
+        } else {
+            "与现有桌面共同运行"
+        }
+    } else {
+        if en {
+            "No desktop host detected"
+        } else {
+            "未检测到桌面宿主"
+        }
+    };
+    let login = match crate::shell_registry::current_raw() {
+        Ok(None) => {
+            if en {
+                "Windows default"
+            } else {
+                "Windows 默认桌面"
+            }
+        }
+        Ok(value) if crate::shell_recovery::is_product(&value) => "Minicon",
+        Ok(_) => {
+            if en {
+                "Other configured shell"
+            } else {
+                "其他外壳设置"
+            }
+        }
+        Err(_) => {
+            if en {
+                "Unavailable"
+            } else {
+                "无法读取"
+            }
+        }
+    };
+    let recovery = if crate::shell_recovery::original_text().is_ok() {
+        if en {
+            "Account-bound record verified"
+        } else {
+            "账户恢复记录已校验"
+        }
+    } else {
+        if en {
+            "No verified record; legacy files not adopted"
+        } else {
+            "无已校验记录；不自动采用旧文件"
+        }
+    };
+    if en {
+        format!("This session: {session}\nNext sign-in: {login}\nRecovery: {recovery}")
+    } else {
+        format!("当前会话：{session}\n下次登录：{login}\n恢复依据：{recovery}")
     }
 }

@@ -27,5 +27,8 @@ jobs:
       - name: Development quality checks
         run: python scripts/test.py --layer quality
 
+      - name: Complete ordinary unit suite
+        run: python scripts/unit_matrix.py
+
       - name: Bounded fault regressions
         run: python scripts/test.py --layer fault

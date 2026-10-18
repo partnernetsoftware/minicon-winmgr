@@ -18,7 +18,7 @@ jobs:
       - name: Quality and complete optimized unit suite
         run: |
           python scripts/test.py --layer quality
-          cargo test --all --release --locked
+          python scripts/unit_matrix.py --release
       - name: Build optimized candidate
         run: cargo build --release --locked
       - name: Record portable build provenance

@@ -16,7 +16,6 @@
 //! consistent state re-taken at the next logon.
 
 use std::error::Error;
-use std::path::PathBuf;
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::System::Threading::{
@@ -163,53 +162,52 @@ fn stoppable(hits: &ShellHits, me: u32) -> Vec<(HWND, u32)> {
 /// running in this session, which is a success, not an error.
 pub fn stop_shell() -> Result<usize, Box<dyn Error>> {
     let targets = stoppable(&shell_hits(), std::process::id());
-    if targets.is_empty() {
-        return Ok(0);
-    }
-    // Ask nicely first: Explorer shuts the shell down on WM_CLOSE.
-    for (window, _) in &targets {
-        // SAFETY: `window` is a live shell window on our desktop owned by
-        // another process.
-        unsafe {
-            let _ = PostMessageW(Some(*window), WM_CLOSE, WPARAM(0), LPARAM(0));
+    struct Process(windows::Win32::Foundation::HANDLE);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = unsafe { CloseHandle(self.0) };
         }
     }
-
-    let mut stopped = 0;
-    for (_, pid) in targets {
-        // SAFETY: plain process handles; every handle is closed before returning.
-        unsafe {
-            let Ok(handle) = OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+    let mut owned = Vec::new();
+    for (_, pid) in &targets {
+        if owned.iter().any(|(seen, _): &(u32, Process)| seen == pid) {
+            continue;
+        }
+        if !crate::single_instance::same_user_session(*pid) {
+            return Err("Cannot verify the previous shell's account and session".into());
+        }
+        // Pin the exact process before sending any close request. Never reopen
+        // the PID for termination after a wait, where it could have been reused.
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
                 false,
-                pid,
-            ) else {
-                continue;
-            };
-            let waited = WaitForSingleObject(handle, SHELL_STOP_GRACE_MS);
-            let mut alive = waited != WAIT_OBJECT_0;
-            if alive {
-                // Graceful close did not take; force it so the handover is real.
-                if let Ok(force) = OpenProcess(PROCESS_TERMINATE, false, pid) {
-                    if let Err(err) = TerminateProcess(force, 0) {
-                        tracing::warn!(
-                            pid,
-                            %err,
-                            "could not terminate the old shell; it may still hold the desktop"
-                        );
-                    }
-                    let _ = CloseHandle(force);
-                    alive = WaitForSingleObject(handle, SHELL_STOP_GRACE_MS) != WAIT_OBJECT_0;
-                }
-            }
-            let _ = CloseHandle(handle);
-            if !alive {
-                stopped += 1;
-                tracing::info!(pid, "shell process stopped");
-            } else {
-                tracing::warn!(pid, "shell process refused to stop");
+                *pid,
+            )
+        }?;
+        owned.push((*pid, Process(process)));
+    }
+    for (window, expected) in &targets {
+        let mut actual = 0;
+        unsafe {
+            GetWindowThreadProcessId(*window, Some(&mut actual));
+        }
+        if actual != *expected {
+            return Err("The previous shell window changed during handover".into());
+        }
+    }
+    for (window, _) in &targets {
+        unsafe { PostMessageW(Some(*window), WM_CLOSE, WPARAM(0), LPARAM(0)) }?;
+    }
+    let mut stopped = 0;
+    for (_, process) in owned {
+        if unsafe { WaitForSingleObject(process.0, SHELL_STOP_GRACE_MS) } != WAIT_OBJECT_0 {
+            unsafe { TerminateProcess(process.0, 0) }?;
+            if unsafe { WaitForSingleObject(process.0, SHELL_STOP_GRACE_MS) } != WAIT_OBJECT_0 {
+                return Err("The previous desktop shell did not stop".into());
             }
         }
+        stopped += 1;
     }
     Ok(stopped)
 }
@@ -230,6 +228,13 @@ pub fn start_shell() -> Result<bool, Box<dyn Error>> {
         return Err(format!("找不到系统外壳：{exe}").into());
     }
     spawn_detached(&exe)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !foreign_shell_running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !foreign_shell_running() {
+        return Err("Explorer was started but its desktop host did not become available".into());
+    }
     tracing::info!(%exe, "launched the system shell");
     Ok(true)
 }
@@ -269,127 +274,319 @@ fn spawn_detached(exe: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Path of the file holding the previous `Shell` value, written before the
-/// first takeover so [`give_back`] can restore it faithfully. An *empty* file
-/// records "the value was not set"; a **missing** file means "this program has
-/// never taken over", and [`give_back`] refuses to touch the registry then.
-pub fn backup_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("shell-backup.txt"))
-}
-
-/// Records the pre-takeover shell exactly once. A pre-existing backup is never
-/// overwritten, so the *original* value survives repeated takeovers.
-fn record_backup(current: Option<&str>) {
-    let Some(path) = backup_path() else {
-        return;
-    };
-    if path.exists() {
-        return;
-    }
-    if let Err(err) = std::fs::write(&path, current.unwrap_or("")) {
-        tracing::warn!(path = %path.display(), %err, "shell backup write failed");
-    }
-}
-
-/// Interprets a backup file's contents. Pure, so the "missing / empty / value"
-/// distinction that guards [`give_back`] is unit-tested.
-///
-/// - `None` file contents → `None` (never recorded: give-back must refuse)
-/// - blank contents → `Some(None)` (recorded as "the value was not set")
-/// - non-blank contents → `Some(Some(value))`
-fn interpret_backup(raw: Option<String>) -> Option<Option<String>> {
-    let raw = raw?;
-    let trimmed = raw.trim().to_string();
-    Some((!trimmed.is_empty()).then_some(trimmed))
-}
-
-/// The taken-over state needed by [`give_back`], or `None` when no takeover was
-/// ever recorded.
-fn recorded_backup() -> Option<Option<String>> {
-    interpret_backup(std::fs::read_to_string(backup_path()?).ok())
-}
-
-/// The outcome of a takeover, for reporting back to the user/CLI.
 pub struct Takeover {
     pub exe: String,
-    /// Shell processes stopped in this session (`0` = none was running).
     pub stopped: usize,
-    /// Whether the shell auto-restart was disabled (needs elevation).
-    pub auto_restart_disabled: bool,
 }
-
-/// Replaces the shell with this executable **and** takes over immediately.
-///
-/// Refuses when we already are the shell: there is nothing to hand over, and
-/// stopping the session's shell would stop *us* (we own the tray host's
-/// `Shell_TrayWnd`).
+/// A takeover must run on the persistent UI/message thread, never a short CLI process.
 pub fn take_over() -> Result<Takeover, Box<dyn Error>> {
     if self_is_shell() {
-        return Err("本程序已经在充当桌面外壳，无需接管".into());
+        return Err("Minicon already manages this session".into());
     }
+    if crate::hub::shell_hwnd().is_none() {
+        return Err("A ready Minicon interface is required before takeover".into());
+    }
+    if matches!(
+        std::env::var("MINICON_TRAY_HOST").as_deref(),
+        Ok("0") | Ok("false")
+    ) {
+        return Err("Notification hosting is explicitly disabled; takeover was cancelled".into());
+    }
+    let operation = crate::shell_recovery::begin()?;
+    let before = shell_registry::current_raw()?;
+    let restore_explorer = foreign_shell_is_explorer();
+    operation.ensure_original(&before)?;
     let exe = std::env::current_exe()?.display().to_string();
-
-    // 1. Record the current value once (empty file = "was not set"), so a later
-    //    give-back restores the user's machine exactly. A failed write is not
-    //    fatal, but it is logged because it makes give-back refuse later.
-    match shell_registry::current_shell() {
-        Ok(cur) => record_backup(cur.as_deref()),
-        Err(err) => tracing::warn!(%err, "could not read current shell; taking over anyway"),
-    }
-
-    // 2. Registry first (persistent intent), then the runtime handover.
-    shell_registry::replace(&exe)?;
-
-    // 3. Stop Windows from re-launching a shell we just replaced. Best effort:
-    //    this lives under HKLM and needs elevation.
-    let auto_restart_disabled = match shell_registry::set_auto_restart(false) {
-        Ok(()) => true,
-        Err(err) => {
-            tracing::warn!(%err, "could not disable shell auto-restart (needs elevation)");
-            false
+    let target = Some(shell_registry::RawShell::string(&format!("\"{exe}\"")));
+    operation.write(&before, target.as_ref())?;
+    let result = (|| -> Result<usize, Box<dyn Error>> {
+        let stopped = stop_shell()?;
+        if foreign_shell_running() {
+            return Err("The previous desktop host is still running".into());
         }
+        crate::window::transition_tray(true)?;
+        Ok(stopped)
+    })();
+    match result {
+        Ok(stopped) => Ok(Takeover { exe, stopped }),
+        Err(error) => {
+            let _ = crate::window::transition_tray(false);
+            let restored = operation.write(&target, before.as_ref()).is_ok();
+            let desktop = if restored && restore_explorer {
+                start_shell().is_ok() && foreign_shell_running()
+            } else {
+                foreign_shell_running()
+            };
+            Err(format!("Takeover failed: {error}. Login settings restored: {restored}; external desktop host observed: {desktop}. Minicon settings remain available.").into())
+        }
+    }
+}
+/// Class names identify a shell window, not the executable we may restart.
+fn foreign_shell_is_explorer() -> bool {
+    use windows::Win32::System::Threading::{PROCESS_NAME_WIN32, QueryFullProcessImageNameW};
+    let Some(root) = std::env::var_os("SystemRoot") else {
+        return false;
     };
-
-    // 4. Actually take the desktop: stop this session's shell.
-    let stopped = stop_shell()?;
-    Ok(Takeover {
-        exe,
-        stopped,
-        auto_restart_disabled,
+    let explorer = std::path::PathBuf::from(root)
+        .join("explorer.exe")
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let targets = stoppable(&shell_hits(), std::process::id());
+    if targets.is_empty() {
+        return false;
+    }
+    targets.into_iter().all(|(_, pid)| {
+        let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+        else {
+            return false;
+        };
+        let mut text = vec![0u16; 32768];
+        let mut len = text.len() as u32;
+        let result = unsafe {
+            QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                windows::core::PWSTR(text.as_mut_ptr()),
+                &mut len,
+            )
+        };
+        let _ = unsafe { CloseHandle(process) };
+        result.is_ok()
+            && String::from_utf16_lossy(&text[..len as usize]).to_ascii_lowercase() == explorer
     })
 }
-
-/// The outcome of handing the desktop back to the system shell.
+fn explorer_setting(value: &Option<shell_registry::RawShell>) -> bool {
+    let Some(raw) = value else {
+        return true;
+    };
+    let Ok(text) = raw.text() else {
+        return false;
+    };
+    let text = text.trim().trim_matches('"');
+    text.eq_ignore_ascii_case("explorer.exe")
+        || std::env::var("SystemRoot")
+            .ok()
+            .is_some_and(|r| text.eq_ignore_ascii_case(&format!(r"{r}\explorer.exe")))
+}
 pub struct GiveBack {
-    /// The value restored (`None` = the value was cleared, i.e. the Windows
-    /// default shell).
     pub restored: Option<String>,
-    /// Whether `explorer.exe` had to be launched.
+    /// True only after an external Explorer host has actually appeared.
     pub started: bool,
 }
-
-/// Restores the recorded shell **and** gives the desktop back immediately.
-///
-/// Refuses to touch the registry when no takeover was recorded, so a shell
-/// configured outside this program is never silently cleared.
+/// Restore next-sign-in settings. Do not launch an unknown third-party command.
 pub fn give_back() -> Result<GiveBack, Box<dyn Error>> {
-    let Some(restored) = recorded_backup() else {
-        return Err("没有记录到接管前的桌面外壳，无法还原（本程序未曾接管过桌面）".into());
-    };
-
-    shell_registry::restore(restored.as_deref())?;
-    // Re-enable auto-restart so the system shell is resilient again.
-    if let Err(err) = shell_registry::set_auto_restart(true) {
-        tracing::warn!(%err, "could not re-enable shell auto-restart");
+    let operation = crate::shell_recovery::begin()?;
+    let original = operation.original()?;
+    let current = shell_registry::current_raw()?;
+    if current != original && !crate::shell_recovery::is_product(&current) {
+        return Err("Login settings changed outside Minicon; restoration was cancelled".into());
     }
-    let started = start_shell()?;
-    Ok(GiveBack { restored, started })
+    operation.write(&current, original.as_ref())?;
+    let started = if !shell_running() && explorer_setting(&original) {
+        start_shell()?;
+        foreign_shell_running()
+    } else {
+        false
+    };
+    Ok(GiveBack {
+        restored: original.map(|v| v.text()).transpose()?,
+        started,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ShellHits, interpret_backup, is_shell_class, stoppable};
+    use super::{ShellHits, is_shell_class, stoppable};
+    #[test]
+    #[ignore = "owned foreign-host helper on a private desktop"]
+    fn private_foreign_host() {
+        use windows::{
+            Win32::{Foundation::*, UI::WindowsAndMessaging::*},
+            core::PCWSTR,
+        };
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        unsafe extern "system" fn procedure(
+            window: HWND,
+            message: u32,
+            wp: WPARAM,
+            lp: LPARAM,
+        ) -> LRESULT {
+            if message == WM_DESTROY || message == WM_TIMER {
+                unsafe {
+                    PostQuitMessage(0);
+                }
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(window, message, wp, lp) }
+        }
+        unsafe {
+            let module = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+            let name = crate::win_util::wide("Shell_TrayWnd");
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(procedure),
+                hInstance: HINSTANCE(module.0),
+                lpszClassName: PCWSTR(name.as_ptr()),
+                ..Default::default()
+            };
+            assert_ne!(RegisterClassW(&class), 0);
+            let hwnd = CreateWindowExW(
+                Default::default(),
+                PCWSTR(name.as_ptr()),
+                PCWSTR::null(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(HINSTANCE(module.0)),
+                None,
+            )
+            .unwrap();
+            SetTimer(Some(hwnd), 1, 15000, None);
+            let mut message = MSG::default();
+            while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                DispatchMessageW(&message);
+            }
+        }
+    }
+    #[test]
+    #[ignore = "private desktop and process-local HKCU override; use isolated_tray_probe.py --test takeover"]
+    fn native_private_desktop_takeover() {
+        use windows::{
+            Win32::{Foundation::*, System::Registry::*, UI::WindowsAndMessaging::*},
+            core::PCWSTR,
+        };
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MINICON_NO_TASKBAR").as_deref(), Ok("1"));
+        assert!(std::env::var_os("MINICON_TRAY_HOST").is_none());
+        struct Registry {
+            key: HKEY,
+            path: String,
+        }
+        impl Drop for Registry {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = RegOverridePredefKey(HKEY_CURRENT_USER, None);
+                    let _ = RegCloseKey(self.key);
+                    assert!(self.path.starts_with(r"Software\minicon-winmgr\test-"));
+                    let _ = RegDeleteTreeW(
+                        HKEY_CURRENT_USER,
+                        PCWSTR(crate::win_util::wide(&self.path).as_ptr()),
+                    );
+                }
+            }
+        }
+        let path = format!(
+            r"Software\minicon-winmgr\test-takeover-{}",
+            std::process::id()
+        );
+        let mut key = HKEY::default();
+        assert_eq!(
+            unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    PCWSTR(crate::win_util::wide(&path).as_ptr()),
+                    Some(0),
+                    PCWSTR::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_ALL_ACCESS,
+                    None,
+                    &mut key,
+                    None,
+                )
+            },
+            ERROR_SUCCESS
+        );
+        let registry = Registry { key, path };
+        assert_eq!(
+            unsafe { RegOverridePredefKey(HKEY_CURRENT_USER, Some(registry.key)) },
+            ERROR_SUCCESS
+        );
+        let mut foreign = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "shell_swap::tests::private_foreign_host",
+                "--nocapture",
+            ])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !super::foreign_shell_running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(super::foreign_shell_running());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            assert!(!crate::tray_host::is_installed());
+            assert_eq!(crate::shell_registry::current_raw().unwrap(), None);
+            // A corrupt record must fail before either registry or host changes.
+            let record = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+                .join("minicon-winmgr")
+                .join("recovery")
+                .join(crate::privilege::sid_text().unwrap())
+                .join("original-shell.json");
+            std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+            std::fs::write(&record, b"corrupt-fixture").unwrap();
+            assert!(super::take_over().is_err());
+            assert_eq!(std::fs::read(&record).unwrap(), b"corrupt-fixture");
+            assert_eq!(crate::shell_registry::current_raw().unwrap(), None);
+            assert!(super::foreign_shell_running());
+            std::fs::remove_file(record).unwrap();
+            // A later host failure must undo our registry intent without executing
+            // the unknown previous shell command. The ready UI remains alive.
+            crate::tray_host::FAIL_NEXT_INSTALL.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(super::take_over().is_err());
+            assert_eq!(crate::shell_registry::current_raw().unwrap(), None);
+            assert!(!crate::tray_host::is_installed());
+            assert!(!super::foreign_shell_running());
+            let mut replacement = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "shell_swap::tests::private_foreign_host",
+                    "--nocapture",
+                ])
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !super::foreign_shell_running() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(super::foreign_shell_running());
+            let report = super::take_over().unwrap();
+            assert_eq!(report.stopped, 1);
+            assert!(replacement.wait().unwrap().success());
+            assert!(crate::tray_host::is_installed());
+            assert!(crate::shell_registry::is_self_shell());
+            assert_eq!(crate::shell_recovery::original_text().unwrap(), None);
+            let result = super::give_back().unwrap();
+            assert!(!result.started);
+            assert_eq!(result.restored, None);
+            assert_eq!(crate::shell_registry::current_raw().unwrap(), None);
+            assert!(crate::tray_host::is_installed()); // Current session remains ours.
+            unsafe { PostMessageW(crate::hub::shell_hwnd(), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+                .unwrap();
+        });
+        crate::window::run(false, |usable| {
+            assert!(usable);
+            sender.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        worker.join().unwrap();
+        assert!(foreign.wait().unwrap().success());
+        crate::settings_ui::shutdown();
+        crate::run_dialog::shutdown();
+        crate::tray_popup::shutdown();
+        crate::tray_host::shutdown();
+        drop(registry);
+    }
 
     fn hwnd(id: usize) -> windows::Win32::Foundation::HWND {
         windows::Win32::Foundation::HWND(id as *mut core::ffi::c_void)
@@ -441,25 +638,5 @@ mod tests {
         ] {
             assert!(!is_shell_class(class), "{class} must not be a shell window");
         }
-    }
-
-    #[test]
-    fn missing_backup_means_never_taken_over() {
-        // No file at all → give-back must refuse rather than clear the registry.
-        assert_eq!(interpret_backup(None), None);
-    }
-
-    #[test]
-    fn empty_backup_records_an_unset_shell() {
-        assert_eq!(interpret_backup(Some(String::new())), Some(None));
-        assert_eq!(interpret_backup(Some("  \n".to_string())), Some(None));
-    }
-
-    #[test]
-    fn non_empty_backup_records_the_value() {
-        assert_eq!(
-            interpret_backup(Some(" C:\\Windows\\explorer.exe \n".to_string())),
-            Some(Some("C:\\Windows\\explorer.exe".to_string()))
-        );
     }
 }

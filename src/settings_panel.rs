@@ -94,6 +94,22 @@ pub(crate) fn owner() -> Option<HWND> {
     let hwnd = handle();
     (!hwnd.is_invalid()).then_some(hwnd)
 }
+pub(crate) fn refresh_shell_status() {
+    if owner().is_some() {
+        let status = crate::settings_ui::shell_status_text();
+        with(|p| {
+            if let Some(c) = p.controls.iter_mut().find(|c| c.id == 6307) {
+                c.caption = status.clone();
+            }
+        });
+        label(control(6307), &status);
+        let enabled = !crate::settings_ui::shell_busy();
+        unsafe {
+            let _ = EnableWindow(control(REPLACE), enabled);
+            let _ = EnableWindow(control(ROLLBACK), enabled);
+        }
+    }
+}
 pub(crate) fn restore_info_focus() {
     if let Some(hwnd) = owner() {
         unsafe {
@@ -537,6 +553,7 @@ fn add(
     Ok(())
 }
 fn build() -> Result<(), Box<dyn std::error::Error>> {
+    let shell_status = crate::settings_ui::shell_status_text();
     let check = WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | BS_MULTILINE as u32);
     let radio = WINDOW_STYLE(BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32);
     let push = WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_MULTILINE as u32);
@@ -628,14 +645,9 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
             32,
             push | WS_GROUP,
         ),
-        (
-            6307,
-            crate::i18n::text("更改 Windows 桌面外壳，操作前会再次确认。"),
-            26,
-            note,
-        ),
+        (6307, &shell_status, 84, note),
         (REPLACE, crate::i18n::text("接管桌面…"), 34, push | WS_GROUP),
-        (ROLLBACK, crate::i18n::text("还原系统桌面…"), 34, push),
+        (ROLLBACK, crate::i18n::text("恢复接管前设置…"), 34, push),
     ] {
         add(id, title, height, style, false)?;
     }
@@ -656,6 +668,7 @@ pub(crate) fn toggle_from(anchor: HWND) {
     }
 }
 pub(crate) fn show() {
+    refresh_shell_status();
     if !unsafe { IsWindow(Some(handle())).as_bool() } {
         let raw = INSTANCE.load(std::sync::atomic::Ordering::Relaxed);
         if raw == 0 {
@@ -728,6 +741,7 @@ fn source_note(key: &'static str, reason: Option<&str>) -> String {
     }
 }
 fn refresh() {
+    crate::settings_ui::complete_shell_operation();
     crate::update::poll();
     label(
         handle(),
@@ -740,7 +754,7 @@ fn refresh() {
     let cfg = config::current();
     let controls = with(|p| p.controls.clone()).unwrap_or_default();
     for c in controls {
-        if !c.caption.is_empty() {
+        if !c.caption.is_empty() && c.id != 6307 {
             label(c.hwnd, &c.caption);
         }
     }
@@ -981,6 +995,7 @@ fn apply(id: u16) {
             } else {
                 crate::i18n::Language::Zh
             });
+            refresh_shell_status();
         }
         LIGHT | DARK | AUTO => {
             config::set_theme_mode(match id {
@@ -998,6 +1013,7 @@ fn apply(id: u16) {
             });
         }
         ADVANCED => {
+            refresh_shell_status();
             let expanded = with(|p| {
                 p.advanced = !p.advanced;
                 p.advanced

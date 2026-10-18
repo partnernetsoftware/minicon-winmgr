@@ -1,82 +1,31 @@
-# prd_3_1 — 外壳替换与回滚
+# prd_3_1 — 外壳接管与恢复
 
-> 2026-10-17 核对：下文保留早期试替换记录，不能当作当前工作树的完整验收。当前启动必须普通权限，不主动请求 UAC；HKLM 自动重启设置失败仍是已知边界。本轮发现备份失败未阻止接管、恢复记录身份隔离及运行中通知宿主转换缺口，见[梳理 C01/C06/C07](review_0_1_12.md)。[0.1.12 草案](plan_0_1_12.md)只提出待讨论修复，不代表已完成。
+0.1.12 实施契约，实际通过范围及发布状态以版本验收记录为准。[旧试替换记录](archive/shell_replacement_before_0_1_12.md)仅供追溯。
 
-> 索引：3.1 · 树路径：`外壳集成 / 替换` · 上位文档：[`prd.md`](prd.md)
-> 原始独立文档 `replacement-readiness.md` 已并入本文。
+## 默认与权限
 
-替换 = 把 `HKCU\...\Winlogon\Shell` 指向本程序（`<repo>\target\debug\minicon-winmgr.exe`）。
-**默认 companion 模式不改注册表**；替换是可选、受控、可回滚的步骤。用户授权：
-「判断真能替代时可直接替换，由用户测试」。
+默认共同运行不修改登录 Shell，不关闭外部宿主。每个入口继承普通权限自重启规则；不主动请求 UAC、不写 HKLM AutoRestartShell。所有显式 Shell 登记写入共享当前账户的跨会话操作互斥，失败或竞争时不继续。
 
-## 1. 试替换记录（2026-10-12 ~ 10-13）
-- 已执行过 `--shell-set minicon`：`Shell` 一度指向本程序。
-- **无 explorer 也能运行**：杀掉 explorer 后本程序以 shell 模式运行
-  （`running as the shell; console detached` + `tray_host` sink 创建成功）。
-- **AppBar 未能注册**（`ABM_NEW` 失败）——AppBar 需 explorer 当 broker；无 explorer 时**由我们自管工作区**替代，
-  最大化窗口仍停在栏上方（见 [`prd_2_1.md`](prd_2_1.md) §3）。
-- 之后按需回滚/保留，`Shell` 现值以 `--shell-status` 为准。
+## 恢复依据
 
-## 1b. 立即接管（本会话，无需注销/重登）
-注册表只在**登录时**被读取，因此"把 `Shell` 指向本程序"本身不会立刻生效。
-`src/shell_swap.rs` 补齐了**当前会话的即时交接**：
+接管原值存于当前用户 LOCALAPPDATA 下、按 SID 隔离的恢复目录，记录版本、账户 SID、本机身份及原始注册表类型/字节。不存在值和存在空字符串不同，REG_SZ/REG_EXPAND_SZ、空白及引号原样保留。不可解析、异身份、过大、类型不支持的记录拒绝采用。
 
-- **接管**（`take_over`）：① 首次把原 `Shell` 值备份到 exe 旁 `shell-backup.txt`（**只写一次，永不覆盖**）；
-  ② 写注册表指向本程序（持久意图）；③ 尽力关闭外壳自动重启（HKLM `AutoRestartShell`，**需提权**）；
-  ④ **立即停止本会话正在运行的外壳**：`EnumWindows` 找 `Shell_TrayWnd` / `Shell_SecondaryTrayWnd` / `Progman`
-  → `WM_CLOSE` → 超时 `TerminateProcess`。
-- **归还**（`give_back`）：读备份 → `restore` 注册表 → 重新开启自动重启 → **脱附启动** `explorer.exe`。
-- 只作用于**当前会话桌面**（按顶层窗口枚举，绝不触及其他登录用户）。
-- **脱附启动**：`CreateProcessW(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`，不继承句柄——
-  外壳必须比启动者活得久，否则会被一起回收（早期用 `Command::spawn` 曾让调用者收到 SIGTERM）。
+首次接管必须先读原值，完整写入、落盘、发布且复读验证恢复记录，之后才能改登记或关闭外壳。已有原始记录不可覆盖；当前登记与记录关系不符时停止。旧 exe 旁 shell-backup.txt 不自动导入。没有可靠记录时不自动恢复；用户可使用显式确认的 --shell-rollback <原值|default> 手工选择下次登录设置，旧记录仍保留供本地检查。损坏的新记录需要本地检查并移存后再接管，不把它视为有效空记录。
 
-实测（2026-10-13，debug 构建）：备份→写注册表→`stopped 0`（本机无原生外壳窗口，非错误）；
-`give_back` 按备份**精确恢复**注册表值、脱附拉起 explorer（已存在实例时单实例交接、不新增常驻进程）、
-退出码 0、无 SIGTERM。`AutoRestartShell` 因 HKLM 需提权未改动（`Win32 error 5`），属预期。
+## 接管当前会话
 
-## 2. 硬门槛（全绿方可长期保留替换）
-| # | 项 | 状态 | 说明 |
-|---|----|------|------|
-| 1 | 任务栏可用 | ✅ | 自绘、每窗口一按钮、点击/键盘切换、每屏一栏、主题可配 |
-| 2 | 最大化窗口不压栏 | ✅ | 有 explorer → AppBar 停靠；无 explorer → 自管工作区收窄并 `recover` |
-| 3 | 替换后不丢通知区 | 🟡 | `tray_host` sink 已创建；待真替换会话中确认能收到各程序托盘图标 |
-| 4 | 有开始菜单 / 启动器 | ✅ | `start_menu`（品牌点）+ `launcher_ui`（Alt+Space）+ `run_dialog` |
-| 5 | 会话生命周期 | ✅ | WTS 会话变更 + `WM_QUERYENDSESSION/ENDSESSION` |
-| 6 | 一键回滚 | ✅ | 见下 |
-| 7 | 稳定性长跑 | ⏳ | 需 ≥ 数小时常驻、无 panic / 泄漏 / 卡死（**已部分取证**：30 秒连续采样工作集/句柄/线程完全持平，见 [`prd_2_1.md`](prd_2_1.md) §2；数小时长跑仍待观察） |
+设置确认默认取消，Esc/关闭不执行；确认必须说明当前外壳、任务栏、桌面图标及 Explorer 文件窗口可能关闭。CLI --shell-takeover 仍须 MINICON_CONFIRM_SHELL=yes，操作转交常驻 UI 实例；无实例时先启动完整界面。CLI 请求已排队不等于接管完成，以常驻实例的结果为准。
 
-## 3. 切换流程（立即生效）
-1. `--shell-status` 记录当前值。
-2. `--shell-takeover`（需 `MINICON_CONFIRM_SHELL=yes`）：写注册表**并立即停止本会话外壳**，无需注销。
-3. 确认任务栏 / 托盘 / 开始菜单齐全。
-4. 异常 → 归还命令。
+后台执行记录与登记操作及旧宿主退出等待，UI 保持响应；操作中禁用两项桌面动作，至多执行一次，隐藏设置不取消已经开始的交接，交接结束前不允许正常退出进程。登记以带引号的当前 exe 写入并复读；重新检查外部修改后才继续。停止范围限当前桌面的同用户、同会话外壳窗口，先固定进程句柄，核验窗口/PID，再 WM_CLOSE，有界等待后只终止该同一进程句柄。
 
-## 4. 归还 / 回滚（任何异常立即执行）
-```
-MINICON_CONFIRM_SHELL=yes "<repo>\target\debug\minicon-winmgr.exe" --shell-give-back
-```
-- `--shell-give-back`：读 `shell-backup.txt` → 恢复注册表 → 脱附重启 `explorer.exe`，**当前会话立即恢复**。
-  **无备份记录时拒绝执行**（返回错误），绝不改写并非由本程序配置的 `Shell`。
-- 底层等价命令（不带即时交接）：`--shell-rollback default`（删除该值 → 系统默认 `explorer.exe`）；
-  或 `--shell-rollback "<切换前记录的值>"` 恢复到替换前的第三方外壳。
-- 登录后没桌面时：`Ctrl+Shift+Esc` → 运行新任务 → 执行 `explorer.exe`（或上面命令）。
+旧宿主退出后，由 UI 线程安装公开可发现的 Shell_TrayWnd、广播 TaskbarCreated 并刷新任务栏。私有 sink、任意图标数量均不能作为就绪依据。空图标会话合法。任何后续失败只在登记仍等于本次写入时恢复操作前快照，分别报告登记恢复与外部宿主观测；不覆盖外部新改动，不自动执行未知第三方外壳命令。Windows 默认/已支持 Explorer 形式可尝试启动，并观测实际宿主后报告。外部宿主后来返回时退让通知区，不自动反复结束它。
 
-## 5. GUI 内入口（设置窗）
-`settings_ui` 底部两个动作（`src/settings_ui.rs`），均**立即生效**：
-- **接管桌面（立即生效）**：先备份当前 `Shell` 到 exe 旁 `shell-backup.txt`（只写一次），
-  再 `replace` 注册表，随后**停止本会话外壳**（见 §1b）。
-- **还原系统桌面（立即生效）**：读 `shell-backup.txt` → `restore` → 重新开启自动重启 → 脱附重启 `explorer.exe`；
-  **无备份则拒绝**。带 **MessageBox 二次确认**；0.1.10 改为确定/取消，默认取消，Esc 或关闭确认框不执行切换。
+## 恢复接管前设置
 
-## 6. 开发期热替换
-`scripts/hotswap.py`：Windows 不能覆盖运行中的 exe，但能改名——脚本先**改名移走在跑的 exe**，
-再 `cargo build`，随后请旧实例退出（必要时强杀），可选启动新 exe。把"掉壳"窗口压到亚秒级。
+动作名为“恢复接管前设置…”。验证账户记录及当前登记关系，再原样写回并复读。成功主要表示下次登录设置恢复；当前 Minicon 宿主继续运行，不能称为立即恢复 Explorer。不自动注销，不自动执行第三方原命令；当前没有宿主且原值明确为 Windows 默认/支持 Explorer 形式时才尝试 Explorer，并分别说明实际结果。
 
-## 7. 已知缺口 / 非目标
-- 桌面图标 / 动态桌面、文件夹堆栈、菜单"最近使用"、通知区点击转发（见 [`prd_5_1.md`](prd_5_1.md)）。
-- 系统级（HKLM）替换、打包发版、代码签名：不做。
+设置分别显示当前会话、下次登录与恢复依据。低层 --shell-set/--shell-replace/--shell-rollback 保持只改登记，不顺带关闭/创建宿主；安装 Minicon 前同样必须有有效恢复依据。
 
-## 8. 风险
-- 替换是**共享系统状态**改动，仅当前用户级；**始终保留可回滚值**。
-- 工作区自管在崩溃时靠 `minicon-workarea.state` 恢复；若该文件丢失且进程被强杀，可能残留底部空带
-  （手动 `--shell-rollback` 或重启会话可解）。
+## 当前范围边界
+
+账户级操作互斥不是长期接管所有权管理。本版不实现旧记录导入向导、两个会话共同持有登录设置的完整策略、成功接管后立即交还任意第三方外壳或新的最小恢复面板。未完成事项及发布条件见[0.1.12 计划](plan_0_1_12.md)。

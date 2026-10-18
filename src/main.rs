@@ -36,6 +36,7 @@ mod settings_panel;
 mod settings_store;
 mod settings_ui;
 mod shell_launch;
+mod shell_recovery;
 mod shell_registry;
 mod shell_swap;
 mod single_instance;
@@ -295,6 +296,7 @@ fn run_companion(show_settings: bool) {
     crate::diagnostic_export::shutdown();
     crate::run_dialog::shutdown();
     crate::tray_popup::shutdown();
+    crate::tray_host::shutdown();
     // The message loop only closes the message-only window, so the taskbar
     // windows never see WM_DESTROY and would not restore the reserved work
     // area. Tear them down explicitly.
@@ -390,7 +392,7 @@ fn resolve_target(target: &str) -> Result<Option<String>, Box<dyn std::error::Er
                 format!("profile 'alt' needs {ALT_SHELL_ENV}=<path to shell exe>")
             })?)
         }
-        "minicon" | "minicon-winmgr" => Some(std::env::current_exe()?.display().to_string()),
+        "minicon" | "minicon-winmgr" => Some(format!("\"{}\"", std::env::current_exe()?.display())),
         _ => Some(target.to_string()),
     })
 }
@@ -437,7 +439,7 @@ fn cmd_shell_replace() {
         }
     };
     tracing::warn!(shell = %exe, "REPLACING Winlogon Shell value (confirmed)");
-    if let Err(err) = shell_registry::replace(&exe) {
+    if let Err(err) = shell_registry::replace(&format!("\"{exe}\"")) {
         eprintln!("minicon-winmgr: {err}");
         std::process::exit(1);
     }
@@ -455,25 +457,16 @@ fn cmd_shell_takeover() {
         );
     }
     tracing::warn!("TAKING OVER the shell now (confirmed)");
-    match shell_swap::take_over() {
-        Ok(report) => {
-            println!("Shell set to {}", report.exe);
-            println!(
-                "stopped {} shell process(es) in this session",
-                report.stopped
-            );
-            if report.auto_restart_disabled {
-                println!("shell auto-restart disabled");
-            } else {
-                println!(
-                    "warn: could not disable shell auto-restart (needs elevation); \
-                     Windows may relaunch explorer"
-                );
-            }
-            println!("give the desktop back with: minicon-winmgr --shell-give-back");
+    match window::request_takeover() {
+        Ok(true) => {
+            println!("Takeover request queued in the running instance; see its result dialog.")
         }
-        Err(err) => {
-            eprintln!("minicon-winmgr: {err}");
+        Ok(false) => {
+            window::takeover_on_startup();
+            run_companion(true);
+        }
+        Err(error) => {
+            eprintln!("minicon-winmgr: {error}");
             std::process::exit(1);
         }
     }

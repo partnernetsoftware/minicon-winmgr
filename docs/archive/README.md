@@ -31,3 +31,5 @@
 - [0.1.10 开发过程](notes_0_1_10_development.md)：逐轮进度与已取代的长测发布门槛；当前任务以[版本计划](plan_0_1_10.md)为准。
 
 - [0.1.10 阶段验收](validation_0_1_10_development.md)：开发期逐轮结果；正式验收见[当前记录](../validation_0_1_10.md)。
+
+- [0.1.12 前 Shell 试替换记录](shell_replacement_before_0_1_12.md)：保留旧备份、HKLM 尝试和立即恢复文案的历史；现行契约见[Shell 规格](../prd_3_1.md)。

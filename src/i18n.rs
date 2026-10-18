@@ -208,6 +208,7 @@ const CATALOG: &[(&str, &str)] = &[
         "Change the Windows desktop shell. Confirmation is required.",
     ),
     ("接管桌面…", "Take over desktop…"),
+    ("恢复接管前设置…", "Restore pre-takeover settings…"),
     ("还原系统桌面…", "Restore desktop…"),
     ("关闭", "Close"),
     ("取消", "Cancel"),
