@@ -39,3 +39,4 @@ scripts/__pycache__/
 !scripts/isolated_tray_probe.py
 !scripts/run_admin_probe.py
 !scripts/run_uac_probe.py
+!scripts/legacy_update_path_probe.py

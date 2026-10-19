@@ -117,13 +117,22 @@ def main(*,release=False,previous_artifact=None):
         check('restart_rechecks_staged_hash_before_exit',p.pid(p.message())==before and exe.read_bytes()==old_bytes)
         payload.write_bytes(candidate);p.click(RESTART)
         p.wait(lambda:p.message() and p.pid(p.message())!=before and p.panel() and p.text(p.panel()).endswith(CURRENT) and (stage/'started').exists(),timeout=30)
-        check('real_previous_fixture_to_current_handoff',exe.read_bytes()==candidate and (stage/'previous.exe').read_bytes()==old_bytes and p.text(p.panel()).endswith(CURRENT))
+        installed=folder/f'minicon-winmgr-v{CURRENT}-x86_64-windows.exe'
+        check('real_previous_fixture_to_current_handoff',installed.read_bytes()==candidate and (stage/'previous.exe').read_bytes()==old_bytes and p.text(p.panel()).endswith(CURRENT))
         import scenario_probe, memory_probe
         running=memory_probe.Process(p.pid(p.message()))
         try:
-            check('update_preserves_installation_path_with_old_version_filename',scenario_probe.Desktop().image(running)==exe.resolve() and 'v0.1.10' in exe.name)
+            check('update_uses_new_version_filename_in_same_directory',scenario_probe.Desktop().image(running)==installed.resolve() and not exe.exists())
         finally:running.close()
         check('settings_survive_restart','appearance.mode = dark' in cfg.read_text(encoding='utf-8'))
+        # A separately created file at the desired name must never be replaced,
+        # including when the published old helper installs at the obsolete name.
+        folder,exe,cfg=start_case(old_bytes);available();stage=ready();before=p.pid(p.message())
+        destination=folder/f'minicon-winmgr-v{CURRENT}-x86_64-windows.exe'
+        destination.write_bytes(b'owned foreign destination marker')
+        p.click(RESTART)
+        p.wait(lambda:(stage/'error.txt').exists() and p.message() and p.pid(p.message())!=before and p.panel() and 'restored' in status().lower(),timeout=30)
+        check('destination_collision_preserves_foreign_file_and_restores_old_version',destination.read_bytes()==b'owned foreign destination marker' and exe.read_bytes()==old_bytes and not (stage/'started').exists())
         # Hold only our installed fixture file without delete sharing.
         folder,exe,cfg=start_case(old_bytes);available();stage=ready();before=p.pid(p.message())
         p.k.CreateFileW.argtypes=[p.w.LPCWSTR,p.w.DWORD,p.w.DWORD,c.c_void_p,p.w.DWORD,p.w.DWORD,p.w.HANDLE];p.k.CreateFileW.restype=p.w.HANDLE

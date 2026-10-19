@@ -4,6 +4,8 @@
 
 当前公开版：[v0.1.14](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.14)。使用入口：[English](../readme.en.md) / [中文](../readme.zh.md)。
 
+未发布修复：[更新文件名](update_filename_fix.md)，官方版本化 exe 随目标版本改名，兼容旧 helper 首次交接；本地验证完成，未替换 0.1.14 公开附件。
+
 **0.1.14 已合 main 并公开发布**：显示桌面与 Run 管理员选择已交付，真实管理员入口、目标授权及取消分段验证通过，真实公开 .13 → .14 更新八项通过；失败轮次与一次未定位的退出超时见[本版验收](validation_0_1_14.md)。
 
 **0.1.13 已合 main 并公开发布**：两处管理员启动缺陷修复、配置详情显示实际运行路径；管理员模块真实入口及准确附件桌面验收通过，真实公开 .12 → .13 更新八项通过，见[本版记录](validation_0_1_13.md)。

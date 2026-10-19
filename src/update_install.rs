@@ -19,6 +19,8 @@ use windows::core::PWSTR;
 #[derive(Serialize, Deserialize)]
 struct Plan {
     target: PathBuf,
+    #[serde(default)]
+    destination: Option<PathBuf>,
     parent: u32,
     old_hash: String,
     new_hash: String,
@@ -107,6 +109,7 @@ fn prepare_at_cancellable(
         checkpoint()?;
         let plan = Plan {
             target: target.clone(),
+            destination: Some(crate::update_paths::destination(&target, version)?),
             parent: std::process::id(),
             old_hash,
             new_hash: hash.into(),
@@ -150,6 +153,11 @@ fn read_plan(path: &Path) -> Result<(Plan, PathBuf), String> {
     if plan.target.parent() != folder.parent() || plan.target.file_name().is_none() {
         return Err("handoff target is outside installation directory".into());
     }
+    if let Some(destination) = &plan.destination
+        && *destination != crate::update_paths::destination(&plan.target, &plan.version)?
+    {
+        return Err("handoff destination does not match release filename".into());
+    }
     Ok((plan, folder))
 }
 fn spawn(path: &Path, args: &[&std::ffi::OsStr]) -> Result<Child, String> {
@@ -168,6 +176,143 @@ fn spawn(path: &Path, args: &[&std::ffi::OsStr]) -> Result<Child, String> {
             .spawn()
             .map_err(|e| e.to_string()),
     }
+}
+/// Move within the installation volume without replacing an existing file,
+/// including one created after the preflight check.
+fn move_new(source: &Path, destination: &Path) -> Result<(), String> {
+    unsafe {
+        windows::Win32::Storage::FileSystem::MoveFileW(
+            windows::core::PCWSTR(crate::win_util::wide(&source.to_string_lossy()).as_ptr()),
+            windows::core::PCWSTR(crate::win_util::wide(&destination.to_string_lossy()).as_ptr()),
+        )
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn launch_ready(target: &Path, folder: &Path, timeout: Duration) -> Result<(), String> {
+    let receipt = folder.join("started");
+    let mut child = spawn(
+        target,
+        &[std::ffi::OsStr::new("--after-update"), receipt.as_os_str()],
+    )?;
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if receipt.exists() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Err(format!("new version exited before startup: {status}"));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child.kill().map_err(|error| error.to_string())?;
+    child.wait().map_err(|error| error.to_string())?;
+    Err("new version startup timed out".into())
+}
+
+fn replace_manifest(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let temporary = path.with_file_name("path-plan.tmp");
+    write_new(&temporary, bytes)?;
+    fs::rename(&temporary, path).map_err(|error| error.to_string())
+}
+
+fn legacy_owner(plan: &Plan, folder: &Path) -> Result<Process, String> {
+    let pid = String::from_utf8(bounded_read(&folder.join("ready"), 32)?)
+        .map_err(|error| error.to_string())?
+        .parse::<u32>()
+        .map_err(|error| error.to_string())?;
+    if !crate::single_instance::same_user_session(pid) {
+        return Err("legacy helper belongs to another user or session".into());
+    }
+    let process = Process(
+        unsafe { OpenProcess(PROCESS_ACCESS_RIGHTS(0x100000 | 0x1000), false, pid) }
+            .map_err(|error| error.to_string())?,
+    );
+    let mut image = vec![0u16; 32768];
+    let mut size = image.len() as u32;
+    unsafe {
+        QueryFullProcessImageNameW(
+            process.0,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(image.as_mut_ptr()),
+            &mut size,
+        )
+    }
+    .map_err(|error| error.to_string())?;
+    let image = PathBuf::from(String::from_utf16_lossy(&image[..size as usize]));
+    if image.canonicalize().map_err(|error| error.to_string())? != folder.join("helper.exe")
+        || unsafe { WaitForSingleObject(process.0, 0) } != windows::Win32::Foundation::WAIT_TIMEOUT
+    {
+        return Err("legacy helper identity changed".into());
+    }
+    verify_file(&image, &plan.old_hash)?;
+    Ok(process)
+}
+
+/// Published helpers install at the old name. The first new child acts only
+/// as a bridge: move its own image, start the correctly named child and stay
+/// alive until that child's real readiness receipt reaches the old helper.
+/// On failure restore the old pathname before returning, so that helper's
+/// existing rollback still works. No receipt is fabricated by this bridge.
+pub(crate) fn adopt_legacy_path(receipt: &Path) -> Result<bool, String> {
+    let path = receipt.with_file_name("plan.json");
+    let (mut plan, folder) = read_plan(&path)?;
+    let current = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .map_err(|error| error.to_string())?;
+    let installed = plan.destination.as_ref().unwrap_or(&plan.target);
+    if receipt != folder.join("started")
+        || &current != installed
+        || plan.version != env!("CARGO_PKG_VERSION")
+    {
+        return Err("invalid update path migration".into());
+    }
+    let destination = crate::update_paths::destination(&plan.target, &plan.version)?;
+    if plan.destination.is_some() || destination == plan.target {
+        return Ok(false);
+    }
+    let _owner = legacy_owner(&plan, &folder)?;
+    verify_file(&current, &plan.new_hash)?;
+    if destination
+        .try_exists()
+        .map_err(|error| error.to_string())?
+    {
+        return Err("new version filename already exists; refusing to overwrite it".into());
+    }
+    let guard = crate::single_instance::InstanceGuard::acquire("minicon-winmgr.singleton")
+        .map_err(|error| error.to_string())?;
+    let original_manifest = bounded_read(&path, MAX_PLAN)?;
+    plan.destination = Some(destination.clone());
+    replace_manifest(
+        &path,
+        &serde_json::to_vec(&plan).map_err(|error| error.to_string())?,
+    )?;
+    if let Err(error) = move_new(&current, &destination) {
+        replace_manifest(&path, &original_manifest)?;
+        return Err(error);
+    }
+    let redirect = match crate::update_paths::LoginRedirect::apply(&current, &destination) {
+        Ok(redirect) => redirect,
+        Err(error) => {
+            move_new(&destination, &current)?;
+            replace_manifest(&path, &original_manifest)?;
+            return Err(error);
+        }
+    };
+    drop(guard);
+    let outcome = launch_ready(&destination, &folder, Duration::from_secs(12));
+    if let Err(error) = outcome {
+        if let Some(redirect) = redirect {
+            redirect
+                .rollback()
+                .map_err(|rollback| format!("{error}; login rollback: {rollback}"))?;
+        }
+        move_new(&destination, &current)
+            .map_err(|rollback| format!("{error}; path rollback: {rollback}"))?;
+        replace_manifest(&path, &original_manifest)?;
+        return Err(error);
+    }
+    Ok(true)
 }
 pub(crate) fn start_helper(path: &Path) -> Result<(), String> {
     let (plan, folder) = read_plan(path)?;
@@ -319,42 +464,43 @@ fn install_and_launch(plan: &Plan, folder: &Path) -> Result<(), String> {
         drop(guard);
         return Err("installation changed during handoff".into());
     }
+    let destination = plan.destination.as_ref().unwrap_or(&plan.target);
+    if destination != &plan.target
+        && destination
+            .try_exists()
+            .map_err(|error| error.to_string())?
+    {
+        return Err("new version filename already exists; refusing to overwrite it".into());
+    }
     let backup = folder.join("previous.exe");
-    if let Err(error) = fs::rename(&plan.target, &backup) {
+    if let Err(error) = move_new(&plan.target, &backup) {
         drop(guard);
         return Err(error.to_string());
     }
-    if let Err(error) = fs::rename(folder.join("payload.exe"), &plan.target) {
-        let rollback = fs::rename(&backup, &plan.target);
+    if let Err(error) = move_new(&folder.join("payload.exe"), destination) {
+        let rollback = move_new(&backup, &plan.target);
         drop(guard);
         return Err(format!("install failed: {error}; rollback: {rollback:?}"));
     }
-    drop(guard);
-    let receipt = folder.join("started");
-    let result = (|| {
-        let mut child = spawn(
-            &plan.target,
-            &[std::ffi::OsStr::new("--after-update"), receipt.as_os_str()],
-        )?;
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(20) {
-            if receipt.exists() {
-                return Ok(());
-            }
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                return Err(format!("new version exited before startup: {status}"));
-            }
-            std::thread::sleep(Duration::from_millis(100));
+    let redirect = match crate::update_paths::LoginRedirect::apply(&plan.target, destination) {
+        Ok(redirect) => redirect,
+        Err(error) => {
+            move_new(destination, &folder.join("failed.exe"))?;
+            move_new(&backup, &plan.target)?;
+            return Err(error);
         }
-        // Only our newly-created candidate process, before its startup receipt.
-        child.kill().map_err(|e| e.to_string())?;
-        child.wait().map_err(|e| e.to_string())?;
-        Err("new version startup timed out".into())
-    })();
+    };
+    drop(guard);
+    let result = launch_ready(destination, folder, Duration::from_secs(20));
     if let Err(error) = result {
-        fs::rename(&plan.target, folder.join("failed.exe"))
+        if let Some(redirect) = redirect {
+            redirect
+                .rollback()
+                .map_err(|rollback| format!("{error}; login rollback: {rollback}"))?;
+        }
+        move_new(destination, &folder.join("failed.exe"))
             .map_err(|e| format!("{error}; cannot retain failed candidate: {e}"))?;
-        fs::rename(&backup, &plan.target).map_err(|e| format!("{error}; rollback failed: {e}"))?;
+        move_new(&backup, &plan.target).map_err(|e| format!("{error}; rollback failed: {e}"))?;
         return Err(error);
     }
     Ok(())
@@ -369,8 +515,8 @@ pub(crate) fn confirm_startup() {
     let result = (|| {
         let (plan, folder) = read_plan(&path.with_file_name("plan.json"))?;
         if path != &folder.join("started")
-            || plan.target
-                != std::env::current_exe()
+            || plan.destination.as_ref().unwrap_or(&plan.target)
+                != &std::env::current_exe()
                     .and_then(fs::canonicalize)
                     .map_err(|e| e.to_string())?
             || plan.version != env!("CARGO_PKG_VERSION")
@@ -642,6 +788,23 @@ mod tests {
     }
 
     #[test]
+    fn installation_moves_refuse_collisions_and_can_restore_the_original_name() {
+        let installation = Installation::new();
+        let old = installation.executable();
+        let new = installation.0.join("new.exe");
+        fs::write(&old, b"old image").unwrap();
+        fs::write(&new, b"unrelated image").unwrap();
+        assert!(move_new(&old, &new).is_err());
+        assert_eq!(fs::read(&old).unwrap(), b"old image");
+        assert_eq!(fs::read(&new).unwrap(), b"unrelated image");
+        fs::remove_file(&new).unwrap();
+        move_new(&old, &new).unwrap();
+        assert!(!old.exists());
+        move_new(&new, &old).unwrap();
+        assert_eq!(fs::read(&old).unwrap(), b"old image");
+    }
+
+    #[test]
     fn manifest_is_bounded_and_confined_to_its_install_directory() {
         let root = std::env::temp_dir().join(format!(
             "winmgr-manifest-{}-{}",
@@ -658,6 +821,7 @@ mod tests {
         let path = folder.join("plan.json");
         let mut plan = Plan {
             target: root.join("winmgr.exe"),
+            destination: None,
             parent: std::process::id(),
             old_hash: "a".repeat(64),
             new_hash: "b".repeat(64),
@@ -665,6 +829,13 @@ mod tests {
         };
         fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
         assert!(read_plan(&path).is_ok());
+        plan.destination = Some(root.join("unrelated.exe"));
+        fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+        assert!(read_plan(&path).is_err());
+        plan.destination = Some(plan.target.clone());
+        fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+        assert!(read_plan(&path).is_ok());
+        plan.destination = None;
         plan.target = root.parent().unwrap().join("unrelated.exe");
         fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
         assert!(read_plan(&path).is_err());

@@ -1103,8 +1103,8 @@ fn apply(id: u16) {
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|error| error.to_string());
             let mut message = crate::ui_format!(
-                "minicon-winmgr {} · {}\n\n程序路径：{}\n更新保留安装路径和文件名；版本以本页显示为准。\n\n任务栏唤出配置：{}（实际注册结果见日志）\n\n配置来源（启动时）\n",
-                "minicon-winmgr {} · {}\n\nExecutable: {}\nUpdates preserve the installation path and filename; the version shown here is authoritative.\n\nTaskbar hotkey: {} (registration results are recorded in the log)\n\nConfiguration sources at startup\n",
+                "minicon-winmgr {} · {}\n\n程序路径：{}\n更新保留安装目录；官方版本化文件名随版本更新。\n\n任务栏唤出配置：{}（实际注册结果见日志）\n\n配置来源（启动时）\n",
+                "minicon-winmgr {} · {}\n\nExecutable: {}\nUpdates keep the installation directory; official versioned filenames follow the new version.\n\nTaskbar hotkey: {} (registration results are recorded in the log)\n\nConfiguration sources at startup\n",
                 env!("CARGO_PKG_VERSION"),
                 crate::privilege::description(),
                 executable,

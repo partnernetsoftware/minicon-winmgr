@@ -51,6 +51,7 @@ mod update;
 mod update_cancel;
 mod update_http;
 mod update_install;
+mod update_paths;
 mod update_stream;
 mod win_util;
 mod window;
@@ -159,8 +160,18 @@ fn main() {
         }
         Some("--after-update") => {
             if let Some(path) = update_args.next() {
-                update_install::set_receipt(path.into());
-                run_companion(true);
+                let path = std::path::PathBuf::from(path);
+                match update_install::adopt_legacy_path(&path) {
+                    Ok(true) => return,
+                    Ok(false) => {
+                        update_install::set_receipt(path);
+                        run_companion(true);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "update filename migration failed");
+                        std::process::exit(1);
+                    }
+                }
             }
             return;
         }

@@ -24,6 +24,8 @@
 
 例外是显式交互验收 `scripts/run_uac_probe.py --candidate <准确候选> --restore-exe <实际原程序> --interactive-uac`：完整范围需要管理员入口批准、目标批准和目标取消，不能无人值守运行。`--approve-only` / `--cancel-only` 分别只覆盖目标批准或取消，不能把单段报告写成全范围通过。自有目标探针名标明 CLICK YES/NO，让授权要求出现在系统提示中；不要仅在聊天里交代交替顺序。系统选择必须由用户操作，不改变安全桌面策略；普通键盘遍历由 `run_admin_probe.py` 独立回归。失败轮次、退出异常与恢复情况必须保留，不能靠反复弹窗凑出完整通过。
 
+更新改名兼容专项：`scripts/legacy_update_path_probe.py --candidate <新程序> --legacy-exe <真实公开旧版> --restore-exe <实际原程序>`。在自有目录运行公开旧 helper，验证改名交接、碰撞保护和子进程启动被 Job 限制拒绝后的回滚。需要现有 pywin32 环境，不请求 UAC；该专项不取代真实公开下载或自建外部启动入口的验证。隔离配置及输出目录必须使用绝对路径。
+
 `release` 表示当前自动化全套，不代表所有物理环境已覆盖。混合 DPI、多屏热插拔、高对比度实屏、屏幕阅读器语音、特殊管理员令牌以及小时级常驻观察仍需独立环境验收。CI 没有当前交互桌面，执行 `quality`、完整隔离普通单元矩阵与独立 `fault` 层，candidate workflow 执行优化矩阵，release workflow 另外执行全部优化普通单元；发布前在可用桌面运行 `release` 并审阅报告。仅构建优化二进制不会自动声称完成发布验收。
 
 发布层构建目录为 `target/release-validation`，避免旧会话直接运行 `target/release` 时锁住 Cargo 硬链接产物。实际候选来自显式指定的 `--release-binary`（如已下载的草稿资产），不会用重建结果替换它。桌面探针的 live 路径隔离在忽略目录，结束恢复显式指定的原运行路径、摘要、工作区与 Shell 登记，不覆盖原外壳文件，也不结束其他会话。
