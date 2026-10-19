@@ -75,7 +75,7 @@ unsafe extern "system" fn child(hwnd: HWND, _: LPARAM) -> BOOL {
                 let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
                 let kind = style & 0xf;
                 if style & (BS_ICON | BS_BITMAP) as u32 == 0
-                    && (kind == BS_PUSHBUTTON as u32 || kind == BS_DEFPUSHBUTTON as u32)
+                    && matches!(kind, value if value == BS_PUSHBUTTON as u32 || value == BS_DEFPUSHBUTTON as u32 || value == BS_AUTOCHECKBOX as u32 || value == BS_CHECKBOX as u32)
                 {
                     let _ = unsafe { SetWindowSubclass(hwnd, Some(button), 0xAC17, 0) };
                 }
@@ -85,7 +85,76 @@ unsafe extern "system" fn child(hwnd: HWND, _: LPARAM) -> BOOL {
         || BOOL(1),
     )
 }
+fn paint_checkbox(hwnd: HWND, dc: HDC) {
+    unsafe {
+        let mut rect = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rect);
+        FillRect(dc, &rect, brush(dc, COLOR_WINDOW));
+        let scale =
+            |n: i32| n * windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as i32 / 96;
+        let edge = scale(13);
+        let y = (rect.bottom - edge) / 2;
+        let enabled = windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(hwnd).as_bool();
+        let foreground = color(if enabled {
+            COLOR_WINDOWTEXT
+        } else {
+            COLOR_GRAYTEXT
+        });
+        SetDCBrushColor(dc, COLORREF(foreground));
+        FrameRect(
+            dc,
+            &RECT {
+                left: 0,
+                top: y,
+                right: edge,
+                bottom: y + edge,
+            },
+            HBRUSH(GetStockObject(DC_BRUSH).0),
+        );
+        if SendMessageW(hwnd, BM_GETCHECK, None, None).0 != 0 {
+            let pen = CreatePen(PS_SOLID, scale(1).max(1), COLORREF(foreground));
+            let previous = SelectObject(dc, pen.into());
+            let _ = MoveToEx(dc, scale(3), y + scale(6), None);
+            let _ = LineTo(dc, scale(6), y + scale(9));
+            let _ = LineTo(dc, scale(11), y + scale(3));
+            SelectObject(dc, previous);
+            let _ = DeleteObject(pen.into());
+        }
+        rect.left = edge + scale(6);
+        let font = SendMessageW(hwnd, WM_GETFONT, None, None).0;
+        let previous = SelectObject(
+            dc,
+            if font == 0 {
+                GetStockObject(DEFAULT_GUI_FONT)
+            } else {
+                HGDIOBJ(font as *mut _)
+            },
+        );
+        SetTextColor(dc, COLORREF(foreground));
+        SetBkMode(dc, TRANSPARENT);
+        let mut title = vec![0u16; GetWindowTextLengthW(hwnd).max(0) as usize + 1];
+        let length = GetWindowTextW(hwnd, &mut title).max(0) as usize;
+        if length > 0 {
+            DrawTextW(
+                dc,
+                &mut title[..length],
+                &mut rect,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
+        if windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() == hwnd {
+            let _ = DrawFocusRect(dc, &rect);
+        }
+        SelectObject(dc, previous);
+    }
+}
+
 fn paint_button(hwnd: HWND, dc: HDC) {
+    let kind = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32 & 0xf;
+    if kind == BS_AUTOCHECKBOX as u32 || kind == BS_CHECKBOX as u32 {
+        paint_checkbox(hwnd, dc);
+        return;
+    }
     unsafe {
         let mut rect = RECT::default();
         let _ = GetClientRect(hwnd, &mut rect);

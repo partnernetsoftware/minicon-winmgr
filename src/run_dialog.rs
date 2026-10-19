@@ -12,7 +12,10 @@ use windows::Win32::{
     System::Com::{
         COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
     },
-    UI::Controls::{DRAWITEMSTRUCT, EM_GETSEL, EM_SETLIMITTEXT, EM_SETSEL, ODS_SELECTED},
+    UI::Controls::{
+        BST_CHECKED, BST_UNCHECKED, DRAWITEMSTRUCT, EM_GETSEL, EM_SETLIMITTEXT, EM_SETSEL,
+        ODS_SELECTED,
+    },
 };
 use windows::{
     Win32::{
@@ -32,6 +35,15 @@ const LIST: u16 = 2006;
 const HELP: u16 = 2007;
 const STATUS: u16 = 2008;
 const LABEL: u16 = 2009;
+const ADMIN: u16 = 2010;
+#[derive(Debug)]
+struct LaunchJob {
+    id: u64,
+    input: String,
+    mode: crate::shell_launch::LaunchMode,
+    owner: isize,
+    selection: (u32, u32),
+}
 pub(crate) const HOTKEY_ID: usize = 3;
 thread_local! { static INSTANCE: Cell<HINSTANCE> = const { Cell::new(HINSTANCE(core::ptr::null_mut())) }; }
 enum Job {
@@ -42,7 +54,7 @@ enum Job {
 enum Reply {
     Query(u64, Vec<Candidate>),
     History(Vec<String>, Option<String>, bool, bool),
-    Launch(u64, Result<(), crate::shell_launch::LaunchError>, String),
+    Launch(LaunchJob, Result<(), crate::shell_launch::LaunchError>),
 }
 struct State {
     window: HWND,
@@ -52,7 +64,7 @@ struct State {
     jobs: SyncSender<Job>,
     queries: SyncSender<(u64, String, Vec<String>)>,
     entries: Vec<String>,
-    launches: SyncSender<(u64, String)>,
+    launches: SyncSender<LaunchJob>,
     replies: Receiver<Reply>,
     pending: Option<Job>,
     actions: std::collections::VecDeque<Job>,
@@ -68,6 +80,7 @@ struct State {
     visible: bool,
     composing: bool,
     busy: bool,
+    authorizing: bool,
     generation: u64,
     launch_id: u64,
     dpi: u32,
@@ -138,6 +151,7 @@ fn enabled() {
             control(RUN),
             !busy && (choosing || !text(control(EDIT)).trim().is_empty()),
         );
+        let _ = EnableWindow(control(ADMIN), !busy);
         let _ = EnableWindow(control(CLEAR), history);
         let _ = ShowWindow(control(CLEAR), if history { SW_SHOW } else { SW_HIDE });
     }
@@ -172,7 +186,7 @@ fn prepare(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let (jobs_tx, jobs_rx) = mpsc::sync_channel(1);
-    let (launch_tx, launch_rx) = mpsc::sync_channel::<(u64, String)>(1);
+    let (launch_tx, launch_rx) = mpsc::sync_channel::<LaunchJob>(1);
     let (reply_tx, reply_rx) = mpsc::channel();
     let (query_tx, query_rx) = mpsc::sync_channel::<(u64, String, Vec<String>)>(1);
     let query_reply = reply_tx.clone();
@@ -232,17 +246,22 @@ fn prepare(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
         .spawn(move || {
             let com =
                 unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
-            while let Ok((id, input)) = launch_rx.recv() {
+            while let Ok(job) = launch_rx.recv() {
                 let result = if com.is_err() {
                     Err(crate::shell_launch::LaunchError {
                         code: None,
                         message: crate::i18n::text("启动服务初始化失败，请重启后重试。").into(),
                     })
                 } else {
-                    crate::shell_launch::parse_command(&input)
-                        .and_then(|r| crate::shell_launch::execute(&r))
+                    crate::shell_launch::parse_command(&job.input).and_then(|r| {
+                        crate::shell_launch::execute_with_mode(
+                            &r,
+                            job.mode,
+                            Some(HWND(job.owner as *mut _)),
+                        )
+                    })
                 };
-                let _ = reply_tx.send(Reply::Launch(id, result, input));
+                let _ = reply_tx.send(Reply::Launch(job, result));
             }
             if com.is_ok() {
                 unsafe {
@@ -314,6 +333,7 @@ fn prepare(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                 visible: false,
                 composing: false,
                 busy: false,
+                authorizing: false,
                 generation: 0,
                 launch_id: 0,
                 dpi: 96,
@@ -362,6 +382,12 @@ fn prepare(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                 ES_MULTILINE as u32 | ES_READONLY as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL.0,
             ),
             (
+                ADMIN,
+                "BUTTON",
+                crate::i18n::text("使用管理员权限运行"),
+                BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+            ),
+            (
                 CLEAR,
                 "BUTTON",
                 crate::i18n::text("清空历史"),
@@ -394,7 +420,10 @@ fn prepare(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
                 Some(instance),
                 None,
             )?;
-            let previous = if matches!(id, EDIT | RUN | CANCEL | CLEAR | DROP | LIST | STATUS) {
+            let previous = if matches!(
+                id,
+                EDIT | RUN | CANCEL | CLEAR | DROP | LIST | STATUS | ADMIN
+            ) {
                 SetWindowLongPtrW(child, GWLP_WNDPROC, child_proc as *const () as isize)
             } else {
                 0
@@ -446,15 +475,16 @@ struct Geometry {
     status_height: i32,
     button_y: i32,
     input_y: i32,
+    admin_y: i32,
     list_y: i32,
 }
 fn geometry(work: RECT, dpi: u32, count: usize, status_height: i32, caption: i32) -> Geometry {
     let scale = |n: i32| n * dpi.max(1) as i32 / 96;
     let width = scale(480).min((work.right - work.left).max(1));
     let available = (work.bottom - work.top - caption).max(1);
-    let compact = available < scale(158);
-    let input_y = if compact { scale(4) } else { scale(42) };
-    let fixed = input_y + scale(if compact { 76 } else { 94 });
+    let compact = available < scale(182);
+    let input_y = if compact { scale(20) } else { scale(42) };
+    let fixed = input_y + scale(if compact { 60 } else { 118 });
     // Reserve input and buttons first; candidates consume only the remaining space.
     let status_height = if status_height > 0 {
         status_height.max(scale(22)).min((available - fixed).max(0))
@@ -469,9 +499,10 @@ fn geometry(work: RECT, dpi: u32, count: usize, status_height: i32, caption: i32
     } else {
         0
     };
-    let list_y = input_y + scale(if compact { 34 } else { 36 });
-    let button_y = list_y + scale(if compact { 8 } else { 12 }) + list_height + status_height;
-    let height = (button_y + scale(if compact { 34 } else { 46 }) + caption)
+    let list_y = input_y + scale(if compact { 30 } else { 36 });
+    let button_y = list_y + scale(if compact { 0 } else { 36 }) + list_height + status_height;
+    let admin_y = if compact { 0 } else { button_y - scale(24) };
+    let height = (button_y + scale(if compact { 30 } else { 46 }) + caption)
         .min((work.bottom - work.top).max(1));
     Geometry {
         x: work.left + (work.right - work.left - width) / 2,
@@ -484,6 +515,7 @@ fn geometry(work: RECT, dpi: u32, count: usize, status_height: i32, caption: i32
         status_height,
         button_y,
         input_y,
+        admin_y,
         list_y,
     }
 }
@@ -640,6 +672,12 @@ fn layout() {
                 DROP => (cw - m - drop_width, g.input_y, drop_width, scale(30)),
                 LIST => (m, g.list_y, w, list_height),
                 STATUS => (m, g.list_y + scale(4) + list_height, w, g.status_height),
+                ADMIN => (
+                    m,
+                    g.admin_y,
+                    w,
+                    scale(if g.input_y == scale(20) { 18 } else { 24 }),
+                ),
                 CLEAR => (m, g.button_y, button_width, scale(30)),
                 RUN => (
                     cw - m - 2 * button_width - scale(8),
@@ -707,6 +745,18 @@ fn expand(value: bool) {
     }
     enabled();
 }
+fn begin_session() -> bool {
+    if with(|s| s.visible).unwrap_or(false) {
+        return false;
+    }
+    send(control(ADMIN), BM_SETCHECK, BST_UNCHECKED.0 as usize, 0);
+    with(|s| {
+        s.visible = true;
+        s.generation = s.generation.wrapping_add(1);
+    });
+    true
+}
+
 pub(crate) fn show() {
     if window().is_invalid()
         && let Err(error) = prepare(INSTANCE.get())
@@ -729,16 +779,17 @@ pub(crate) fn show() {
         }
         return;
     }
-    let already = with(|s| s.visible).unwrap_or(false);
-    if !already {
+    if begin_session() {
         position();
-        with(|s| {
-            s.visible = true;
-            s.generation = s.generation.wrapping_add(1);
-        });
         if !with(|s| s.busy).unwrap_or(false) {
             let notice = with(|s| s.notice.clone()).flatten();
             status(notice.as_deref().unwrap_or(""));
+        }
+    }
+    crate::i18n::localize_window(window());
+    if let Some(controls) = with(|s| s.controls.iter().map(|c| c.1).collect::<Vec<_>>()) {
+        for child in controls {
+            crate::i18n::localize_window(child);
         }
     }
     unsafe {
@@ -889,16 +940,41 @@ fn run() {
     if input.trim().is_empty() {
         return;
     }
+    let mut selection = (0u32, 0u32);
+    send(
+        control(EDIT),
+        EM_GETSEL,
+        &mut selection.0 as *mut u32 as usize,
+        &mut selection.1 as *mut u32 as isize,
+    );
+    let mode = if send(control(ADMIN), BM_GETCHECK, 0, 0).0 == BST_CHECKED.0 as isize {
+        crate::shell_launch::LaunchMode::Administrator
+    } else {
+        crate::shell_launch::LaunchMode::Standard
+    };
     let queued = with(|s| {
         if s.busy || s.actions.len() >= 32 {
             return false;
         }
         let id = s.generation;
-        if s.launches.try_send((id, input)).is_err() {
+        if s.launches
+            .try_send(LaunchJob {
+                id,
+                input,
+                mode,
+                owner: s.window.0 as isize,
+                selection,
+            })
+            .is_err()
+        {
             return false;
         }
         s.busy = true;
         s.launch_id = id;
+        s.authorizing = mode == crate::shell_launch::LaunchMode::Administrator;
+        s.query = s.query.wrapping_add(1);
+        s.pending = None;
+        s.waiting = None;
         true
     })
     .unwrap_or(false);
@@ -988,9 +1064,16 @@ fn poll() {
                 }
                 enabled();
             }
-            Reply::Launch(id, result, input) => {
+            Reply::Launch(job, result) => {
+                let LaunchJob {
+                    id,
+                    input,
+                    selection,
+                    ..
+                } = job;
                 let current = with(|s| {
                     s.busy = false;
+                    s.authorizing = false;
                     result_is_current(s.visible, s.generation, id)
                 })
                 .unwrap_or(false);
@@ -1012,12 +1095,18 @@ fn poll() {
                         Err(error) => {
                             status(&error.message);
                             unsafe {
-                                let _ = SetFocus(Some(control(EDIT)));
+                                if IsWindowVisible(window()).as_bool() {
+                                    let _ = SetFocus(Some(control(EDIT)));
+                                }
                             }
+                            send(
+                                control(EDIT),
+                                EM_SETSEL,
+                                selection.0 as usize,
+                                selection.1 as isize,
+                            );
                         }
                     }
-                } else if with(|s| s.visible).unwrap_or(false) {
-                    status("");
                 }
                 enabled();
             }
@@ -1070,6 +1159,9 @@ fn poll() {
 }
 fn focus_next(back: bool) {
     let mut ids = vec![EDIT];
+    if unsafe { IsWindowEnabled(control(ADMIN)).as_bool() } {
+        ids.push(ADMIN);
+    }
     if with(|s| s.history || s.clear_retry).unwrap_or(false) {
         ids.push(CLEAR);
     }
@@ -1165,6 +1257,9 @@ fn key(hwnd: HWND, msg: u32, w: WPARAM) -> bool {
             CANCEL => hide(),
             CLEAR => clear(),
             DROP => dropdown(),
+            ADMIN => {
+                send(control(ADMIN), BM_CLICK, 0, 0);
+            }
             LIST => {
                 adopt();
             }
@@ -1287,7 +1382,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 WM_CLOSE => hide(),
                 WM_TIMER => poll(),
                 WM_ACTIVATE if w.0 & 0xffff == WA_INACTIVE as usize => {
-                    if with(|s| s.visible).unwrap_or(false)
+                    if with(|s| s.visible && !(s.busy && s.authorizing)).unwrap_or(false)
                         && !internal_activation(HWND(l.0 as *mut _))
                     {
                         hide();
@@ -1331,6 +1426,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                             CANCEL => hide(),
                             CLEAR => clear(),
                             DROP => dropdown(),
+                            ADMIN => {
+                                status("");
+                            }
                             _ => {}
                         }
                     } else if id == LIST && code == LBN_SELCHANGE {
@@ -1524,6 +1622,109 @@ mod tests {
         let before = text(control(EDIT));
         assert!(!key(control(EDIT), WM_KEYDOWN, WPARAM(VK_DOWN.0 as usize)));
         assert_eq!(text(control(EDIT)), before);
+    }
+
+    #[test]
+    fn native_admin_selection_snapshots_and_cancelled_or_stale_replies_preserve_drafts() {
+        let instance = HINSTANCE(unsafe {
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                .unwrap()
+                .0
+        });
+        prepare(instance).unwrap();
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                shutdown();
+            }
+        }
+        let _cleanup = Cleanup;
+        // Replace only this hidden fixture's channels: no external launch or UAC.
+        let (launches, received) = mpsc::sync_channel(1);
+        let (replies, incoming) = mpsc::channel();
+        with(|s| {
+            s.launches = launches;
+            s.replies = incoming;
+        });
+        assert!(begin_session());
+        assert_eq!(send(control(ADMIN), BM_GETCHECK, 0, 0).0, 0);
+        send(control(ADMIN), BM_SETCHECK, BST_CHECKED.0 as usize, 0);
+        assert_eq!(
+            send(control(ADMIN), BM_GETCHECK, 0, 0).0,
+            BST_CHECKED.0 as isize
+        );
+        set_text(control(EDIT), "fixture --name 张三");
+        send(control(EDIT), EM_SETSEL, 2, 7);
+        assert!(
+            !begin_session(),
+            "repeated summon must retain the current selection"
+        );
+        assert_eq!(send(control(ADMIN), BM_GETCHECK, 0, 0).0, 1);
+        run();
+        run();
+        let job = received.try_recv().unwrap();
+        assert!(received.try_recv().is_err(), "duplicate submission");
+        assert_eq!(job.mode, crate::shell_launch::LaunchMode::Administrator);
+        assert_eq!(job.input, "fixture --name 张三");
+        assert_eq!(job.selection, (2, 7));
+        assert!(!unsafe { IsWindowEnabled(control(ADMIN)).as_bool() });
+        send(window(), WM_ACTIVATE, WA_INACTIVE as usize, 0);
+        assert!(
+            with(|s| s.visible).unwrap(),
+            "UAC deactivation must not discard the pending result"
+        );
+        replies
+            .send(Reply::Launch(
+                job,
+                Err(crate::shell_launch::error_from_code(1223)),
+            ))
+            .unwrap();
+        poll();
+        assert_eq!(text(control(EDIT)), "fixture --name 张三");
+        assert!(with(|s| !s.busy && !s.authorizing && s.actions.is_empty()).unwrap());
+        let (mut start, mut end) = (0u32, 0u32);
+        send(
+            control(EDIT),
+            EM_GETSEL,
+            &mut start as *mut u32 as usize,
+            &mut end as *mut u32 as isize,
+        );
+        assert_eq!((start, end), (2, 7));
+        assert!(!text(control(STATUS)).is_empty());
+        hide();
+        assert!(begin_session());
+        assert_eq!(send(control(ADMIN), BM_GETCHECK, 0, 0).0, 0);
+        run();
+        let job = received.try_recv().unwrap();
+        assert_eq!(job.mode, crate::shell_launch::LaunchMode::Standard);
+        hide();
+        assert!(begin_session());
+        set_text(control(EDIT), "new draft");
+        status("new status");
+        replies
+            .send(Reply::Launch(
+                job,
+                Err(crate::shell_launch::error_from_code(5)),
+            ))
+            .unwrap();
+        poll();
+        assert_eq!(text(control(EDIT)), "new draft");
+        assert_eq!(text(control(STATUS)), "new status");
+        assert!(with(|s| s.actions.is_empty() && !s.busy).unwrap());
+        let (records, recorded) = mpsc::sync_channel(1);
+        with(|s| s.jobs = records);
+        set_text(control(EDIT), "accepted old command");
+        run();
+        let job = received.try_recv().unwrap();
+        set_text(control(EDIT), "edited pending command");
+        status("keep this status");
+        replies.send(Reply::Launch(job, Ok(()))).unwrap();
+        poll();
+        assert_eq!(text(control(EDIT)), "edited pending command");
+        assert_eq!(text(control(STATUS)), "keep this status");
+        assert!(
+            matches!(recorded.try_recv(), Ok(Job::Record(value)) if value == "accepted old command")
+        );
     }
 
     #[test]

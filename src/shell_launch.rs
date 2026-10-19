@@ -17,7 +17,7 @@
 //! The mapping itself is a pure function so the rule can be unit-tested
 //! without a display.
 
-use windows::Win32::Foundation::{CO_E_APPNOTFOUND, GetLastError};
+use windows::Win32::Foundation::{CO_E_APPNOTFOUND, GetLastError, HWND};
 use windows::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW, ShellExecuteW,
 };
@@ -276,7 +276,22 @@ pub fn error_from_code(code: i32) -> LaunchError {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LaunchMode {
+    #[default]
+    Standard,
+    Administrator,
+}
+
 pub fn execute(request: &LaunchRequest) -> Result<(), LaunchError> {
+    execute_with_mode(request, LaunchMode::Standard, None)
+}
+
+pub fn execute_with_mode(
+    request: &LaunchRequest,
+    mode: LaunchMode,
+    owner: Option<HWND>,
+) -> Result<(), LaunchError> {
     if request.file.trim().is_empty()
         || request.file.contains('\0')
         || request.params.contains('\0')
@@ -303,12 +318,17 @@ pub fn execute(request: &LaunchRequest) -> Result<(), LaunchError> {
         },
     );
     let directory = request.directory.as_deref().map(wide);
-    let verb = wide("open");
+    let verb = wide(if mode == LaunchMode::Administrator {
+        "runas"
+    } else {
+        "open"
+    });
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         // Return ordinary errors to our inline UI. Wait for DDE/shell work on
         // the COM-initialized worker rather than relying on later message pumping.
         fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+        hwnd: owner.unwrap_or_default(),
         lpVerb: PCWSTR(verb.as_ptr()),
         lpFile: PCWSTR(file.as_ptr()),
         lpParameters: if params.len() == 1 {
@@ -342,6 +362,9 @@ pub fn execute(request: &LaunchRequest) -> Result<(), LaunchError> {
                 last_error
             };
             let mut error = error_from_code(code);
+            if mode == LaunchMode::Administrator && code == 1223 {
+                error.message = crate::i18n::text("已取消授权。可以修改输入后重试。").into();
+            }
             // An existing document can still fail with FILE_NOT_FOUND when its
             // association points at an uninstalled editor. Do not blame its path.
             if (matches!(code, 2 | 3) || code == CO_E_APPNOTFOUND.0)

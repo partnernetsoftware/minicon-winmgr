@@ -37,3 +37,5 @@ scripts/__pycache__/
 !scripts/run_probe_input.py
 !scripts/unit_matrix.py
 !scripts/isolated_tray_probe.py
+!scripts/run_admin_probe.py
+!scripts/run_uac_probe.py

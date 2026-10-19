@@ -356,6 +356,8 @@ def main(*, include_run_regression=True, build=True):
             u.SendMessageW(panel(), 16, 0, 0)
             import run_probe
             details=run_probe.main(environment)
+            import run_admin_probe
+            run_admin_probe.main(environment)
             report['run_regression'] = [{'name': entry.get('test'), 'passed': entry.get('passed', False)} for entry in details]
             check('established_run_dialog_regression',bool(details) and all(entry.get('passed',False) for entry in details))
         # Actual Run execution expands argument variables, retaining quoted spacing.

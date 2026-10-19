@@ -696,7 +696,14 @@ pub(crate) fn show() {
         crate::win_util::force_foreground(hwnd);
     }
     let last = with(|p| p.last_focus).unwrap_or_default();
-    let focus = if usable(last) { last } else { first_focus() };
+    // A previously focused radio can now be unchecked. Restoring focus to it
+    // lets the native radio group select it again and revert a live preference.
+    let focus =
+        if usable(last) && unsafe { GetWindowLongW(last, GWL_STYLE) } as u32 & WS_TABSTOP.0 != 0 {
+            last
+        } else {
+            first_focus()
+        };
     unsafe {
         let _ = SetFocus(Some(focus));
     }

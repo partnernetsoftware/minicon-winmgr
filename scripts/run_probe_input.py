@@ -43,11 +43,12 @@ def get_text(hwnd):
 def state():
     h=popup(); pid=w.DWORD();tid=u.GetWindowThreadProcessId(h,c.byref(pid));g=GTI();g.size=c.sizeof(g);u.GetGUIThreadInfo(tid,c.byref(g));r=w.RECT();u.GetWindowRect(h,c.byref(r))
     out={'hwnd':h,'pid':pid.value,'visible':bool(u.IsWindowVisible(h)),'foreground':u.GetForegroundWindow(),'focus':g.focus,'rect':[r.left,r.top,r.right,r.bottom],'controls':{}}
-    for ident in range(2001,2010):
+    for ident in range(2001,2011):
         child=u.GetDlgItem(h,ident)
         if not child:continue
         rect=w.RECT();u.GetWindowRect(child,c.byref(rect))
         item={'hwnd':child,'text':get_text(child),'visible':bool(u.IsWindowVisible(child)),'enabled':bool(u.IsWindowEnabled(child)),'rect':[rect.left,rect.top,rect.right,rect.bottom]}
+        if ident==2010:item['checked']=bool(u.SendMessageW(child,0xf0,0,0))
         if ident==2006:
             n=u.SendMessageW(child,0x018b,0,0);item['selection']=u.SendMessageW(child,0x0188,0,0);item['items']=[]
             for i in range(max(0,min(n,20))):

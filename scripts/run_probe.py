@@ -57,10 +57,10 @@ def main(environment=None):
         gui.capture('run-history.png')
         gui.key('DOWN');wait(.1);s=state();check('selection_previews_input_and_keeps_list',ctrl(s,2001)['text']==command and ctrl(s,2006)['visible'])
         gui.key('ENTER');wait(.2);s=state();check('adoption_does_not_execute',s['visible'] and not ctrl(s,2006)['visible'])
-        # Tab goes to clear history, then run, then cancel, then edit.
+        # Tab includes the explicit privilege choice before clear history and actions.
         focus=[]
-        for _ in range(4):gui.key('TAB');wait(.05);focus.append(state()['focus'])
-        s=state();check('tab_cycle',focus==[ctrl(s,2004)['hwnd'],ctrl(s,2002)['hwnd'],ctrl(s,2003)['hwnd'],ctrl(s,2001)['hwnd']],focus)
+        for _ in range(5):gui.key('TAB');wait(.05);focus.append(state()['focus'])
+        s=state();check('tab_cycle',focus==[ctrl(s,2010)['hwnd'],ctrl(s,2004)['hwnd'],ctrl(s,2002)['hwnd'],ctrl(s,2003)['hwnd'],ctrl(s,2001)['hwnd']],focus)
         pathprefix=str(root/'fixtures')+'\\';replace(pathprefix)
         deadline=time.monotonic()+8
         while time.monotonic()<deadline:

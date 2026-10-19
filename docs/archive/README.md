@@ -37,3 +37,5 @@
 - [0.1.10 阶段验收](validation_0_1_10_development.md)：开发期逐轮结果；正式验收见[当前记录](../validation_0_1_10.md)。
 
 - [0.1.12 前 Shell 试替换记录](shell_replacement_before_0_1_12.md)：保留旧备份、HKLM 尝试和立即恢复文案的历史；现行契约见[Shell 规格](../prd_3_1.md)。
+
+- [Run 交互模型讨论稿](design_0_1_14_run_interaction.md)：原 0.1.14 候选分析，未实施、未确定新按键规则；当前范围见[版本计划](../plan_0_1_14.md)。
