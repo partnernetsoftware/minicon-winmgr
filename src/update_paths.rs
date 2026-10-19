@@ -32,7 +32,12 @@ pub(crate) fn destination(target: &Path, release: &str) -> Result<PathBuf, Strin
 }
 
 fn comparable(path: &str) -> String {
-    path.strip_prefix(r"\\?\").unwrap_or(path).to_lowercase()
+    let path = path.to_lowercase();
+    if let Some(share) = path.strip_prefix(r"\\?\unc\") {
+        format!(r"\\{share}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(&path).to_string()
+    }
 }
 
 fn replacement(raw: &RawShell, old: &Path, new: &Path) -> Option<RawShell> {
@@ -134,6 +139,14 @@ mod tests {
         let changed = replacement(&original, old, &new).unwrap();
         assert_eq!(changed.kind, 2);
         assert_eq!(changed.text().unwrap(), format!("\"{}\"", new.display()));
+        assert!(
+            replacement(
+                &RawShell::string(r"\\server\share\minicon-winmgr-v0.1.12-x86_64-windows.exe"),
+                Path::new(r"\\?\UNC\server\share\minicon-winmgr-v0.1.12-x86_64-windows.exe"),
+                Path::new(r"\\?\UNC\server\share\minicon-winmgr-v0.1.15-x86_64-windows.exe"),
+            )
+            .is_some()
+        );
         for other in [
             r"C:\Other\minicon-winmgr-v0.1.12-x86_64-windows.exe",
             "explorer.exe",
