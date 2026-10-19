@@ -257,7 +257,8 @@ const SETTINGS_W: i32 = 26;
 /// Horizontal space reserved on the right edge for the clock. Task buttons may
 /// never intrude into it. The notification-icon strip is reserved on top of
 /// this (see `layout`), so it never overlaps the clock.
-const RIGHT_W: i32 = CLOCK_W + PAD;
+const SHOW_DESKTOP_W: i32 = 28;
+const RIGHT_W: i32 = CLOCK_W + PAD + SHOW_DESKTOP_W;
 /// Button-width tiers ("density ladder"). The bar starts at [`Density::Full`]
 /// (comfortable buttons carrying a title) and drops to [`Density::Compact`]
 /// (narrower, tighter padding) and finally to [`Density::IconOnly`] (the title
@@ -689,6 +690,7 @@ struct BarEntry {
     /// Notification-strip icon under the cursor, if any. Hover shows the icon's
     /// tooltip but is deliberately **never** forwarded to its owner.
     tray_hover: Option<usize>,
+    desktop_hover: bool,
     tray_pressed: Option<crate::tray::TrayItem>,
     tray_right_pressed: Option<crate::tray::TrayItem>,
     selected: Option<usize>,
@@ -725,7 +727,7 @@ fn tray_layout(client: RECT) -> crate::tray_bar::Layout {
     if vertical() {
         return crate::tray_bar::Layout::new(client.bottom - BAR_H * 2, client.right - PAD, BAR_H);
     }
-    let right = client.right - PAD - CLOCK_W - PAD;
+    let right = client.right - PAD - SHOW_DESKTOP_W - CLOCK_W - PAD;
     crate::tray_bar::Layout::new(BTN_TOP, right, BAR_H - 2 * BTN_TOP)
 }
 
@@ -835,7 +837,7 @@ fn clock_rect(client: RECT) -> RECT {
         return RECT {
             left: PAD,
             top: (client.bottom - BAR_H).max(0),
-            right: client.right - PAD,
+            right: (client.right - PAD - SHOW_DESKTOP_W).max(PAD),
             bottom: client.bottom,
         };
     }
@@ -847,6 +849,37 @@ fn clock_rect(client: RECT) -> RECT {
         bottom: BAR_H,
     }
 }
+/// Shared geometry for painting and hit testing at the outer corner.
+fn show_desktop_rect(client: RECT) -> RECT {
+    RECT {
+        left: (client.right - PAD - SHOW_DESKTOP_W).max(0),
+        top: if vertical() {
+            (client.bottom - BAR_H).max(0)
+        } else {
+            0
+        },
+        right: (client.right - PAD).max(0),
+        bottom: if vertical() { client.bottom } else { BAR_H },
+    }
+}
+
+/// Queue requests without waiting for another application's UI thread.
+fn show_desktop() {
+    for window in crate::window_snapshot::desktop_windows() {
+        unsafe {
+            if !IsIconic(window.hwnd).as_bool()
+                && !windows::Win32::UI::WindowsAndMessaging::ShowWindowAsync(
+                    window.hwnd,
+                    SW_MINIMIZE,
+                )
+                .as_bool()
+            {
+                tracing::debug!("show desktop: minimize request was refused");
+            }
+        }
+    }
+}
+
 fn show_notifications(bar: HWND, client: RECT, hidden_only: bool) {
     let mut anchor = if hidden_only {
         notification_arrow(client).unwrap_or_else(|| clock_rect(client))
@@ -1993,6 +2026,7 @@ unsafe extern "system" fn wndproc_inner(
             // Hover over a notification icon only ever shows *our* tooltip: the
             // event is never forwarded (0.1.3 plan §2.2 rule 3).
             let tray_hover = tray_index_at(client, x, y);
+            let desktop_hover = crate::win_util::rect_contains(show_desktop_rect(client), x, y);
             let (changed, hover, density, tray_changed) = {
                 let mut bars = lock_or_recover(bars());
                 match bars.iter_mut().find(|b| b.hwnd == key) {
@@ -2002,7 +2036,10 @@ unsafe extern "system" fn wndproc_inner(
                             .iter()
                             .position(|r| crate::win_util::rect_contains(*r, x, y));
                         let pin_hover = crate::quick_launch::hit(&bar.pin_rects, x, y);
-                        let changed = hover != bar.hover || pin_hover != bar.pin_hover;
+                        let changed = hover != bar.hover
+                            || pin_hover != bar.pin_hover
+                            || desktop_hover != bar.desktop_hover;
+                        bar.desktop_hover = desktop_hover;
                         bar.hover = hover;
                         bar.pin_hover = pin_hover;
                         let tray_changed = tray_hover != bar.tray_hover;
@@ -2023,7 +2060,8 @@ unsafe extern "system" fn wndproc_inner(
                 let _ = unsafe { KillTimer(Some(hwnd), HOVER_TIMER_ID) };
                 crate::hover_preview::hide();
                 crate::bar_tip::hide();
-                let want = tray_hover.is_some()
+                let want = desktop_hover
+                    || tray_hover.is_some()
                     || (hover.is_some()
                         && (vertical()
                             || density.is_icon_only()
@@ -2044,6 +2082,20 @@ unsafe extern "system" fn wndproc_inner(
                 .iter()
                 .find(|b| b.hwnd == key)
                 .and_then(|b| b.tray_hover);
+            if lock_or_recover(bars())
+                .iter()
+                .any(|b| b.hwnd == key && b.desktop_hover)
+            {
+                let mut anchor = show_desktop_rect(bar_client(key));
+                let mut origin = RECT::default();
+                let _ = unsafe { GetWindowRect(hwnd, &mut origin) };
+                anchor.left += origin.left;
+                anchor.right += origin.left;
+                anchor.top += origin.top;
+                anchor.bottom += origin.top;
+                crate::bar_tip::show(crate::i18n::text("显示桌面"), anchor);
+                return LRESULT(0);
+            }
             // A notification icon's own tooltip wins: its cell sits left of the
             // clock, so it can never overlap a task button.
             if let Some((text, anchor)) = tray_hover.and_then(|i| tray_tooltip(key, i)) {
@@ -2102,7 +2154,8 @@ unsafe extern "system" fn wndproc_inner(
                         let task = b.hover.take().is_some();
                         let pin = b.pin_hover.take().is_some();
                         b.tray_hover = None;
-                        task || pin
+                        let desktop = std::mem::take(&mut b.desktop_hover);
+                        task || pin || desktop
                     }
                     None => false,
                 }
@@ -2126,6 +2179,10 @@ unsafe extern "system" fn wndproc_inner(
             let y = get_y(lparam);
             let client = bar_client(key);
             let contains = |r: RECT| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+            if contains(show_desktop_rect(client)) {
+                show_desktop();
+                return LRESULT(0);
+            }
             if notification_arrow(client).is_some_and(contains) {
                 show_notifications(hwnd, client, true);
                 return LRESULT(0);
@@ -2884,20 +2941,64 @@ unsafe fn paint(hwnd: HWND) {
             now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute
         );
         if vertical() {
+            // Two lines leave room for the desktop button even at minimum side width.
+            let clock = clock
+                .rsplit_once(' ')
+                .map(|(date, time)| format!("{date}\n{time}"))
+                .unwrap_or(clock);
             let mut text: Vec<u16> = clock.encode_utf16().collect();
             let mut r = clock_rect(client);
-            DrawTextW(
-                hdc,
-                &mut text,
-                &mut r,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-            );
+            r.top += 3;
+            DrawTextW(hdc, &mut text, &mut r, DT_CENTER | DT_NOPREFIX);
         } else {
             draw_right(
                 hdc,
                 &clock,
-                client.right - PAD - CLOCK_W,
-                client.right - PAD,
+                clock_span(client.right).0,
+                clock_span(client.right).1,
+            );
+        }
+
+        let desktop = show_desktop_rect(client);
+        let hovered = lock_or_recover(bars())
+            .iter()
+            .any(|b| b.hwnd == hwnd.0 as isize && b.desktop_hover);
+        if hovered {
+            FillRect(hdc, &desktop, hbrush(hdc, br.hover));
+        }
+        let x = (desktop.left + desktop.right) / 2;
+        let y = (desktop.top + desktop.bottom) / 2;
+        let glyph = hbrush(hdc, theme().muted as isize);
+        {
+            FrameRect(
+                hdc,
+                &RECT {
+                    left: x - 7,
+                    top: y - 6,
+                    right: x + 7,
+                    bottom: y + 3,
+                },
+                glyph,
+            );
+            FillRect(
+                hdc,
+                &RECT {
+                    left: x - 1,
+                    top: y + 3,
+                    right: x + 1,
+                    bottom: y + 6,
+                },
+                glyph,
+            );
+            FillRect(
+                hdc,
+                &RECT {
+                    left: x - 5,
+                    top: y + 6,
+                    right: x + 5,
+                    bottom: y + 7,
+                },
+                glyph,
             );
         }
 
@@ -2910,7 +3011,10 @@ unsafe fn paint(hwnd: HWND) {
 /// pixels wide. Kept next to the paint code (`WM_PAINT` uses these same two
 /// edges) so the double-click hit test can never drift from what is drawn.
 fn clock_span(client_w: i32) -> (i32, i32) {
-    (client_w - PAD - CLOCK_W, client_w - PAD)
+    (
+        client_w - PAD - SHOW_DESKTOP_W - CLOCK_W,
+        client_w - PAD - SHOW_DESKTOP_W,
+    )
 }
 
 /// Whether client-space `x` falls inside the clock band.
@@ -3358,6 +3462,155 @@ mod tests {
         step_index,
     };
 
+    #[test]
+    #[ignore = "private-desktop show-desktop fixture; use isolated_tray_probe.py --test show-desktop"]
+    fn native_show_desktop_minimizes_apps_without_hiding_shell() {
+        use windows::Win32::Foundation::*;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::core::PCWSTR;
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        // The fixture is never run on the user's input desktop.
+        let mut name = [0u16; 128];
+        let mut needed = 0;
+        unsafe {
+            use windows::Win32::System::Threading::GetCurrentThreadId;
+            #[link(name = "user32")]
+            unsafe extern "system" {
+                fn GetThreadDesktop(thread: u32) -> isize;
+                fn GetUserObjectInformationW(
+                    handle: isize,
+                    index: i32,
+                    info: *mut core::ffi::c_void,
+                    length: u32,
+                    needed: *mut u32,
+                ) -> windows::core::BOOL;
+            }
+            let desktop = GetThreadDesktop(GetCurrentThreadId());
+            assert_ne!(desktop, 0);
+            assert!(
+                GetUserObjectInformationW(
+                    desktop,
+                    2,
+                    name.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&name) as u32,
+                    &mut needed
+                )
+                .as_bool()
+            );
+        }
+        assert!(String::from_utf16_lossy(&name).starts_with("minicon-fixture-"));
+        unsafe {
+            let instance: HINSTANCE = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                .unwrap()
+                .into();
+            unsafe extern "system" fn fixture_proc(
+                hwnd: HWND,
+                msg: u32,
+                wp: WPARAM,
+                lp: LPARAM,
+            ) -> LRESULT {
+                unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+            }
+            let class = crate::win_util::wide("WorkerW");
+            assert_ne!(
+                RegisterClassW(&WNDCLASSW {
+                    lpfnWndProc: Some(fixture_proc),
+                    hInstance: instance,
+                    lpszClassName: PCWSTR(class.as_ptr()),
+                    ..Default::default()
+                }),
+                0
+            );
+            let make = |class: &str, title: &str, tool: bool| {
+                CreateWindowExW(
+                    if tool {
+                        WS_EX_TOOLWINDOW
+                    } else {
+                        WINDOW_EX_STYLE::default()
+                    },
+                    PCWSTR(crate::win_util::wide(class).as_ptr()),
+                    PCWSTR(crate::win_util::wide(title).as_ptr()),
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    50,
+                    50,
+                    500,
+                    200,
+                    None,
+                    None,
+                    Some(instance),
+                    None,
+                )
+                .unwrap()
+            };
+            let app = make("STATIC", "Owned application", false);
+            let second = make("STATIC", "Second application", false);
+            let tool = make("STATIC", "Helper tool", true);
+            let shell = make("WorkerW", "Desktop surface", false);
+            let bar = make("STATIC", "Owned taskbar", true);
+            let handles = [app, second, tool, shell, bar];
+            struct Cleanup(Vec<HWND>);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    for h in &self.0 {
+                        let _ = unsafe { DestroyWindow(*h) };
+                    }
+                }
+            }
+            let _cleanup = Cleanup(handles.to_vec());
+            let pump = || {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            };
+            for edge in [
+                crate::config::Position::Bottom,
+                crate::config::Position::Top,
+                crate::config::Position::Left,
+                crate::config::Position::Right,
+            ] {
+                crate::config::set_position(edge);
+                for mode in [
+                    crate::config::ThemeMode::Light,
+                    crate::config::ThemeMode::Dark,
+                ] {
+                    crate::config::set_theme_mode(mode);
+                    let _ = ShowWindow(app, SW_RESTORE);
+                    let _ = ShowWindow(second, SW_RESTORE);
+                    let client = super::bar_client(bar.0 as isize);
+                    let rect = super::show_desktop_rect(client);
+                    let clock = super::clock_rect(client);
+                    assert!(clock.right <= rect.left);
+                    let point = LPARAM(
+                        (((rect.top + rect.bottom) / 2) << 16 | ((rect.left + rect.right) / 2))
+                            as isize,
+                    );
+                    super::wndproc_inner(bar, WM_LBUTTONDOWN, WPARAM(0), point);
+                    let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while (!IsIconic(app).as_bool() || !IsIconic(second).as_bool())
+                        && std::time::Instant::now() < end
+                    {
+                        pump();
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    assert!(IsIconic(app).as_bool() && IsIconic(second).as_bool());
+                    assert!(
+                        !IsIconic(tool).as_bool()
+                            && !IsIconic(shell).as_bool()
+                            && !IsIconic(bar).as_bool()
+                    );
+                    super::wndproc_inner(bar, WM_LBUTTONDOWN, WPARAM(0), point);
+                    pump();
+                    assert!(
+                        IsIconic(app).as_bool() && IsIconic(second).as_bool(),
+                        "repeated clicks must not restore apps"
+                    );
+                }
+            }
+        }
+    }
+
     /// The settings button must never touch whatever follows it: with the
     /// start-menu slot off it still keeps the standard inter-button gap, and
     /// with the slot on that width is used verbatim.
@@ -3490,8 +3743,8 @@ mod tests {
     fn tray_strip_reduces_visible_buttons() {
         // Narrow bar + 4 tasks: reserving tray space must reduce how many
         // buttons stay visible (the rest go behind the overflow button).
-        let without = layout(200, 560, 4, 0, Density::Full);
-        let with = layout(200, 560, 4, 80, Density::Full);
+        let without = layout(200, 588, 4, 0, Density::Full);
+        let with = layout(200, 588, 4, 80, Density::Full);
         assert!(with.overflow.is_some());
         assert!(
             with.rects.len() < without.rects.len(),
@@ -3503,7 +3756,7 @@ mod tests {
     fn icon_only_tier_shows_squares_when_everything_fits() {
         // A budget in [40, 80) lands in icon-only: the title is dropped but all
         // buttons still fit, drawn as 40–48px squares.
-        let bl = layout(200, 560, 4, 0, Density::Full);
+        let bl = layout(200, 588, 4, 0, Density::Full);
         assert_eq!(bl.density, Density::IconOnly);
         assert!(bl.overflow.is_none(), "all four should fit as squares");
         assert_eq!(bl.rects.len(), 4);
@@ -3622,8 +3875,11 @@ mod tests {
     fn clock_band_is_flush_to_the_right_pad() {
         let client_w = 1680;
         let (left, right) = super::clock_span(client_w);
-        assert_eq!(right, client_w - super::PAD);
-        assert_eq!(left, client_w - super::PAD - super::CLOCK_W);
+        assert_eq!(right, client_w - super::PAD - super::SHOW_DESKTOP_W);
+        assert_eq!(
+            left,
+            client_w - super::PAD - super::SHOW_DESKTOP_W - super::CLOCK_W
+        );
         // Inside: the first and last pixels the clock is drawn over.
         assert!(super::clock_hit(client_w, left));
         assert!(super::clock_hit(client_w, right - 1));
@@ -3634,10 +3890,10 @@ mod tests {
 
     #[test]
     fn clock_band_does_not_swallow_the_notification_strip() {
-        // The tray strip ends at `client.right - PAD - CLOCK_W - PAD`; its last
+        // The tray strip ends at `client.right - PAD - SHOW_DESKTOP_W - CLOCK_W - PAD`; its last
         // pixel must stay outside the clock band so the two never overlap.
         let client_w = 1600;
-        let tray_last = client_w - super::PAD - super::CLOCK_W - super::PAD;
+        let tray_last = client_w - super::PAD - super::SHOW_DESKTOP_W - super::CLOCK_W - super::PAD;
         assert!(!super::clock_hit(client_w, tray_last));
     }
 
@@ -3655,7 +3911,7 @@ mod tests {
         let layout = super::tray_layout(client);
         assert_eq!(
             layout.right_x,
-            client.right - super::PAD - super::CLOCK_W - super::PAD
+            client.right - super::PAD - super::SHOW_DESKTOP_W - super::CLOCK_W - super::PAD
         );
         assert_eq!(
             layout.strip_width(3),

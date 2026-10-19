@@ -64,6 +64,22 @@ pub fn taskbar_windows() -> Vec<WindowInfo> {
         .collect()
 }
 
+/// Application windows on this desktop, including settings but excluding shell surfaces.
+pub fn desktop_windows() -> Vec<WindowInfo> {
+    snapshot()
+        .into_iter()
+        .filter(|window| {
+            window.visible
+                && !window.title.is_empty()
+                && is_app_window(window.hwnd)
+                && !matches!(
+                    window.class.as_str(),
+                    "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+                )
+        })
+        .collect()
+}
+
 /// Classic "should this appear on the taskbar" test.
 fn is_app_window(hwnd: HWND) -> bool {
     // SAFETY: `hwnd` came from EnumWindows, so it is a live top-level window.

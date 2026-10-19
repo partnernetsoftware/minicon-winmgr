@@ -69,6 +69,7 @@ macro_rules! ui_format {
     ($zh:literal,$en:literal $(,$($args:tt)*)?)=>{if $crate::i18n::language()==$crate::i18n::Language::En {format!($en $(,$($args)*)?)}else{format!($zh $(,$($args)*)?)}};
 }
 const CATALOG: &[(&str, &str)] = &[
+    ("显示桌面", "Show desktop"),
     (
         "无法打开保存窗口，请重试。",
         "Could not open the Save dialog. Try again.",
