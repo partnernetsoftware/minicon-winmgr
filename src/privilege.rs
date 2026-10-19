@@ -20,6 +20,17 @@ use windows::{
 const SE_GROUP_ENABLED: u32 = 0x00000004;
 const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x00000010;
 
+// These are access rights on our copied handle, not enabled token privileges.
+// The process-creation path also needs to initialize the copy's defaults and
+// session; a queryable/assignable ordinary token alone is insufficient.
+const LAUNCH_TOKEN_ACCESS: TOKEN_ACCESS_MASK = TOKEN_ACCESS_MASK(
+    TOKEN_QUERY.0
+        | TOKEN_DUPLICATE.0
+        | TOKEN_ASSIGN_PRIMARY.0
+        | TOKEN_ADJUST_DEFAULT.0
+        | TOKEN_ADJUST_SESSIONID.0,
+);
+
 struct Owned(HANDLE);
 impl Drop for Owned {
     fn drop(&mut self) {
@@ -271,7 +282,7 @@ fn linked_token(original: HANDLE) -> Option<Owned> {
     if let Err(error) = unsafe {
         DuplicateTokenEx(
             linked.0,
-            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+            LAUNCH_TOKEN_ACCESS,
             None,
             SecurityImpersonation,
             TokenPrimary,
@@ -402,7 +413,7 @@ fn peer_primary(pid: u32, original: HANDLE) -> Option<Owned> {
     if unsafe {
         DuplicateTokenEx(
             source.0,
-            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+            LAUNCH_TOKEN_ACCESS,
             None,
             SecurityImpersonation,
             TokenPrimary,
@@ -675,6 +686,33 @@ mod tests {
         }
         let duplicate = peer_primary(std::process::id(), original.0)
             .expect("a known ordinary source must not be accepted as absent");
+        assert!(snapshot(duplicate.0).unwrap().ordinary());
+        assert!(same_identity(original.0, duplicate.0).unwrap());
+    }
+
+    #[test]
+    fn native_launch_copy_allows_initializing_its_default_security() {
+        let original = token(
+            unsafe { GetCurrentProcess() },
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+        )
+        .unwrap();
+        if !snapshot(original.0).unwrap().ordinary() {
+            return;
+        }
+        let duplicate = peer_primary(std::process::id(), original.0).unwrap();
+        let defaults = variable(duplicate.0, TokenDefaultDacl).unwrap();
+        // Reapply the existing DACL to our owned copy only. This is an actual
+        // access check: a queryable ordinary token alone cannot initialize it.
+        unsafe {
+            SetTokenInformation(
+                duplicate.0,
+                TokenDefaultDacl,
+                defaults.as_ptr().cast(),
+                size_of::<TOKEN_DEFAULT_DACL>() as u32,
+            )
+        }
+        .expect("the launch token handle must allow default-security initialization");
         assert!(snapshot(duplicate.0).unwrap().ordinary());
         assert!(same_identity(original.0, duplicate.0).unwrap());
     }
