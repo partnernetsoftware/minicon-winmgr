@@ -75,11 +75,23 @@ def main():
         with desktop_session.isolated(candidate,restore) as isolation:
             phase('1 startup of exact Winmgr as administrator','Yes')
             shell=c.WinDLL('shell32',use_last_error=True)
-            shell.ShellExecuteW.argtypes=[w.HWND,w.LPCWSTR,w.LPCWSTR,w.LPCWSTR,w.LPCWSTR,c.c_int];shell.ShellExecuteW.restype=c.c_void_p
-            result=shell.ShellExecuteW(None,'runas',str(candidate),'--settings',str(folder),1)
-            check('administrator_entry_accepted',bool(result) and int(result)>32)
-            p.wait(lambda:p.message() and p.panel(),timeout=30)
-            p.wait(lambda:p.text(p.panel()).endswith('0.1.14'))
+            class ExecuteInfo(c.Structure):
+                _fields_=[('size',w.DWORD),('mask',w.ULONG),('hwnd',w.HWND),('verb',w.LPCWSTR),('file',w.LPCWSTR),('parameters',w.LPCWSTR),('directory',w.LPCWSTR),('show',c.c_int),('instance',w.HINSTANCE),('id_list',c.c_void_p),('class_name',w.LPCWSTR),('class_key',w.HANDLE),('hotkey',w.DWORD),('icon',w.HANDLE),('process',w.HANDLE)]
+            shell.ShellExecuteExW.argtypes=[c.POINTER(ExecuteInfo)];shell.ShellExecuteExW.restype=w.BOOL
+            info=ExecuteInfo(size=c.sizeof(ExecuteInfo),mask=0x40,verb='runas',file=str(candidate),parameters='--settings',directory=str(folder),show=1)
+            check('administrator_entry_accepted',bool(shell.ShellExecuteExW(c.byref(info))) and bool(info.process))
+            try:
+                from types import SimpleNamespace
+                parent=token_status(SimpleNamespace(handle=info.process))
+                report['startup_parent']=parent
+                check('startup_parent_is_elevated',parent['elevated'] and parent['integrity']>=12288)
+                p.wait(lambda:p.message() and p.panel(),timeout=30)
+                p.wait(lambda:s.Desktop().send(p.message(),0x8000+142,pid=p.pid(p.message()))==1,timeout=30)
+                p.wait(lambda:p.text(p.panel()).endswith('0.1.14'))
+                check('elevated_launcher_exits',p.k.WaitForSingleObject(info.process,30000)==0)
+                code=w.DWORD();p.k.GetExitCodeProcess.argtypes=[w.HANDLE,c.POINTER(w.DWORD)]
+                check('elevated_launcher_exits_successfully',bool(p.k.GetExitCodeProcess(info.process,c.byref(code))) and code.value==0)
+            finally:p.k.CloseHandle(info.process)
             report['startup_child']=ordinary_owned(candidate)
             process=m.Process(p.pid(p.message()))
             try:s.Desktop().close(process)

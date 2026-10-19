@@ -77,7 +77,12 @@ def main(cases=None, *, release=False):
                 def click(ident):
                     # A recreated top-level HWND is discoverable before its
                     # child controls and ShowWindow have completed.
-                    button=p.wait(lambda:ctrl(ident) if ctrl(ident) and p.u.IsWindowVisible(hwnd) and p.u.IsWindowEnabled(ctrl(ident)) else 0)
+                    try:
+                        button=p.wait(lambda:ctrl(ident) if ctrl(ident) and p.u.IsWindowVisible(hwnd) and p.u.IsWindowEnabled(ctrl(ident)) else 0)
+                    except BaseException:
+                        report['failure_context']=dict(control=ident,window_exists=bool(p.u.IsWindow(hwnd)),window_visible=bool(p.u.IsWindowVisible(hwnd)),control_exists=bool(ctrl(ident)),control_enabled=bool(p.u.IsWindowEnabled(ctrl(ident))),foreground_pid=p.pid(p.u.GetForegroundWindow()),fixture_pid=process.pid,state=state())
+                        if p.u.IsWindow(hwnd):p.capture_settings(case/'failed-control-state.png',hwnd)
+                        raise
                     assert p.pid(button)==process.pid
                     p.u.SetForegroundWindow(hwnd)
                     assert p.u.PostMessageW(button,0xF5,0,0)

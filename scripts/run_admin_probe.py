@@ -10,6 +10,12 @@ import run_probe_input as gui
 
 
 def main(environment):
+    # The established Run regression intentionally fixes Chinese in its child.
+    # This matrix needs live language controls, using the same isolated files.
+    if 'MINICON_LANGUAGE' in environment:
+        environment=dict(environment)
+        environment.pop('MINICON_LANGUAGE')
+        p.stop();p.start(environment,['--settings'])
     folder=p.ROOT/'target/test-reports/run-admin-controls'/str(time.time_ns())
     folder.mkdir(parents=True)
     gui.OUTPUT=folder
