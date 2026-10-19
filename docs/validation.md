@@ -1,6 +1,10 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.12](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.12)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.13](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.13)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.13
+
+已合 main 并公开为 Latest；三个附件与准确 CI 候选逐字节一致，main CI 与发布 CI 通过。真实管理员模块自重启及普通子进程启动验证、分段桌面回归通过；真实公开 .12 → .13 更新八项通过，实际安装路径保持，原运行环境恢复。失败历史与覆盖限制见[本版验收](validation_0_1_13.md)。
 
 ## 0.1.12
 
