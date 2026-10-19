@@ -15,13 +15,15 @@ A lightweight Windows desktop shell built with Rust and Win32, designed as a rep
 Product principle: **Optional features you do not need should not load by default.** In 0.1.8, the legacy menu is not initialized by default, previews do not create a window until enabled, and Run creates its window and workers on first use. The notification host initializes according to shell identity and explicit configuration. See the [0.1.8 design and acceptance](docs/archive/plan_0_1_8.md).
 
 
-Current release: **[0.1.13](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.13)**. See the [release notes](docs/releases/v0.1.13.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_13.md). Linked design and specification documents are currently primarily in Chinese.
+Current release: **[0.1.14](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.14)**. See the [release notes](docs/releases/v0.1.14.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_14.md). Linked design and specification documents are currently primarily in Chinese.
+
+Version 0.1.14 adds Show desktop next to the clock and an explicit Run as administrator checkbox. Winmgr stays at standard privileges; only the selected target requests UAC. See the [validation and known limits](docs/validation_0_1_14.md).
 
 Version 0.1.13 fixes administrator-to-standard-user startup and shows the actual executable path in configuration details. Updates preserve the installation path and filename.
 
 Version 0.1.12 verifies recovery records before takeover, installs the notification host during runtime handover, and uses one essential startup-readiness gate. Desktop management distinguishes this session, next sign-in and recovery status.
 
-Version 0.1.11 strengthens ordinary-privilege startup, formats the clock as `Www yyyy-mm-dd HH:MM`, and previews Run candidates in the input. Version 0.1.10 remembers your layout, lets you resize a side taskbar, opens the Recycle Bin from the clock panel, and asks before switching from another running build. It fixes the bottom gap under maximized windows after moving the taskbar to a side. Manual Check / Update / Restart, English/Chinese UI, Light/Dark/Auto themes and on-demand features remain. Elevated launches restart as the same user with standard privileges; the application does not request UAC. See the [release evidence and coverage limits](docs/validation_0_1_10.md).
+Version 0.1.11 strengthens ordinary-privilege startup, formats the clock as `Www yyyy-mm-dd HH:MM`, and previews Run candidates in the input. Version 0.1.10 remembers your layout, lets you resize a side taskbar, opens the Recycle Bin from the clock panel, and asks before switching from another running build. It fixes the bottom gap under maximized windows after moving the taskbar to a side. Manual Check / Update / Restart, English/Chinese UI, Light/Dark/Auto themes and on-demand features remain. Elevated launches restart as the same user with standard privileges; Winmgr itself does not request elevation; explicitly selected Run targets can request UAC. See the [release evidence and coverage limits](docs/validation_0_1_10.md).
 
 ## Settings preview
 

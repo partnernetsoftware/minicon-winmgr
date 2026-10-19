@@ -20,7 +20,9 @@
 | `python scripts/test.py --layer resource-gate --release-binary <candidate> --baseline <baseline> --campaign <local-summary> ...` | 只读核对三轮对照和先 2h 后 8h 原始证据；不等于完整验收 |
 | `python scripts/test.py --layer release --release-binary <candidate> --restore-exe <normal-running-exe> --legacy-exe <official-v0.1.4-exe> --baseline <baseline>` | 格式、严格 Clippy、release 全部单元、组件资源/更新内存、诊断 fixture 及实际候选的侧栏/更新/交互/设置/Run/布局/主题/换边/回收站回归 |
 
-会替换实例的桌面层均要求显式 `--restore-exe`，指向当前实际运行文件，并由隔离上下文先核对同用户/会话、文件路径和摘要；依赖当前可用的 Windows 输入桌面、Python Pillow（截图）和 PowerShell 7（UIA）。开发层默认构建到 `target/desktop-validation`，只在忽略目录内的副本上运行，正常退出后从原路径恢复并核对工作区及 Shell。不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
+会替换实例的桌面层均要求显式 `--restore-exe`，指向当前实际运行文件，并由隔离上下文先核对同用户/会话、文件路径和摘要；依赖当前可用的 Windows 输入桌面、Python Pillow（截图）和 PowerShell 7（UIA）。开发层默认构建到 `target/desktop-validation`，只在忽略目录内的副本上运行，正常退出后从原路径恢复并核对工作区及 Shell。常规层不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
+
+例外是显式交互验收 `scripts/run_uac_probe.py --candidate <准确候选> --restore-exe <实际原程序> --interactive-uac`：完整范围需要管理员入口批准、目标批准和目标取消，不能无人值守运行。`--approve-only` / `--cancel-only` 分别只覆盖目标批准或取消，不能把单段报告写成全范围通过。自有目标探针名标明 CLICK YES/NO，让授权要求出现在系统提示中；不要仅在聊天里交代交替顺序。系统选择必须由用户操作，不改变安全桌面策略；普通键盘遍历由 `run_admin_probe.py` 独立回归。失败轮次、退出异常与恢复情况必须保留，不能靠反复弹窗凑出完整通过。
 
 `release` 表示当前自动化全套，不代表所有物理环境已覆盖。混合 DPI、多屏热插拔、高对比度实屏、屏幕阅读器语音、特殊管理员令牌以及小时级常驻观察仍需独立环境验收。CI 没有当前交互桌面，执行 `quality`、完整隔离普通单元矩阵与独立 `fault` 层，candidate workflow 执行优化矩阵，release workflow 另外执行全部优化普通单元；发布前在可用桌面运行 `release` 并审阅报告。仅构建优化二进制不会自动声称完成发布验收。
 
