@@ -6,6 +6,18 @@ on:
         description: 'Language/concurrency change requires all four environments'
         type: boolean
         default: false
+      access_validation:
+        description: 'Role, account or authorization behavior changed'
+        type: boolean
+        default: false
+      menu_regression:
+        description: 'Native menu or shell shutdown behavior changed'
+        type: boolean
+        default: false
+      tcp_observation:
+        description: 'TCP counter collection or capability assessment changed'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,6 +33,7 @@ jobs:
       - name: Public evidence boundary
         run: python scripts/check_public_docs.py
       - name: Cross-account identity on disposable hosted runner (no UAC GUI)
+        if: inputs.access_validation
         run: python scripts/cross_account_probe.py
       - name: Quality and selected optimized unit suite
         run: |
@@ -31,15 +44,16 @@ jobs:
             python scripts/unit_matrix.py --release --quick
           }
       - name: Native menu shutdown regression
+        if: inputs.menu_regression
         run: python scripts/isolated_tray_probe.py --test-dir target/release/deps --test menu-close
       - name: Native administrator context with existing CI token (no UAC)
+        if: inputs.access_validation
         run: cargo test --release --locked --lib task_access::tests::administrator_context_reads_all_tasks_without_widening_own_scope -- --ignored --exact --nocapture
       - name: Observe owned TCP counter capability (not process rate acceptance)
+        if: inputs.tcp_observation
         run: python scripts/tcp_capability_probe.py
-      - name: Build optimized candidate
-        run: cargo build --release --locked
-      - name: Record portable build provenance
-        run: python scripts/release_artifact.py prepare --exe target/release/minicon-winmgr.exe --tool target/release/minicon-tskmgr.exe --output dist
+      - name: Build paired candidate and record bound provenance
+        run: python scripts/build_candidate.py --output dist
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64-candidate

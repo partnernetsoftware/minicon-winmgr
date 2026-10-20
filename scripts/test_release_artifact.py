@@ -42,6 +42,18 @@ class Provenance(unittest.TestCase):
         self.assertEqual(info['exe_sha256'],a.digest(self.exe))
         self.assertNotIn(str(self.root),(self.root/'artifact/BUILDINFO.toml').read_text())
 
+    def test_official_pair_requires_exact_companion_binding(self):
+        (self.root/'Cargo.toml').write_text('[package]\nversion = "0.1.18"\n')
+        self.git('add','Cargo.toml');self.git('commit','-qm','bound release')
+        tool=self.root/'tool.exe';tool.write_bytes(b'MZ'+b't'*510)
+        with patch.dict(os.environ,GITHUB_RUN_ID='12345',MINICON_TSKMGR_SHA256='0'*64):
+            with self.assertRaisesRegex(ValueError,'bind the exact companion'):
+                a.prepare(self.exe,self.root/'artifact',tool)
+            self.assertFalse((self.root/'artifact').exists())
+        with patch.dict(os.environ,GITHUB_RUN_ID='12345',MINICON_TSKMGR_SHA256=a.digest(tool)):
+            a.prepare(self.exe,self.root/'artifact',tool)
+        self.assertEqual(a.load(self.root/'artifact/BUILDINFO.toml')['tskmgr_sha256'],a.digest(tool))
+
     def test_documentation_commit_preserves_product_fingerprint(self):
         before=a.source_digest()
         (self.root/'notes.md').write_text('Reviewed evidence.\n')

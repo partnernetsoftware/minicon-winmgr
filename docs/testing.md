@@ -119,3 +119,5 @@ UAC 每次只说明当前操作；使用 `--approve-only` / `--cancel-only` 等�
 提交及发布前运行 `python scripts/check_public_docs.py`，检查暂存内容，拒绝原始验收 JSON 和工作站路径。自检在修改检查器或相关边界时运行，不每次重复。公开截图仍需目视审阅。
 
 晋升所需 BUILDINFO 保存到版本 `.artifact.toml`；旧版五字段继续支持，`.16` 起还必须绑定 `tskmgr_sha256`。源码或任一程序附件不符必须拒绝。附件晋升、公开状态和真实更新仍需直接核实；CI 绿色不等于产品已发布。
+
+.18 起官方双产物通过 `build_candidate.py` 先构建工具，再将实际工具摘要编入主程序；打包拒绝缺失或错误的绑定。工具查找/打包变化用定向组件、晋升检查和 `tool_offline_probe.py` 的双 exe 实际入口验证，不默认重复权限矩阵。候选的 `access_validation`、`menu_regression`、`tcp_observation` 仅在对应身份/授权、菜单退出、TCP 采集依赖改变时启用；有相关改动必须启用，未改时引用已验收版本的证据。

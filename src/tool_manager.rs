@@ -14,6 +14,7 @@ use windows::{
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const COMPANION_SHA256: Option<&str> = option_env!("MINICON_TSKMGR_SHA256");
 const SUM_LIMIT: usize = 64 * 1024;
 static BUSY: AtomicBool = AtomicBool::new(false);
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -35,6 +36,7 @@ pub(crate) fn status() -> String {
         7 => crate::i18n::text("等待 Windows 管理员授权…").into(),
         8 => crate::i18n::text("已取消管理员授权，当前任务未改变。").into(),
         9 => crate::i18n::text("已打开管理员任务窗口。").into(),
+        10 => crate::ui_format!("正在获取任务工具校验表…", "Fetching task tool checksums…"),
         _ => crate::i18n::text("独立管理自己的进程和网络端点。").into(),
     }
 }
@@ -72,6 +74,13 @@ fn cache() -> Result<PathBuf, String> {
     Ok(root.join("minicon-winmgr").join("tools").join(VERSION))
 }
 fn installed(current: &Path, cache: &Path) -> Result<Option<PathBuf>, String> {
+    installed_with_digest(current, cache, COMPANION_SHA256)
+}
+fn installed_with_digest(
+    current: &Path,
+    cache: &Path,
+    pinned: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
     // A sibling checksum table must bind this exact shell as well as the tool.
     // This avoids silently pairing a development build with unrelated binaries.
     let mut problems = Vec::new();
@@ -91,6 +100,10 @@ fn installed(current: &Path, cache: &Path) -> Result<Option<PathBuf>, String> {
             Ok(true) => {}
         }
         let result = (|| {
+            if let Some(digest) = pinned {
+                update_stream::verify_file(&file, digest)?;
+                return Ok(file.clone());
+            }
             let table = directory.join("SHA256SUMS.txt");
             let sums =
                 bounded_read(&table).map_err(|error| format!("{}: {error}", table.display()))?;
@@ -149,8 +162,8 @@ fn publish(source: &Path, target: &Path, expected: &str) -> Result<(), String> {
         Err(error) => Err(error.to_string()),
     }
 }
-fn download(directory: &Path) -> Result<PathBuf, String> {
-    PHASE.store(3, Ordering::Release);
+fn download(directory: &Path, current: &Path) -> Result<PathBuf, String> {
+    PHASE.store(10, Ordering::Release);
     BYTES.store(0, Ordering::Relaxed);
     let cancel = Token::default();
     let sums = http::get_cancellable(
@@ -159,7 +172,15 @@ fn download(directory: &Path) -> Result<PathBuf, String> {
         Duration::from_secs(25),
         |_| {},
         &cancel,
-    )?;
+    ).map_err(|error| crate::ui_format!(
+        "获取 Tskmgr {VERSION} 校验表失败（github.com；系统/当前用户代理）：{error}\n可手动下载同版 Winmgr 和 Tskmgr 到同一目录后重试。",
+        "Unable to fetch Tskmgr {VERSION} checksums (github.com; system/current-user proxy): {error}\nYou can manually place the matching Winmgr and Tskmgr in one folder, then retry."
+    ))?;
+    let expected = checksum(&sums, COMPANION_SHA256)?;
+    if let Some(path) = reuse_local(directory, &sums, current, &expected)? {
+        return Ok(path);
+    }
+    PHASE.store(3, Ordering::Release);
     install(directory, &sums, |file| {
         http::get_into_cancellable(
             &release_url(&name()),
@@ -170,22 +191,65 @@ fn download(directory: &Path) -> Result<PathBuf, String> {
             },
             |chunk| file.write_all(chunk).map_err(|e| e.to_string()),
             &cancel,
-        )?;
+        ).map_err(|error| crate::ui_format!(
+            "下载或写入 Tskmgr {VERSION} 失败（GitHub 发布附件；系统/当前用户代理）：{error}",
+            "Unable to download or write Tskmgr {VERSION} (GitHub release asset; system/current-user proxy): {error}"
+        ))?;
         Ok(())
     })
+}
+fn reuse_local(
+    directory: &Path,
+    sums: &[u8],
+    current: &Path,
+    expected: &str,
+) -> Result<Option<PathBuf>, String> {
+    // A missing receipt must not cause a full re-download of correct local bytes.
+    for source in current
+        .parent()
+        .into_iter()
+        .chain(std::iter::once(directory))
+    {
+        let source = source.join(name());
+        if update_stream::verify_file(&source, expected).is_ok() {
+            PHASE.store(1, Ordering::Release);
+            return install(directory, sums, |destination| {
+                let source = fs::File::open(&source).map_err(|e| e.to_string())?;
+                let copied =
+                    std::io::copy(&mut source.take((update::MAX_EXE + 1) as u64), destination)
+                        .map_err(|e| e.to_string())?;
+                if copied > update::MAX_EXE as u64 {
+                    return Err("Local tool exceeded its size limit".into());
+                }
+                Ok(())
+            })
+            .map(Some);
+        }
+    }
+    Ok(None)
+}
+fn checksum(sums: &[u8], pinned: Option<&str>) -> Result<String, String> {
+    let expected = update::checksum(sums, &name())?;
+    if pinned.is_some_and(|bound| bound != expected) {
+        return Err("Release checksum does not match the companion bound to this Winmgr".into());
+    }
+    Ok(expected)
 }
 fn install(
     directory: &Path,
     sums: &[u8],
     fetch: impl FnOnce(&mut fs::File) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
-    let expected = update::checksum(sums, &name())?;
-    fs::create_dir_all(directory).map_err(|e| e.to_string())?;
-    let (staged, mut file) = temporary(directory)?;
+    let expected = checksum(sums, COMPANION_SHA256)?;
+    fs::create_dir_all(directory)
+        .map_err(|e| format!("Unable to create tool cache {}: {e}", directory.display()))?;
+    let (staged, mut file) =
+        temporary(directory).map_err(|e| format!("Unable to create tool staging file: {e}"))?;
     fetch(&mut file)?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
-    update_stream::verify_file(&staged.0, &expected)?;
+    update_stream::verify_file(&staged.0, &expected)
+        .map_err(|e| format!("Tool content verification failed: {e}"))?;
     let target = directory.join(name());
     publish(&staged.0, &target, &expected)?;
     let (receipt, mut file) = temporary(directory)?;
@@ -267,9 +331,16 @@ fn open_requested(owner: HWND, focus: Option<Identity>, administrator: bool) {
                 Ok(Some(path)) => path,
                 lookup => {
                     PHASE.store(2, Ordering::Release);
+                    let offline = if COMPANION_SHA256.is_some() { crate::ui_format!(
+                        "离线使用：将同版官方 Winmgr 和 Tskmgr 两份 exe 放在同一目录，然后重试。",
+                        "For offline use, put the matching official Winmgr and Tskmgr executables in one folder, then retry."
+                    ) } else { crate::ui_format!(
+                        "此开发构建未内置工具摘要；离线使用需同版两份 exe 和 SHA256SUMS.txt。",
+                        "This development build has no companion digest; offline use needs matching executables and SHA256SUMS.txt."
+                    ) };
                     let question = if let Err(reason) = lookup { crate::ui_format!(
-                        "发现了 Tskmgr 文件，但无法通过本版本校验：\n{reason}\n\n离线使用：将同版 Winmgr、Tskmgr 和 SHA256SUMS.txt 放在同一目录，然后重试。\n是否改为从此版本的 GitHub 公开发布下载？",
-                        "A Tskmgr file was found but could not be verified for this version:\n{reason}\n\nFor offline use, put the matching Winmgr, Tskmgr and SHA256SUMS.txt in the same folder, then retry.\nDownload from this version's public GitHub release instead?"
+                        "发现了 Tskmgr 文件，但无法通过本版本校验：\n{reason}\n\n{offline}\n是否改为从此版本的 GitHub 公开发布下载？",
+                        "A Tskmgr file was found but could not be verified for this version:\n{reason}\n\n{offline}\nDownload from this version's public GitHub release instead?"
                     ) } else { crate::ui_format!(
                         "未找到已校验的 Tskmgr {VERSION}。\n从此版本的 GitHub 公开发布下载并打开？\n下载期间可继续使用 Winmgr。",
                         "Verified Tskmgr {VERSION} was not found.\nDownload and open it from this version's public GitHub release?\nYou can keep using Winmgr during the download."
@@ -278,7 +349,7 @@ fn open_requested(owner: HWND, focus: Option<Identity>, administrator: bool) {
                         PHASE.store(6, Ordering::Release);
                         return Ok(());
                     }
-                    download(&cache)?
+                    download(&cache, &current)?
                 }
             };
             if administrator {
@@ -422,6 +493,57 @@ mod tests {
         .unwrap();
         assert_eq!(installed(&current, &cache.0).unwrap(), Some(cached));
         assert_eq!(fs::read(tool).unwrap(), b"corrupted sibling");
+    }
+    #[test]
+    fn bound_tool_opens_without_receipt_and_rejects_corruption_and_wrong_release() {
+        let sibling = Directory::new();
+        let cache = Directory::new();
+        let current = sibling.0.join("shell.exe");
+        let bytes = payload();
+        let digest = update_stream::hash_reader(&bytes[..], update::MAX_EXE).unwrap();
+        let tool = sibling.0.join(name());
+        fs::write(&tool, &bytes).unwrap();
+        assert_eq!(
+            installed_with_digest(&current, &cache.0, Some(&digest)).unwrap(),
+            Some(tool.clone())
+        );
+        assert!(!sibling.0.join("SHA256SUMS.txt").exists());
+        fs::write(&tool, b"changed tool").unwrap();
+        assert!(installed_with_digest(&current, &cache.0, Some(&digest)).is_err());
+        let cached = cache.0.join(name());
+        fs::write(&cached, &bytes).unwrap();
+        assert_eq!(
+            installed_with_digest(&current, &cache.0, Some(&digest)).unwrap(),
+            Some(cached)
+        );
+        assert!(checksum(&sums(&bytes), Some(&"0".repeat(64))).is_err());
+        assert_eq!(checksum(&sums(&bytes), Some(&digest)).unwrap(), digest);
+        assert_eq!(fs::read(tool).unwrap(), b"changed tool");
+    }
+    #[test]
+    fn fetched_receipt_reuses_existing_bytes_and_keeps_bad_local_file() {
+        let sibling = Directory::new();
+        let cache = Directory::new();
+        let current = sibling.0.join("shell.exe");
+        let tool = sibling.0.join(name());
+        let bytes = payload();
+        let sums = sums(&bytes);
+        let digest = checksum(&sums, None).unwrap();
+        fs::write(&tool, &bytes).unwrap();
+        let installed = reuse_local(&cache.0, &sums, &current, &digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(installed).unwrap(), bytes);
+        assert_eq!(fs::read(cache.0.join("SHA256SUMS.txt")).unwrap(), sums);
+        let empty = Directory::new();
+        fs::write(&tool, b"bad local file").unwrap();
+        assert!(
+            reuse_local(&empty.0, &sums, &current, &digest)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read(tool).unwrap(), b"bad local file");
+        assert_eq!(fs::read_dir(empty.0.clone()).unwrap().count(), 0);
     }
     #[test]
     fn interrupted_or_corrupt_acquisition_is_not_installed_and_retry_succeeds() {

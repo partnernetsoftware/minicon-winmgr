@@ -46,3 +46,5 @@ scripts/__pycache__/
 !scripts/tool_entry_probe.py
 !scripts/tcp_capability_probe.py
 !scripts/cross_account_probe.py
+!scripts/build_candidate.py
+!scripts/tool_offline_probe.py

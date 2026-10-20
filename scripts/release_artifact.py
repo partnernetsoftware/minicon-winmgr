@@ -12,7 +12,7 @@ import tomllib
 ROOT=Path(__file__).resolve().parents[1]
 REPO='partnernetsoftware/minicon-winmgr'
 ARTIFACT='windows-x64-candidate'
-INPUTS=['src','Cargo.toml','Cargo.lock','build.rs','app.manifest','tskmgr.manifest','.cargo']
+INPUTS=['src','Cargo.toml','Cargo.lock','build.rs','app.manifest','tskmgr.manifest','.cargo','scripts/build_candidate.py']
 FIELDS={'version','run_id','source_commit','source_sha256','exe_sha256'}
 TOOL_FIELD='tskmgr_sha256'
 
@@ -86,6 +86,9 @@ def prepare(exe,output,tool=None):
         source_commit=command('git','rev-parse','HEAD'),source_sha256=source_digest(),exe_sha256=digest(exe))
     if tool is not None:info[TOOL_FIELD]=digest(tool)
     validate(info)
+    if tuple(map(int,info['version'].split('.'))) >= (0,1,18):
+        if os.environ.get('MINICON_TSKMGR_SHA256') != info.get(TOOL_FIELD):
+            raise ValueError('Official build must bind the exact companion digest; use build_candidate.py')
     output.mkdir(parents=True,exist_ok=False)
     shutil.copyfile(exe,output/filename(info['version']))
     if tool is not None:shutil.copyfile(tool,output/tool_filename(info['version']))
