@@ -1794,6 +1794,8 @@ unsafe extern "system" fn childproc(
             if matches!(
                 id,
                 CHECK_UPDATE
+                    | MY_TASKS
+                    | SYSTEM_TASKS
                     | DOWNLOAD_UPDATE
                     | RESTART_UPDATE
                     | CONFIG_INFO
