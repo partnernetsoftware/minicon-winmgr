@@ -28,6 +28,13 @@ jobs:
           } else {
             python scripts/unit_matrix.py --release --quick
           }
+      - name: Native menu shutdown regression
+        run: |
+          $menuFixture = @(Get-ChildItem target/release/deps/minicon_winmgr-*.exe | Where-Object {
+            (& $_.FullName --list 2>$null) -match '^window::readiness_tests::native_close_ends_active_popup:'
+          })
+          if ($menuFixture.Count -ne 1) { throw 'Expected one native menu fixture binary' }
+          python scripts/isolated_tray_probe.py --test-exe $menuFixture[0].FullName --test menu-close
       - name: Build optimized candidate
         run: cargo build --release --locked
       - name: Record portable build provenance

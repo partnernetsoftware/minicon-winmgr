@@ -490,6 +490,10 @@ unsafe extern "system" fn wndproc_inner(
                 return LRESULT(0);
             }
             tracing::info!("WM_CLOSE received; destroying window");
+            // A close request can arrive inside TrackPopupMenu's nested loop.
+            // Destroying this message window does not end a menu owned by a bar;
+            // cancel it on the UI thread before posting the application's quit.
+            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::EndMenu() };
             let _ = unsafe { DestroyWindow(hwnd) };
             LRESULT(0)
         }
@@ -598,6 +602,94 @@ fn complete_startup(
 mod readiness_tests {
     use super::*;
     use std::cell::RefCell;
+    #[test]
+    #[ignore = "owned popup on a private desktop; use isolated_tray_probe.py --test menu-close"]
+    fn native_close_ends_active_popup() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MINICON_NO_TASKBAR").as_deref(), Ok("1"));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (ended_tx, ended_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (shell, owner, thread): (isize, isize, u32) =
+                ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                if unsafe { FindWindowW(PCWSTR(wide("#32768").as_ptr()), PCWSTR::null()) }.is_ok() {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "popup did not open");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            unsafe { PostMessageW(Some(HWND(shell as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+                .unwrap();
+            let natural = ended_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+            if !natural {
+                // Rescue only this owned private popup so a regression fails promptly.
+                unsafe {
+                    PostMessageW(
+                        Some(HWND(owner as *mut _)),
+                        WM_CANCELMODE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                }
+                .unwrap();
+                ended_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            }
+            unsafe { PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)) }.unwrap();
+            natural
+        });
+        run(false, |usable| {
+            assert!(usable);
+            let owner = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    PCWSTR(wide("STATIC").as_ptr()),
+                    PCWSTR(wide("Owned menu exit fixture").as_ptr()),
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    0,
+                    0,
+                    320,
+                    200,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .unwrap();
+            ready_tx
+                .send((
+                    hub::shell_hwnd().unwrap().0 as isize,
+                    owner.0 as isize,
+                    unsafe { GetCurrentThreadId() },
+                ))
+                .unwrap();
+            let selected = unsafe {
+                crate::win_util::popup_menu(
+                    owner,
+                    &[crate::win_util::MenuRow::command(1, "Owned command")],
+                    20,
+                    20,
+                )
+            };
+            assert_eq!(selected, None);
+            ended_tx.send(()).unwrap();
+            unsafe { DestroyWindow(owner) }.unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let natural = worker.join().unwrap();
+        crate::settings_ui::shutdown();
+        crate::run_dialog::shutdown();
+        crate::tray_popup::shutdown();
+        crate::tray_host::shutdown();
+        assert!(natural, "exit left TrackPopupMenu waiting for input");
+    }
     #[test]
     #[ignore = "private desktop with owned hotkey competitor; use isolated_tray_probe.py --test collision"]
     fn native_rejects_all_launch_hotkeys_taken() {
