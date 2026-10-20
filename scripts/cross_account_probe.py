@@ -37,19 +37,22 @@ def main():
 $secret=ConvertTo-SecureString $env:MINICON_CI_USER_PASSWORD -AsPlainText -Force
 $account=New-LocalUser -Name $env:MINICON_CI_USER_NAME -Password $secret -PasswordNeverExpires -UserMayNotChangePassword
 Write-Output ('SID:'+ $account.SID.Value)
-Get-LocalGroup -SID 'S-1-5-32-545' | Add-LocalGroupMember -Member $account
+Add-LocalGroupMember -SID ([System.Security.Principal.SecurityIdentifier]'S-1-5-32-545') -Member $account
 ''', environment)
         sid = next((line[4:].strip() for line in result.stdout.splitlines() if line.startswith('SID:')), None)
         if result.returncode or not sid:
             raise RuntimeError('CI standard-account setup failed: '+result.stderr)
         environment['MINICON_CI_USER_SID'] = sid
+        # This gate also runs before the first compilation, so new test images
+        # inherit the owned fixture's read/execute grant.
+        (ROOT/'target/release/deps').mkdir(parents=True, exist_ok=True)
         for target, rights in [(folder, '(OI)(CI)M'), (ROOT/'target/release/deps', '(OI)(CI)RX')]:
             subprocess.run(['icacls.exe', str(target), '/grant', f'*{sid}:{rights}'],
                            check=True, stdout=subprocess.DEVNULL, timeout=30)
         subprocess.run(['cargo', 'test', '--release', '--locked', '--lib',
                         'task_access::cross_account_tests::parent_retains_original_user_with_different_credentials',
                         '--', '--ignored', '--exact', '--nocapture', '--test-threads=1'],
-                       cwd=ROOT, env=environment, check=True, timeout=90)
+                       cwd=ROOT, env=environment, check=True, timeout=600)
     finally:
         if sid:
             environment['MINICON_CI_USER_SID'] = sid

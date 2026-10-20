@@ -20,6 +20,8 @@ jobs:
           components: rustfmt, clippy
       - name: Public evidence boundary
         run: python scripts/check_public_docs.py
+      - name: Cross-account identity on disposable hosted runner (no UAC GUI)
+        run: python scripts/cross_account_probe.py
       - name: Quality and selected optimized unit suite
         run: |
           python scripts/test.py --layer quality
@@ -34,8 +36,6 @@ jobs:
         run: cargo test --release --locked --lib task_access::tests::administrator_context_reads_all_tasks_without_widening_own_scope -- --ignored --exact --nocapture
       - name: Observe owned TCP counter capability (not process rate acceptance)
         run: python scripts/tcp_capability_probe.py
-      - name: Cross-account identity on disposable hosted runner (no UAC GUI)
-        run: python scripts/cross_account_probe.py
       - name: Build optimized candidate
         run: cargo build --release --locked
       - name: Record portable build provenance

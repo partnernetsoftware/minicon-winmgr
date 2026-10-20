@@ -17,7 +17,7 @@
 
 首轮 [39374188705](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39374188705)，提交 `467b0c7`：质量、优化普通单元、菜单关闭回归、现有管理员上下文及 TCP 能力观察通过。跨账户 fixture 在创建账户前发生 PowerShell 模块加载失败，尚未执行身份交接；构建与上传步骤没有运行。此 run 不是可发布候选。
 
-修正测试驱动后启动 [39374785088](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39374785088)，提交 `e2220fc`；产品源码未改变。结果待核实。
+第二轮 [39374785088](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39374785088)，提交 `e2220fc`，产品源码未改变：质量和前述原生组件再次通过；跨账户 fixture 已创建并清理自有账户，但添加组成员的管道参数绑定失败，尚未执行令牌交接。改为显式组 SID，并将该验证前移：账户准备失败立即结束，成功后才编译和运行对应身份测试。没有放宽产品身份断言。
 
 ## 人工授权与环境边界
 
