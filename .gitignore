@@ -43,3 +43,4 @@ scripts/__pycache__/
 !scripts/public_update_probe.py
 
 !scripts/tskmgr_probe.py
+!scripts/tool_entry_probe.py

@@ -69,6 +69,7 @@
 | `legacy_update_path_probe.py` | 旧 helper 改名协议的额外失败点尚无证据时 |
 | `public_update_probe.py` | 真实公开基线经 GitHub Latest 下载/校验/重启，核对新文件名与恢复 |
 | `tskmgr_probe.py --candidate <tool-exe>` | 新工具实际路径：自有目标、真实命令行/搜索/网络、挂起窗口、关闭与结束/取消；不启动 UAC、不替换外壳 |
+| `tool_entry_probe.py --main <shell-exe> --tool <tool-exe> --restore-exe <current-exe>` | 工具集成变化：键盘入口、缺失时取消、同目录校验、版本缓存与独立退出；结束后恢复原外壳 |
 | `run_uac_probe.py` | 仅权限路径变化的实际批准/取消；需要用户参与 |
 | `test.py --layer resources / update-memory / diagnostics / fault` | 对应资源、诊断、故障处理有变化或未解释问题 |
 | `test.py --layer release` | 已说明理由的完整自动化回归；并非默认发布门槛 |
