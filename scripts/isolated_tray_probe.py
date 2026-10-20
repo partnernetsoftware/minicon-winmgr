@@ -9,6 +9,14 @@ from pathlib import Path
 import subprocess
 import time
 
+TESTS = {'menu-close': 'window::readiness_tests::native_close_ends_active_popup',
+         'show-desktop': 'taskbar::tests::native_show_desktop_minimizes_apps_without_hiding_shell',
+         'tray': 'tray_host::tests::native_public_host_lifecycle',
+         'startup': 'window::readiness_tests::native_startup_and_worker_host_transition',
+         'takeover': 'shell_swap::tests::native_private_desktop_takeover',
+         'collision': 'window::readiness_tests::native_rejects_all_launch_hotkeys_taken',
+         'companion-collision': 'window::readiness_tests::native_rejects_all_launch_hotkeys_taken'}
+
 
 class Startup(c.Structure):
     _fields_ = [('cb', w.DWORD), ('reserved', w.LPWSTR), ('desktop', w.LPWSTR),
@@ -25,10 +33,25 @@ class Process(c.Structure):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--test-exe', type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--test-exe', type=Path)
+    source.add_argument('--test-dir', type=Path, help='Discover exactly one matching Rust fixture in this build directory')
     parser.add_argument('--test', choices=['tray', 'startup', 'takeover', 'collision', 'companion-collision', 'show-desktop', 'menu-close'], default='tray')
     args = parser.parse_args()
-    executable = args.test_exe.resolve(strict=True)
+    test = TESTS[args.test]
+    if args.test_dir:
+        matches = []
+        for exe in args.test_dir.resolve(strict=True).glob('minicon_winmgr-*.exe'):
+            # PowerShell can return before a GUI-subsystem executable writes its
+            # output. CreateProcess with captured handles waits for the real list.
+            result = subprocess.run([str(exe), '--list', '--color', 'never'],
+                                    capture_output=True, text=True, encoding='utf-8', timeout=10, check=True)
+            if test + ': test' in result.stdout.splitlines(): matches.append(exe)
+        if len(matches) != 1:
+            raise RuntimeError(f'Expected one matching fixture, found {len(matches)}')
+        executable = matches[0]
+    else:
+        executable = args.test_exe.resolve(strict=True)
     root = Path(__file__).resolve().parents[1]
     folder = root / 'target/test-reports/private-tray' / str(time.time_ns())
     folder.mkdir(parents=True)
@@ -64,13 +87,6 @@ def main():
         if args.test == 'takeover':
             environment.pop('MINICON_TRAY_HOST', None)
         block = c.create_unicode_buffer('\0'.join(f'{k}={v}' for k, v in sorted(environment.items()))+'\0\0')
-        test = {'menu-close': 'window::readiness_tests::native_close_ends_active_popup',
-                'show-desktop': 'taskbar::tests::native_show_desktop_minimizes_apps_without_hiding_shell',
-                'tray': 'tray_host::tests::native_public_host_lifecycle',
-                'startup': 'window::readiness_tests::native_startup_and_worker_host_transition',
-                'takeover': 'shell_swap::tests::native_private_desktop_takeover',
-                'collision': 'window::readiness_tests::native_rejects_all_launch_hotkeys_taken',
-                'companion-collision': 'window::readiness_tests::native_rejects_all_launch_hotkeys_taken'}[args.test]
         command = c.create_unicode_buffer(subprocess.list2cmdline([
             str(executable), '--ignored', '--exact',
             test, '--nocapture']))
