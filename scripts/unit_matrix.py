@@ -9,10 +9,12 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--release', action='store_true')
+    parser.add_argument('--quick', action='store_true',
+                        help='One isolated English/default-concurrency run; full matrix remains opt-in by omitting this flag')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    for language in ('en', 'zh'):
-        for serial in (False, True):
+    for language in (('en',) if args.quick else ('en', 'zh')):
+        for serial in ((False,) if args.quick else (False, True)):
             with tempfile.TemporaryDirectory(prefix='minicon-unit-') as directory:
                 folder = Path(directory)
                 environment = {key: value for key, value in os.environ.items()

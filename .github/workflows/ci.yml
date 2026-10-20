@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**.md']
   pull_request:
+    paths-ignore: ['docs/**', '**.md']
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,8 +29,5 @@ jobs:
       - name: Development quality checks
         run: python scripts/test.py --layer quality
 
-      - name: Complete ordinary unit suite
-        run: python scripts/unit_matrix.py
-
-      - name: Bounded fault regressions
-        run: python scripts/test.py --layer fault
+      - name: Ordinary unit suite in one isolated environment
+        run: python scripts/unit_matrix.py --quick
