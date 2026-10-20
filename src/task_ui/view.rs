@@ -1,4 +1,5 @@
 //! Presentation only: no native queries or management side effects.
+use crate::task_notes::{Flag, Subject};
 use crate::task_service::{Identity, Process, Snapshot};
 use std::{
     cmp::Ordering,
@@ -14,6 +15,7 @@ pub(super) struct Row {
     pub children: bool,
 }
 
+#[cfg(test)]
 pub(super) fn rows(
     snapshot: &Snapshot,
     filter: &str,
@@ -22,8 +24,58 @@ pub(super) fn rows(
     expanded: &HashSet<Identity>,
     sort: (usize, bool),
 ) -> Vec<Row> {
+    rows_with_flags(
+        snapshot,
+        filter,
+        network,
+        tree,
+        expanded,
+        sort,
+        &HashMap::new(),
+    )
+}
+pub(super) fn rows_with_flags(
+    snapshot: &Snapshot,
+    filter: &str,
+    network: bool,
+    tree: bool,
+    expanded: &HashSet<Identity>,
+    sort: (usize, bool),
+    flags: &HashMap<Subject, Flag>,
+) -> Vec<Row> {
     let query = filter.to_lowercase();
+    let flag_for = |p: &Process| {
+        let application = Subject::process(p)
+            .ok()
+            .and_then(|subject| flags.get(&subject).copied());
+        let run = p
+            .owner
+            .clone()
+            .and_then(|owner| Subject::for_run(owner, p.identity).ok())
+            .and_then(|subject| flags.get(&subject).copied());
+        run.filter(|f| *f != Flag::Unreviewed)
+            .or(application.filter(|f| *f != Flag::Unreviewed))
+            .or(run)
+            .or(application)
+    };
+    let name = |p: &Process| {
+        let mark = match flag_for(p) {
+            Some(Flag::Suspicious) => " [!]",
+            Some(Flag::Watching) => " [?]",
+            Some(Flag::Resolved) => " [done]",
+            Some(Flag::Normal) => " [normal]",
+            Some(Flag::Unreviewed) => " [notes]",
+            None => "",
+        };
+        format!("{}{mark}", p.name)
+    };
     let matches = |p: &Process| {
+        if let Some(state) = query.strip_prefix("status:") {
+            return flag_for(p).unwrap_or_default().name() == state;
+        }
+        if query == "has:notes" {
+            return flag_for(p).is_some();
+        }
         query.is_empty()
             || p.name.to_lowercase().contains(&query)
             || p.path
@@ -65,7 +117,7 @@ pub(super) fn rows(
                     session: p.session,
                     children: false,
                     cells: vec![
-                        p.name.clone(),
+                        name(p),
                         p.identity.pid.to_string(),
                         e.protocol.clone(),
                         e.local.clone(),
@@ -93,7 +145,7 @@ pub(super) fn rows(
         });
         return result;
     }
-    let mut processes: Vec<_> = snapshot.processes.iter().filter(|p| matches(p)).collect();
+    let mut processes: Vec<_> = snapshot.processes.iter().collect();
     let comparison = |a: &&Process, b: &&Process| {
         let order = match sort.0 {
             1 => a.identity.pid.cmp(&b.identity.pid),
@@ -134,7 +186,7 @@ pub(super) fn rows(
                 "{}{}{}",
                 "  ".repeat(depth),
                 if children {
-                    if expanded.contains(&p.identity) {
+                    if expanded.contains(&p.identity) || !query.is_empty() {
                         "▾ "
                     } else {
                         "▸ "
@@ -143,12 +195,12 @@ pub(super) fn rows(
                     ""
                 },
                 if p.session == Some(snapshot.session) {
-                    p.name.clone()
+                    name(p)
                 } else {
                     format!(
                         "[S{}] {}",
                         p.session.map_or_else(|| "?".into(), |n| n.to_string()),
-                        p.name
+                        name(p)
                     )
                 }
             ),
@@ -164,23 +216,38 @@ pub(super) fn rows(
                 .map_or_else(String::new, |w| w.title.clone()),
         ],
     };
-    if !tree || !query.is_empty() {
+    if !tree {
         return include_unavailable(
             snapshot,
-            processes.into_iter().map(|p| make(p, 0, false)).collect(),
+            processes
+                .into_iter()
+                .filter(|p| matches(p))
+                .map(|p| make(p, 0, false))
+                .collect(),
             &query,
         );
     }
     let pid: HashMap<_, _> = processes.iter().map(|p| (p.identity.pid, *p)).collect();
+    let mut included: HashSet<_> = processes
+        .iter()
+        .filter(|p| matches(p))
+        .map(|p| p.identity)
+        .collect();
+    if !query.is_empty() {
+        for id in included.clone() {
+            included.extend(ancestors(snapshot, id));
+        }
+    }
     let mut children: HashMap<Identity, Vec<&Process>> = HashMap::new();
     let mut roots = Vec::new();
     for p in &processes {
-        if let Some(parent) = pid.get(&p.parent_pid).filter(|parent| {
-            parent.identity != p.identity
-                && parent.identity.created_100ns < p.identity.created_100ns
-                && parent.session == p.session
-                && parent.owner == p.owner
-        }) {
+        if !included.contains(&p.identity) {
+            continue;
+        }
+        if let Some(parent) = pid
+            .get(&p.parent_pid)
+            .filter(|parent| valid_parent(parent, p) && included.contains(&parent.identity))
+        {
             children.entry(parent.identity).or_default().push(*p);
         } else {
             roots.push(*p);
@@ -191,7 +258,7 @@ pub(super) fn rows(
     while let Some((p, depth)) = stack.pop() {
         let kids = children.get(&p.identity);
         output.push(make(p, depth, kids.is_some()));
-        if expanded.contains(&p.identity)
+        if (expanded.contains(&p.identity) || !query.is_empty())
             && depth < 64
             && let Some(kids) = kids
         {
@@ -203,6 +270,37 @@ pub(super) fn rows(
     include_unavailable(snapshot, output, &query)
 }
 
+fn valid_parent(parent: &Process, child: &Process) -> bool {
+    parent.identity != child.identity
+        && parent.identity.created_100ns < child.identity.created_100ns
+        && parent.owner.is_some()
+        && parent.owner == child.owner
+        && parent.session.is_some()
+        && parent.session == child.session
+}
+pub(super) fn ancestors(snapshot: &Snapshot, id: Identity) -> Vec<Identity> {
+    let by_pid: HashMap<_, _> = snapshot
+        .processes
+        .iter()
+        .map(|p| (p.identity.pid, p))
+        .collect();
+    let Some(mut child) = by_pid.get(&id.pid).copied().filter(|p| p.identity == id) else {
+        return vec![];
+    };
+    let mut result = Vec::new();
+    while let Some(parent) = by_pid
+        .get(&child.parent_pid)
+        .copied()
+        .filter(|parent| valid_parent(parent, child))
+    {
+        result.push(parent.identity);
+        child = parent;
+        if result.len() >= 64 {
+            break;
+        }
+    }
+    result
+}
 fn group(
     snapshot: &Snapshot,
     a: &Option<String>,
@@ -292,6 +390,96 @@ fn mib(bytes: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn filtered_tree_retains_ancestors_and_run_flags_do_not_leak_to_other_runs() {
+        let process = |pid, parent, name: &str| Process {
+            identity: Identity {
+                pid,
+                created_100ns: pid as u64,
+            },
+            parent_pid: parent,
+            name: name.into(),
+            owner: Some("fixture".into()),
+            session: Some(1),
+            path: Some("fixture.exe".into()),
+            cpu_percent: None,
+            working_bytes: None,
+            private_bytes: None,
+            windows: vec![],
+        };
+        let mut snapshot = Snapshot {
+            schema: 2,
+            platform: "fixture".into(),
+            sampled_unix_ms: 0,
+            owner: "fixture".into(),
+            execution_owner: "fixture".into(),
+            scope: crate::task_service::Scope::OwnTasks,
+            session: 1,
+            processes: vec![
+                process(1, 0, "parent"),
+                process(2, 1, "child"),
+                process(3, 1, "sibling"),
+            ],
+            unavailable: vec![],
+            endpoints: vec![],
+            ownership_unavailable: 0,
+            limitations: vec![],
+        };
+        let collapsed = HashSet::new();
+        let found = rows(&snapshot, "child", false, true, &collapsed, (1, false));
+        assert_eq!(found.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(found[1].cells[0].starts_with("  "));
+        assert!(collapsed.is_empty());
+        let run = Subject::for_run("fixture".into(), snapshot.processes[1].identity).unwrap();
+        let app = Subject::process(&snapshot.processes[1]).unwrap();
+        let mut flags = HashMap::from([(run.clone(), Flag::Suspicious)]);
+        let filtered = rows_with_flags(
+            &snapshot,
+            "status:suspicious",
+            false,
+            true,
+            &collapsed,
+            (1, false),
+            &flags,
+        );
+        assert_eq!(
+            filtered.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(filtered[1].cells[0].contains("[!]"));
+        flags.insert(app, Flag::Watching);
+        flags.insert(run, Flag::Normal);
+        let filtered = rows_with_flags(
+            &snapshot,
+            "status:watching",
+            false,
+            false,
+            &collapsed,
+            (1, false),
+            &flags,
+        );
+        assert_eq!(
+            filtered.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        snapshot.processes[1].identity.created_100ns = 20;
+        let filtered = rows_with_flags(
+            &snapshot,
+            "status:watching",
+            false,
+            false,
+            &collapsed,
+            (1, false),
+            &flags,
+        );
+        assert_eq!(
+            filtered.len(),
+            3,
+            "Recycled PID must not inherit the previous run state"
+        );
+        snapshot.processes[1].owner = Some("other-account".into());
+        assert!(ancestors(&snapshot, snapshot.processes[1].identity).is_empty());
+    }
     #[test]
     fn users_remain_grouped_and_unknown_identity_is_read_only() {
         let known = |pid, owner: &str, parent| Process {

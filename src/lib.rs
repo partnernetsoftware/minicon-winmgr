@@ -4,6 +4,11 @@ pub mod palette;
 pub mod task_access;
 #[cfg(windows)]
 pub mod task_launch;
+pub mod task_notes;
+#[cfg(windows)]
+pub mod task_notes_cli;
+#[cfg(windows)]
+mod task_notes_ui;
 pub mod task_service;
 #[cfg(windows)]
 pub mod task_ui;

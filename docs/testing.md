@@ -62,6 +62,7 @@
 | 窗口/任务栏 | window_snapshot / window_events → taskbar / grouping → win_util | 对应窗口出现/激活/关闭；几何变化才测停靠 | 设置保存、更新下载 |
 | 托盘协议 | tray_host → tray → tray_bar / tray_popup | 对应注册/更新/删除/回调与宿主形态 | Run、安装器及全主题矩阵 |
 | 配置/恢复事务 | settings_store / shell_recovery → 原子写入与读回 → 调用入口 | 数据保留、失败恢复、并发修改；一个实际入口 | 未使用该事务的模块 |
+| 任务分析 | task_service 身份 → task_notes 锁/追加历史 → task_notes_ui / task_notes_cli → task_ui 标识与筛选 | 树搜索保留祖先、跨运行状态边界；持久化/冲突/损坏；task_analysis_probe 一条人工→agent→复核→重启路径 | 未改的 UAC、终止和 TCP 采集 |
 | Tskmgr | task_service 平台采样 → 身份/指标模型 → task_ui 视图/动作；tool_manager → 对应版本缓存/启动/定位 | 真实数据、自有目标、身份复用、响应/退出；工具改变时验证缓存校验、失败重试和双产物交付 | Winmgr 历史 UI 全套 |
 | Tskmgr 提权 | 原用户/会话 → task_launch / task_access → 管理员工具 → 操作结果 | 实际批准/取消、跨账户边界、结束授权生命周期 | 未改的普通操作全套 |
 

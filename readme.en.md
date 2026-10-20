@@ -17,6 +17,8 @@ Product principle: **Optional features you do not need should not load by defaul
 
 Current release: **[0.1.17](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.17)**. See the [release notes](docs/releases/v0.1.17.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_17.md). Linked specifications are currently primarily in Chinese.
 
+Version 0.1.18 is in development: default process trees, persistent human/agent notes and flags, plus offline companion discovery. It is not yet public. See the [plan](docs/plan_0_1_18.md) and [analysis contract](docs/task_analysis.md).
+
 Version 0.1.17 adds an explicit “All users and system tasks” administrator entry. Winmgr stays at standard privileges; UAC cancellation preserves the current view, and closing the independent administrator tool ends its lifetime. Account/session labels and endpoint filtering are available; process bandwidth and collaborative notes are not yet implemented. See the [validation](docs/validation_0_1_17.md).
 
 Version 0.1.16 adds independent Minicon Tskmgr for your processes and TCP/UDP endpoints. Open “My tasks” in Settings, or “Find in my tasks…” from a window menu. Missing tools can be downloaded from the matching release after confirmation; offline use supports both executables and SHA256SUMS.txt in one folder. See the [validation](docs/validation_0_1_16.md).

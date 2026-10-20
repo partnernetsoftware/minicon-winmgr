@@ -48,3 +48,4 @@ scripts/__pycache__/
 !scripts/cross_account_probe.py
 !scripts/build_candidate.py
 !scripts/tool_offline_probe.py
+!scripts/task_analysis_probe.py

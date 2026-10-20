@@ -44,7 +44,8 @@ const STATUS: i32 = 1115;
 const SUMMARY: i32 = 1116;
 const ADMIN: i32 = 1117;
 const ACCOUNT: i32 = 1118;
-const CONTROLS: [i32; 18] = [
+const NOTES: i32 = 1119;
+const CONTROLS: [i32; 19] = [
     SEARCH,
     REFRESH,
     NETWORK,
@@ -63,6 +64,7 @@ const CONTROLS: [i32; 18] = [
     STATUS,
     SUMMARY,
     ACCOUNT,
+    NOTES,
 ];
 type Slot<T> = Arc<Mutex<Option<T>>>;
 fn slot<T>() -> Slot<T> {
@@ -85,12 +87,15 @@ pub struct Options {
     pub search: String,
     pub network: bool,
     pub access: Option<crate::task_access::Access>,
+    pub tree: Option<bool>,
+    pub notes_store: Option<std::path::PathBuf>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ViewRequest {
     focus: Option<Identity>,
     search: String,
     network: bool,
+    tree: Option<bool>,
 }
 
 enum Action {
@@ -109,21 +114,35 @@ struct Workers {
     detailed: Slot<(Identity, Result<String, String>)>,
     action: SyncSender<Action>,
     acted: Slot<Result<&'static str, String>>,
+    notes: Slot<Result<Vec<crate::task_notes::Summary>, String>>,
 }
 impl Workers {
-    fn new(access: crate::task_access::Access) -> Self {
+    fn new(
+        access: crate::task_access::Access,
+        notes_store: Option<crate::task_notes::Store>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let (sample, rx) = mpsc::sync_channel(1);
         let sampled = slot();
         let target = sampled.clone();
         let closing = stop.clone();
         let sampler_access = access.clone();
+        let notes = slot();
+        let note_target = notes.clone();
         std::thread::spawn(move || {
             let mut collector = service::Collector::with_access(sampler_access);
+            let mut last_stamp = None;
             while rx.recv().is_ok() && !closing.load(Ordering::Relaxed) {
                 let result = collector.sample();
                 if !closing.load(Ordering::Relaxed) {
                     put(&target, result);
+                    if let Some(store) = &notes_store {
+                        let stamp = store.stamp();
+                        if last_stamp.as_ref() != Some(&stamp) {
+                            put(&note_target, store.summaries().map_err(|e| e.to_string()));
+                            last_stamp = Some(stamp);
+                        }
+                    }
                 }
             }
         });
@@ -180,6 +199,7 @@ impl Workers {
             detailed,
             action,
             acted,
+            notes,
         }
     }
 }
@@ -217,6 +237,8 @@ struct State {
     next: Instant,
     busy: bool,
     font: HFONT,
+    notes_store: Result<crate::task_notes::Store, String>,
+    note_flags: HashMap<crate::task_notes::Subject, crate::task_notes::Flag>,
 }
 thread_local! {static STATE:RefCell<Option<State>>=const{RefCell::new(None)};}
 fn read<R>(f: impl FnOnce(&State) -> R) -> Option<R> {
@@ -287,6 +309,9 @@ pub fn run(mut options: Options) -> Result<(), String> {
         }
         let _guard = Guard(mutex);
         if already {
+            if options.notes_store.is_some() {
+                return Err("Close the existing same-version task window before selecting a custom notes store.".into());
+            }
             let existing = FindWindowW(PCWSTR(wide(&class).as_ptr()), None)
                 .map_err(|_| "Task manager is starting. Try again shortly.")?;
             let mut pid = 0;
@@ -300,11 +325,16 @@ pub fn run(mut options: Options) -> Result<(), String> {
             if normalize(&image) != normalize(&current.to_string_lossy()) {
                 return Err("Another build of this task manager is running. Close it before opening this build.".into());
             }
-            if options.focus.is_some() || !options.search.is_empty() || options.network {
+            if options.focus.is_some()
+                || !options.search.is_empty()
+                || options.network
+                || options.tree.is_some()
+            {
                 let mut payload = serde_json::to_vec(&ViewRequest {
                     focus: options.focus,
                     search: options.search.clone(),
                     network: options.network,
+                    tree: options.tree,
                 })
                 .map_err(|e| e.to_string())?;
                 if payload.len() > 4096 || options.search.encode_utf16().count() > 512 {
@@ -354,6 +384,14 @@ pub fn run(mut options: Options) -> Result<(), String> {
         let focus = options.focus;
         let filter = options.search.clone();
         let network = options.network;
+        let tree = options.tree.unwrap_or(true);
+        let notes_store = options
+            .notes_store
+            .clone()
+            .map(crate::task_notes::Store::at)
+            .unwrap_or_else(crate::task_notes::Store::current)
+            .map_err(|e| e.to_string());
+        let worker_store = notes_store.as_ref().ok().cloned();
         STATE.with(|s| {
             *s.borrow_mut() = Some(State {
                 options,
@@ -366,17 +404,19 @@ pub fn run(mut options: Options) -> Result<(), String> {
                 focus,
                 filter,
                 network,
-                tree: false,
+                tree,
                 expanded: HashSet::new(),
                 sort: (0, false),
                 rebuilding: false,
                 commands: HashMap::new(),
                 requested: None,
                 notice: None,
-                workers: Workers::new(access),
+                workers: Workers::new(access, worker_store),
                 next: Instant::now(),
                 busy: false,
                 font: HFONT::default(),
+                notes_store,
+                note_flags: HashMap::new(),
             })
         });
         let created = CreateWindowExW(
@@ -408,6 +448,7 @@ pub fn run(mut options: Options) -> Result<(), String> {
         message(control(hwnd, SEARCH), EM_SETLIMITTEXT, 512, 0);
         set(control(hwnd, SEARCH), &initial_search);
         message(control(hwnd, NETWORK), BM_SETCHECK, usize::from(network), 0);
+        message(control(hwnd, TREE), BM_SETCHECK, usize::from(tree), 0);
         labels(hwnd);
         theme(hwnd);
         font(hwnd);
@@ -563,6 +604,7 @@ fn labels(hwnd: HWND) {
         (SWITCH, "Switch to", "切换窗口"),
         (CLOSE, "Close window", "关闭窗口"),
         (END, "End process…", "结束进程…"),
+        (NOTES, "Notes / flags…", "笔记 / 标识…"),
     ] {
         set(control(hwnd, id), &text(en, zh));
     }
@@ -612,8 +654,8 @@ fn labels(hwnd: HWND) {
         EM_SETCUEBANNER,
         0,
         wide(&text(
-            "Search processes, users or endpoints",
-            "搜索进程、用户或网络端点",
+            "Search tasks / endpoints; status:suspicious or status:watching",
+            "搜索任务 / 端点；status:suspicious 异常，status:watching 关注",
         ))
         .as_ptr() as isize,
     );
@@ -695,9 +737,9 @@ fn resize(hwnd: HWND) {
             place(id, x, m, w, h);
             x += w + gap;
         }
-        let button_w = (width - scale(40)) / 6;
+        let button_w = (width - scale(48)) / 7;
         let bottom = (r.bottom - m - h).max(m + h);
-        for (i, id) in [LOCATION, COPY_PATH, COPY_COMMAND, SWITCH, CLOSE, END]
+        for (i, id) in [NOTES, LOCATION, COPY_PATH, COPY_COMMAND, SWITCH, CLOSE, END]
             .iter()
             .enumerate()
         {
@@ -797,8 +839,14 @@ fn rebuild(hwnd: HWND) {
     let Some(snapshot) = snapshot else {
         return;
     };
-    let rows = Rc::new(view::rows(
-        &snapshot, &filter, network, tree, &expanded, sort,
+    let mut expanded = expanded;
+    if tree && let Some(focus) = focus {
+        expanded.extend(view::ancestors(&snapshot, focus));
+        edit(|s| s.expanded = expanded.clone());
+    }
+    let flags = read(|s| s.note_flags.clone()).unwrap_or_default();
+    let rows = Rc::new(view::rows_with_flags(
+        &snapshot, &filter, network, tree, &expanded, sort, &flags,
     ));
     let desired = focus.or(selected);
     let limited = read(|s| s.limited).flatten();
@@ -1022,6 +1070,10 @@ fn selected_detail(hwnd: HWND) {
     }
     unsafe {
         let _ = EnableWindow(control(hwnd, ADMIN), !busy);
+        let _ = EnableWindow(
+            control(hwnd, NOTES),
+            !busy && visible && process.is_some_and(|p| p.owner.is_some()),
+        );
     }
 }
 fn selection(hwnd: HWND) {
@@ -1062,9 +1114,24 @@ fn tick(hwnd: HWND) {
             take(&s.workers.sampled),
             take(&s.workers.detailed),
             take(&s.workers.acted),
+            take(&s.workers.notes),
         )
     });
-    if let Some((sample, detail, action)) = events {
+    if let Some((sample, detail, action, notes)) = events {
+        if let Some(notes) = notes {
+            match notes {
+                Ok(notes) => {
+                    edit(|s| {
+                        s.note_flags = notes
+                            .into_iter()
+                            .map(|note| (note.subject, note.flag))
+                            .collect()
+                    });
+                    rebuild(hwnd);
+                }
+                Err(error) => notify(hwnd, Notice::Partial(format!("Task notes: {error}"))),
+            }
+        }
         if let Some(result) = sample {
             match result {
                 Ok(snapshot) => {
@@ -1111,6 +1178,42 @@ fn tick(hwnd: HWND) {
 }
 fn command(hwnd: HWND, id: i32) {
     match id {
+        NOTES => {
+            let selected = read(|s| {
+                let key = s.selected?;
+                if !s.rows.iter().any(|r| r.identity == Some(key)) {
+                    return None;
+                }
+                let process = s
+                    .snapshot
+                    .as_ref()?
+                    .processes
+                    .iter()
+                    .find(|p| p.identity == key)?;
+                Some((
+                    crate::task_notes::Subject::process(process).map_err(|e| e.to_string()),
+                    key,
+                    s.notes_store.clone(),
+                    s.access.execution().owner.clone(),
+                    s.options.chinese,
+                    s.options.light,
+                ))
+            })
+            .flatten();
+            if let Some((subject, key, store, author, chinese, light)) = selected {
+                let result = subject.and_then(|subject| {
+                    store.and_then(|store| {
+                        crate::task_notes_ui::open(
+                            hwnd, store, subject, key, author, chinese, light,
+                        )
+                    })
+                });
+                if let Err(error) = result {
+                    notify(hwnd, Notice::Outcome(Err(error)));
+                }
+                edit(|s| s.next = Instant::now());
+            }
+        }
         ADMIN => {
             let Some(request) = read(|s| {
                 if s.busy || s.access.scope() != service::Scope::OwnTasks {
@@ -1538,9 +1641,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                         s.next = Instant::now();
                         s.filter = request.search.clone();
                         s.network = request.network;
-                        s.tree = false;
+                        if let Some(tree) = request.tree {
+                            s.tree = tree;
+                        }
                     });
-                    message(control(hwnd, TREE), BM_SETCHECK, 0, 0);
+                    message(
+                        control(hwnd, TREE),
+                        BM_SETCHECK,
+                        usize::from(read(|s| s.tree).unwrap_or(true)),
+                        0,
+                    );
                     message(
                         control(hwnd, NETWORK),
                         BM_SETCHECK,
@@ -1643,6 +1753,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                     LRESULT(1)
                 }
                 WM_CLOSE => {
+                    if !crate::task_notes_ui::close_if_open() {
+                        return LRESULT(0);
+                    }
                     let _ = DestroyWindow(hwnd);
                     LRESULT(0)
                 }

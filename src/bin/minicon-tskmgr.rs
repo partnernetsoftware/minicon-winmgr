@@ -3,6 +3,15 @@
 
 fn main() {
     let mut args = std::env::args_os().skip(1).peekable();
+    if args.peek().is_some_and(|a| a == "--notes-json") {
+        args.next();
+        unsafe {
+            let _ = windows::Win32::System::Console::AttachConsole(
+                windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+        std::process::exit(minicon_winmgr::task_notes_cli::run(args.collect()));
+    }
     if args
         .peek()
         .is_some_and(|a| a == "--help" || a == "-h" || a == "--version")
@@ -13,7 +22,7 @@ fn main() {
             );
         }
         println!(
-            "minicon-tskmgr {}\n--language en|zh --theme light|dark --focus-pid PID --focus-created FILETIME\n--search TEXT --network\n--snapshot-json PATH\nUse the UI All users entry for administrator authorization.",
+            "minicon-tskmgr {}\n--language en|zh --theme light|dark --focus-pid PID --focus-created FILETIME\n--search TEXT --network --tree | --flat\n--snapshot-json PATH\n--notes-json [--store ABSOLUTE_DIRECTORY] (one JSON request on stdin)\n--notes-store ABSOLUTE_DIRECTORY (ordinary UI only)\nUse the UI All users entry for administrator authorization.",
             env!("CARGO_PKG_VERSION")
         );
         return;
@@ -67,6 +76,9 @@ fn main() {
                     Some("--origin-pid")=>origin_pid=Some(args.next().and_then(|v|v.into_string().ok()).and_then(|v|v.parse::<u32>().ok()).ok_or("Expected caller PID")?),
                     Some("--origin-created")=>origin_created=Some(args.next().and_then(|v|v.into_string().ok()).and_then(|v|v.parse::<u64>().ok()).ok_or("Expected caller creation time")?),
                     Some("--network")=>options.network=true,
+                    Some("--tree")=>options.tree=Some(true),
+                    Some("--flat")=>options.tree=Some(false),
+                    Some("--notes-store")=>options.notes_store=Some(std::path::PathBuf::from(args.next().ok_or("Expected notes directory")?)),
                     Some("--search")=>{ options.search=args.next().and_then(|v|v.into_string().ok()).ok_or("Expected search text")?; if options.search.encode_utf16().count()>512 || options.search.contains('\0') {return Err("Search text is too long or invalid".into());} },
                     Some("--language")=>{options.chinese=match args.next().and_then(|v|v.into_string().ok()).as_deref(){Some("zh")=>true,Some("en")=>false,_=>return Err("Expected --language en or zh".into())};},
                     Some("--theme")=>{options.light=match args.next().and_then(|v|v.into_string().ok()).as_deref(){Some("light")=>true,Some("dark")=>false,_=>return Err("Expected --theme light or dark".into())};},
@@ -76,6 +88,9 @@ fn main() {
                 }
             }
             if all {
+                if options.notes_store.is_some() {
+                    return Err("Custom notes stores require the ordinary task entry".into());
+                }
                 let reference =
                     pipe.ok_or("Open all tasks through the explicit administrator entry")?;
                 let identity = minicon_winmgr::task_service::Identity {
