@@ -27,9 +27,14 @@ class Provenance(unittest.TestCase):
     def git(self,*args):
         return subprocess.check_output(['git',*args],cwd=self.root,stderr=subprocess.PIPE)
 
-    def prepare(self):
+    def prepare(self,paired=False):
+        tool=None
+        if paired:
+            (self.root/'Cargo.toml').write_text('[package]\nversion = "0.1.16"\n')
+            self.git('add','Cargo.toml');self.git('commit','-qm','paired release')
+            tool=self.root/'tool.exe';tool.write_bytes(b'MZ'+b't'*510)
         with patch.dict(os.environ,GITHUB_RUN_ID='12345'):
-            a.prepare(self.exe,self.root/'artifact')
+            a.prepare(self.exe,self.root/'artifact',tool)
         return a.load(self.root/'artifact/BUILDINFO.toml')
 
     def test_public_metadata_and_asset_hash_match(self):
@@ -78,8 +83,8 @@ class Provenance(unittest.TestCase):
         with self.assertRaises(ValueError):
             a.promote(self.root/'artifact/BUILDINFO.toml',self.root/'download',self.root/'out','v0.1.10')
 
-    def promote_fixture(self,tamper=False):
-        info=self.prepare();real_command=a.command;real_run=subprocess.run
+    def promote_fixture(self,tamper=False,paired=False,tamper_tool=False):
+        info=self.prepare(paired);real_command=a.command;real_run=subprocess.run
         producer=dict(status='completed',conclusion='success',head_sha=info['source_commit'],
             event='workflow_dispatch',path='.github/workflows/candidate.yml',
             repository=dict(full_name=a.REPO),head_repository=dict(full_name=a.REPO))
@@ -89,9 +94,10 @@ class Provenance(unittest.TestCase):
             target=Path(args[-1])
             for source in (self.root/'artifact').iterdir():shutil.copyfile(source,target/source.name)
             if tamper:(target/a.filename(info['version'])).write_bytes(b'MZ'+b'x'*510)
+            if tamper_tool:(target/a.tool_filename(info['version'])).write_bytes(b'MZ'+b'x'*510)
             return subprocess.CompletedProcess(args,0)
         with patch.object(a,'command',side_effect=command),patch.object(subprocess,'run',side_effect=run):
-            a.promote(self.root/'artifact/BUILDINFO.toml',self.root/'download',self.root/'out','v0.1.10')
+            a.promote(self.root/'artifact/BUILDINFO.toml',self.root/'download',self.root/'out','v'+info['version'])
 
     def test_download_tampering_cannot_create_release_output(self):
         with self.assertRaises(ValueError):self.promote_fixture(tamper=True)
@@ -100,6 +106,24 @@ class Provenance(unittest.TestCase):
     def test_promotion_copies_the_exact_accepted_bytes(self):
         self.promote_fixture()
         self.assertEqual(self.exe.read_bytes(),(self.root/'out'/a.filename('0.1.10')).read_bytes())
+
+    def test_paired_release_copies_both_exact_payloads(self):
+        self.promote_fixture(paired=True)
+        info=a.load(self.root/'out/BUILDINFO.toml')
+        self.assertEqual(len(a.payloads(info)),2)
+        self.assertEqual((self.root/'tool.exe').read_bytes(),
+            (self.root/'out'/a.tool_filename('0.1.16')).read_bytes())
+        self.assertEqual((self.root/'out/SHA256SUMS.txt').read_text(),a.checksums(info))
+
+    def test_tampered_tool_prevents_all_release_output(self):
+        with self.assertRaises(ValueError):self.promote_fixture(paired=True,tamper_tool=True)
+        self.assertFalse((self.root/'out').exists())
+
+    def test_new_release_rejects_missing_tool_and_invalid_tool_digest(self):
+        info=self.prepare(paired=True)
+        missing=dict(info);missing.pop(a.TOOL_FIELD)
+        for changed in [missing,dict(info,tskmgr_sha256='x')]:
+            with self.assertRaises(ValueError):a.validate(changed)
 
 
 if __name__=='__main__':unittest.main()

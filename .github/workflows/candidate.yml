@@ -31,7 +31,7 @@ jobs:
       - name: Build optimized candidate
         run: cargo build --release --locked
       - name: Record portable build provenance
-        run: python scripts/release_artifact.py prepare --exe target/release/minicon-winmgr.exe --output dist
+        run: python scripts/release_artifact.py prepare --exe target/release/minicon-winmgr.exe --tool target/release/minicon-tskmgr.exe --output dist
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64-candidate

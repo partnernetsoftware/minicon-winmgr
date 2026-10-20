@@ -22,6 +22,9 @@ use windows::{
 const CLASS: &str = "minicon_winmgr_settings";
 const VIEW: &str = "minicon_winmgr_settings_view";
 const UPDATE_STATUS: u16 = 6400;
+const MY_TASKS: u16 = 6410;
+const SYSTEM_TASKS: u16 = 6411;
+const TOOL_STATUS: u16 = 6412;
 const CHECK_UPDATE: u16 = 6401;
 const DOWNLOAD_UPDATE: u16 = 6402;
 const RESTART_UPDATE: u16 = 6403;
@@ -624,6 +627,19 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
             check | WS_GROUP,
         ),
         (6305, "", 22, note),
+        (
+            MY_TASKS,
+            crate::i18n::text("我的任务…"),
+            32,
+            push | WS_GROUP,
+        ),
+        (
+            SYSTEM_TASKS,
+            crate::i18n::text("Windows 任务管理器…"),
+            32,
+            push,
+        ),
+        (TOOL_STATUS, "", 28, note),
         (UPDATE_STATUS, "", 26, note),
         (
             CHECK_UPDATE,
@@ -927,6 +943,7 @@ fn refresh() {
         Phase::Failed => crate::i18n::text("更新未完成，请重试。").into(),
     };
     label(control(UPDATE_STATUS), &update_text);
+    label(control(TOOL_STATUS), &crate::tool_manager::status());
     enabled(
         CHECK_UPDATE,
         !matches!(
@@ -1098,6 +1115,8 @@ fn apply(id: u16) {
                 info_box(&error);
             }
         }
+        MY_TASKS => crate::tool_manager::open(handle(), None),
+        SYSTEM_TASKS => crate::tool_manager::system_task_manager(handle()),
         CONFIG_INFO => {
             let executable = std::env::current_exe()
                 .map(|path| path.display().to_string())
@@ -1700,6 +1719,8 @@ pub(crate) fn filter(msg: &MSG) -> bool {
         if msg.wParam.0 == VK_RETURN.0 as usize {
             let id = unsafe { GetDlgCtrlID(msg.hwnd) } as u16;
             if [
+                MY_TASKS,
+                SYSTEM_TASKS,
                 CHECK_UPDATE,
                 DOWNLOAD_UPDATE,
                 RESTART_UPDATE,

@@ -3071,6 +3071,7 @@ const MENU_GROUP_RESTORE_ALL: usize = 9;
 const MENU_GROUP_MINIMIZE_ALL: usize = 10;
 const MENU_GROUP_CLOSE_ALL: usize = 11;
 const MENU_GROUP_PIN_ALL: usize = 12;
+const MENU_PROCESS: usize = 13;
 
 /// A batch operation applied to every window in a grouped button.
 ///
@@ -3145,6 +3146,10 @@ fn window_menu(owner: HWND, target: HWND, title: &str) {
                 crate::win_util::MenuRow::command(MENU_MINIMIZE, crate::i18n::text("最小化")),
                 crate::win_util::MenuRow::command(MENU_MAXIMIZE, crate::i18n::text("最大化")),
                 crate::win_util::MenuRow::command(MENU_CLOSE, crate::i18n::text("关闭")),
+                crate::win_util::MenuRow::command(
+                    MENU_PROCESS,
+                    crate::i18n::text("在我的任务中定位…"),
+                ),
                 crate::win_util::MenuRow::Separator,
                 if pin_disabled {
                     crate::win_util::MenuRow::disabled(
@@ -3174,6 +3179,7 @@ fn window_menu(owner: HWND, target: HWND, title: &str) {
     // SAFETY: `target` is a live window owned by this process.
     unsafe {
         match picked {
+            Some(MENU_PROCESS) => crate::tool_manager::locate(owner, target),
             Some(MENU_RESTORE) => {
                 let _ = ShowWindow(target, SW_RESTORE);
             }
@@ -3238,6 +3244,10 @@ fn group_menu(owner: HWND, anchor: HWND, label: &str, members: &[isize]) {
                     MENU_GROUP_CLOSE_ALL,
                     crate::i18n::text("全部关闭"),
                 ),
+                crate::win_util::MenuRow::command(
+                    MENU_PROCESS,
+                    crate::i18n::text("在我的任务中定位…"),
+                ),
                 crate::win_util::MenuRow::Separator,
                 if pin_disabled {
                     crate::win_util::MenuRow::disabled(
@@ -3258,6 +3268,10 @@ fn group_menu(owner: HWND, anchor: HWND, label: &str, members: &[isize]) {
 
     // SAFETY: every member handle was validated with `IsWindow` before use.
     unsafe {
+        if picked == Some(MENU_PROCESS) {
+            crate::tool_manager::locate(owner, anchor);
+            return;
+        }
         let Some(action) = picked.and_then(group_menu_action) else {
             return;
         };

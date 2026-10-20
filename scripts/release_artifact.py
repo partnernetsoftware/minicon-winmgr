@@ -14,6 +14,7 @@ REPO='partnernetsoftware/minicon-winmgr'
 ARTIFACT='windows-x64-candidate'
 INPUTS=['src','Cargo.toml','Cargo.lock','build.rs','app.manifest','tskmgr.manifest','.cargo']
 FIELDS={'version','run_id','source_commit','source_sha256','exe_sha256'}
+TOOL_FIELD='tskmgr_sha256'
 
 
 def command(*args):
@@ -35,12 +36,17 @@ def digest(path):
 
 
 def validate(info):
-    if set(info)!=FIELDS:raise ValueError('Unexpected provenance fields')
+    if set(info) not in (FIELDS,FIELDS|{TOOL_FIELD}):raise ValueError('Unexpected provenance fields')
     if not re.fullmatch(r'0\.[0-9]+\.[0-9]+',info['version']):raise ValueError('Invalid version')
     if type(info['run_id']) is not int or info['run_id']<=0:raise ValueError('Invalid producer run')
     for key,length in [('source_commit',40),('source_sha256',64),('exe_sha256',64)]:
         if not isinstance(info[key],str) or not re.fullmatch('[0-9a-f]{'+str(length)+'}',info[key]):
             raise ValueError('Invalid provenance digest')
+    if TOOL_FIELD in info and (not isinstance(info[TOOL_FIELD],str)
+            or not re.fullmatch('[0-9a-f]{64}',info[TOOL_FIELD])):
+        raise ValueError('Invalid tool digest')
+    if tuple(map(int,info['version'].split('.'))) >= (0,1,16) and TOOL_FIELD not in info:
+        raise ValueError('This release requires the task tool')
     return info
 
 
@@ -63,13 +69,28 @@ def version():
 def filename(value):return f'minicon-winmgr-v{value}-x86_64-windows.exe'
 
 
-def prepare(exe,output):
+def tool_filename(value):return f'minicon-tskmgr-v{value}-x86_64-windows.exe'
+
+
+def payloads(info):
+    result=[(filename(info['version']),info['exe_sha256'])]
+    if TOOL_FIELD in info:result.append((tool_filename(info['version']),info[TOOL_FIELD]))
+    return result
+
+
+def checksums(info):return ''.join(f'{digest}  {name}\n' for name,digest in payloads(info))
+
+
+def prepare(exe,output,tool=None):
+    info=dict(version=version(),run_id=int(os.environ['GITHUB_RUN_ID']),
+        source_commit=command('git','rev-parse','HEAD'),source_sha256=source_digest(),exe_sha256=digest(exe))
+    if tool is not None:info[TOOL_FIELD]=digest(tool)
+    validate(info)
     output.mkdir(parents=True,exist_ok=False)
-    info=validate(dict(version=version(),run_id=int(os.environ['GITHUB_RUN_ID']),
-        source_commit=command('git','rev-parse','HEAD'),source_sha256=source_digest(),exe_sha256=digest(exe)))
-    target=output/filename(info['version']);shutil.copyfile(exe,target)
+    shutil.copyfile(exe,output/filename(info['version']))
+    if tool is not None:shutil.copyfile(tool,output/tool_filename(info['version']))
     write(output/'BUILDINFO.toml',info)
-    (output/'SHA256SUMS.txt').write_text(info['exe_sha256']+'  '+target.name+'\n',encoding='ascii')
+    (output/'SHA256SUMS.txt').write_text(checksums(info),encoding='ascii')
 
 
 def promote(manifest,download,output,tag):
@@ -87,12 +108,12 @@ def promote(manifest,download,output,tag):
     subprocess.run(['gh','run','download',str(info['run_id']),'--repo',REPO,'--name',ARTIFACT,
         '--dir',str(download)],cwd=ROOT,check=True)
     if load(download/'BUILDINFO.toml')!=info:raise ValueError('Downloaded provenance differs from reviewed manifest')
-    exe=download/filename(info['version'])
-    if digest(exe)!=info['exe_sha256']:raise ValueError('Downloaded executable digest differs from the tested artifact')
-    sums=info['exe_sha256']+'  '+exe.name+'\n'
-    if (download/'SHA256SUMS.txt').read_text(encoding='ascii')!=sums:raise ValueError('Checksum file differs')
+    for name,expected in payloads(info):
+        if digest(download/name)!=expected:raise ValueError('Downloaded executable digest differs from the tested artifact')
+    if (download/'SHA256SUMS.txt').read_text(encoding='ascii')!=checksums(info):raise ValueError('Checksum file differs')
     output.mkdir(parents=True,exist_ok=False)
-    for file in [exe,download/'SHA256SUMS.txt',download/'BUILDINFO.toml']:shutil.copyfile(file,output/file.name)
+    for name in [*(name for name,_ in payloads(info)),'SHA256SUMS.txt','BUILDINFO.toml']:
+        shutil.copyfile(download/name,output/name)
     print('Verified tested candidate promoted without rebuilding.',flush=True)
 
 
@@ -101,6 +122,7 @@ if __name__=='__main__':
     commands=parser.add_subparsers(dest='mode',required=True)
     prepare_args=commands.add_parser('prepare')
     prepare_args.add_argument('--exe',type=Path,required=True)
+    prepare_args.add_argument('--tool',type=Path)
     prepare_args.add_argument('--output',type=Path,required=True)
     promote_args=commands.add_parser('promote')
     promote_args.add_argument('--manifest',type=Path,required=True)
@@ -108,5 +130,5 @@ if __name__=='__main__':
     promote_args.add_argument('--output',type=Path,required=True)
     promote_args.add_argument('--tag',required=True)
     args=parser.parse_args()
-    if args.mode=='prepare':prepare(args.exe,args.output)
+    if args.mode=='prepare':prepare(args.exe,args.output,args.tool)
     else:promote(args.manifest,args.download,args.output,args.tag)

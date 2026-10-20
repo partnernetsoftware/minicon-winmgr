@@ -750,7 +750,7 @@ fn effective_theme() -> Theme {
     }
     resolve_theme(&current(), system_light())
 }
-fn system_light() -> bool {
+pub(crate) fn system_light() -> bool {
     use windows::{Win32::System::Registry::*, core::PCWSTR};
     let mut light = 1u32;
     let mut size = size_of::<u32>() as u32;

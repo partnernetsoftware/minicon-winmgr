@@ -69,6 +69,32 @@ macro_rules! ui_format {
     ($zh:literal,$en:literal $(,$($args:tt)*)?)=>{if $crate::i18n::language()==$crate::i18n::Language::En {format!($en $(,$($args)*)?)}else{format!($zh $(,$($args)*)?)}};
 }
 const CATALOG: &[(&str, &str)] = &[
+    ("我的任务…", "My tasks…"),
+    ("Windows 任务管理器…", "Windows Task Manager…"),
+    ("在我的任务中定位…", "Find in my tasks…"),
+    (
+        "任务工具正在准备，请稍候再试。",
+        "Task tool is being prepared. Try again shortly.",
+    ),
+    (
+        "无法启动任务工具后台工作。",
+        "Unable to start the task tool worker.",
+    ),
+    ("正在校验任务工具…", "Verifying task tool…"),
+    (
+        "等待确认下载任务工具…",
+        "Waiting for task tool download confirmation…",
+    ),
+    ("已启动任务工具。", "Task tool started."),
+    (
+        "任务工具未能打开，可重试。",
+        "Task tool could not open. Try again.",
+    ),
+    ("已取消下载任务工具。", "Task tool download cancelled."),
+    (
+        "独立管理自己的进程和网络端点。",
+        "Manage your processes and network endpoints independently.",
+    ),
     ("使用管理员权限运行", "Run as administrator"),
     (
         "已取消授权。可以修改输入后重试。",

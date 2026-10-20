@@ -43,6 +43,7 @@ mod single_instance;
 mod start_menu;
 mod task_list;
 mod taskbar;
+mod tool_manager;
 mod tray;
 mod tray_bar;
 mod tray_host;
