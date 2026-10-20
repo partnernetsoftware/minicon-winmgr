@@ -12,7 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def powershell(script, environment):
-    return subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+    # Match the hosted workflow's PowerShell 7 module environment. Launching
+    # Windows PowerShell 5 with its inherited PSModulePath loads incompatible
+    # Security modules before the fixture can even create its owned account.
+    return subprocess.run(['pwsh.exe', '-NoProfile', '-NonInteractive', '-Command', script],
                           env=environment, capture_output=True, text=True, timeout=30)
 
 

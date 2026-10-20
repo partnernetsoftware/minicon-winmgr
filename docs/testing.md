@@ -63,7 +63,7 @@
 | 托盘协议 | tray_host → tray → tray_bar / tray_popup | 对应注册/更新/删除/回调与宿主形态 | Run、安装器及全主题矩阵 |
 | 配置/恢复事务 | settings_store / shell_recovery → 原子写入与读回 → 调用入口 | 数据保留、失败恢复、并发修改；一个实际入口 | 未使用该事务的模块 |
 | Tskmgr | task_service 平台采样 → 身份/指标模型 → task_ui 视图/动作；tool_manager → 对应版本缓存/启动/定位 | 真实数据、自有目标、身份复用、响应/退出；工具改变时验证缓存校验、失败重试和双产物交付 | Winmgr 历史 UI 全套 |
-| Tskmgr 提权（规划） | 原用户/会话 → 授权 → 管理员工具 → 操作结果 | 实际批准/取消、跨账户边界、结束授权生命周期 | 未改的普通操作全套 |
+| Tskmgr 提权 | 原用户/会话 → task_launch / task_access → 管理员工具 → 操作结果 | 实际批准/取消、跨账户边界、结束授权生命周期 | 未改的普通操作全套 |
 
 测试选择可写成：“文件名规则改变 → helper 交接/启动/登录引用受影响 → 路径单元 + 公开旧 helper 的成功/冲突/回滚 + 一次公开更新；不重测 Run”。不通过复制整个版本清单建立影响面。
 
@@ -90,6 +90,8 @@
 | `tskmgr_probe.py --candidate <tool-exe>` | 新工具实际路径：自有目标、真实命令行/搜索/网络、挂起窗口、关闭与结束/取消；不启动 UAC、不替换外壳 |
 | `tool_entry_probe.py --main <shell-exe> --tool <tool-exe> --restore-exe <current-exe>` | 工具集成变化：键盘入口、缺失时取消、同目录校验、版本缓存与独立退出；结束后恢复原外壳 |
 | `run_uac_probe.py` | 仅权限路径变化的实际批准/取消；需要用户参与 |
+| `cross_account_probe.py` | 启动身份契约改变；仅一次性 hosted Windows CI 创建并清理自有标准账户，验证不同令牌交接，不代替 UAC 界面验收 |
+| `tcp_capability_probe.py` | 评估 TCP EStats 来源；只观察一条自有连接的权限和计数，不作为完整进程速率或持续开销验收 |
 | `test.py --layer resources / update-memory / diagnostics / fault` | 对应资源、诊断、故障处理有变化或未解释问题 |
 | `test.py --layer release` | 已说明理由的完整自动化回归；并非默认发布门槛 |
 | `scenario_probe.py`、`instance_switch_probe.py`、`isolated_tray_probe.py` | 明确的资源/交接/私有桌面故障路径；测试文件证据不冒充正式产品入口 |
