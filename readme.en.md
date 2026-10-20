@@ -8,14 +8,16 @@ A lightweight Windows desktop shell built with Rust and Win32, designed as a rep
 
 ## Why minicon-winmgr
 
-- **Stability at the core.** Rust's ownership and type systems reduce memory-error risks, with explicit handle and resource-lifetime management at Win32 boundaries. Failed settings saves preserve the original file and support retries; shutdown restores the work area. Full release regression checks provide reproducible evidence of reliability.
+- **Stability at the core.** Rust's ownership and type systems reduce memory-error risks, with explicit handle and resource-lifetime management at Win32 boundaries. Failed settings saves preserve the original file and support retries; shutdown restores the work area. Risk-selected validation records provide evidence for the paths actually tested.
 - **A lean native foundation.** Rust and Win32 without an embedded browser engine; optional features initialize on demand. Version 0.1.10 adds bounded resource handling and optional diagnostics. [Measurements](docs/validation_0_1_10.md) describe their actual scenarios; longer observations remain separate work.
 - **Minimal by default, optional by choice.** Everyday paths stay focused on the taskbar and settings. Thumbnail previews are off by default and do not create a preview window; companion mode leaves Explorer's notification host in place. Optional capabilities remain a user choice, keeping extra controls and default overhead down.
 
 Product principle: **Optional features you do not need should not load by default.** In 0.1.8, the legacy menu is not initialized by default, previews do not create a window until enabled, and Run creates its window and workers on first use. The notification host initializes according to shell identity and explicit configuration. See the [0.1.8 design and acceptance](docs/archive/plan_0_1_8.md).
 
 
-Current release: **[0.1.16](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.16)**. See the [release notes](docs/releases/v0.1.16.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_16.md). Linked design and specification documents are currently primarily in Chinese.
+Current release: **[0.1.17](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.17)**. See the [release notes](docs/releases/v0.1.17.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_17.md). Linked specifications are currently primarily in Chinese.
+
+Version 0.1.17 adds an explicit “All users and system tasks” administrator entry. Winmgr stays at standard privileges; UAC cancellation preserves the current view, and closing the independent administrator tool ends its lifetime. Account/session labels and endpoint filtering are available; process bandwidth and collaborative notes are not yet implemented. See the [validation](docs/validation_0_1_17.md).
 
 Version 0.1.16 adds independent Minicon Tskmgr for your processes and TCP/UDP endpoints. Open “My tasks” in Settings, or “Find in my tasks…” from a window menu. Missing tools can be downloaded from the matching release after confirmation; offline use supports both executables and SHA256SUMS.txt in one folder. See the [validation](docs/validation_0_1_16.md).
 

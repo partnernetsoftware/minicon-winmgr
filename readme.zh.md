@@ -15,7 +15,9 @@
 产品原则：**用不上的可选功能，默认不加载。** 0.1.8 中，旧菜单默认不初始化，缩略预览默认不创建窗口，Run 的窗口和工作线程首次使用时才创建；通知宿主按外壳身份和显式配置决定初始化。详见 [0.1.8 设计与验收](docs/archive/plan_0_1_8.md)。
 
 
-当前公开版 **[0.1.16](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.16)**。版本事实见[发布说明](docs/releases/v0.1.16.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.16 计划](docs/plan_0_1_16.md)。
+当前公开版 **[0.1.17](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.17)**。版本事实见[发布说明](docs/releases/v0.1.17.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.17 计划](docs/plan_0_1_17.md)。
+
+0.1.17 增加主动授权的“所有用户与系统任务”入口。Winmgr 保持普通权限，UAC 取消保留当前状态，独立管理员工具关闭即退出；增加所属用户/会话展示和端点筛选。完整进程网络速率、协作笔记与异常管理尚未交付。详见[本版验收](docs/validation_0_1_17.md)。
 
 0.1.16 新增独立 Minicon Tskmgr，管理自己的进程和 TCP/UDP 端点。设置中打开“我的任务”，或从窗口菜单定位对应进程；工具缺失时确认下载同版公开附件，离线可将两份 exe 与 SHA256SUMS.txt 放在同一目录。详见[本版验收](docs/validation_0_1_16.md)。
 
