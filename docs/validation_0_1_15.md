@@ -1,6 +1,6 @@
 # 0.1.15 验收记录
 
-状态：正式 CI 候选已通过选定验收，尚未公开发布。范围见[版本计划](plan_0_1_15.md)与[更新文件名规格](update_filename_fix.md)。本页只记录可公开摘要，原始报告和截图保留在忽略目录。
+状态：已合 main 并于 2026-10-20 02:59:59 UTC 公开为 [v0.1.15 Latest](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.15)，非草稿、非预发布；真实公开 .14 → .15 更新通过，原环境恢复。范围见[版本计划](plan_0_1_15.md)与[更新文件名规格](update_filename_fix.md)。本页只记录可公开摘要，原始报告和截图保留在忽略目录。
 
 ## 准确候选
 
@@ -24,7 +24,10 @@
 
 ## 发布与真实公开更新
 
-待验收后建立准确附件草稿，再逐字节核对及公开；公开后用真实 .14 更新器经 GitHub Latest、下载、校验、显式重启到 .15，并核对实际新文件名。当前没有完成上述发布事实。
+- 标签指向 `2358888edad2deb44c2dbc0c97a4799ca7325f89`；[发布 CI 39361673269](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39361673269)与[main CI 39361642799](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39361642799)成功。发布阶段复用成功候选检查，不重复构建。
+- 三个草稿附件均下载并与准确候选逐字节一致后公开。匿名 GitHub Latest 返回 v0.1.15，draft=false、prerelease=false，三个附件齐全。
+- 真实公开 .14 的原生更新界面访问 GitHub Latest，下载并校验公开 .15，显式重启。暂存文件匹配准确候选；实际运行文件采用 .15 官方版本名，旧名移除，原 .14 文件在事务目录保留；同用户/会话普通权限、版本、就绪与设置保持均核实。
+- 该公开更新操作使用自有隔离安装；结束后原运行实例、路径、摘要、工作区及 Shell 设置恢复。没有替换用户实际安装，不请求 UAC。
 
 ## 覆盖限制
 

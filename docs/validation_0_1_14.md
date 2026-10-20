@@ -1,6 +1,6 @@
 # 0.1.14 发布验收：显示桌面与管理员运行
 
-状态：已合 main 并于 2026-10-19 05:26:47 UTC 公开为 [v0.1.14 Latest](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.14)，非草稿、非预发布；真实公开 .13 → .14 更新八项通过。真实 UAC 按独立行为分段验证，保留失败轮次及一次尚未定位的退出超时，不宣称单轮全部通过。范围见[版本计划](plan_0_1_14.md)。
+状态：已合 main 并于 2026-10-19 05:26:47 UTC 公开为 [v0.1.14 Latest](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.14)，非草稿、非预发布；真实公开 .13 → .14 更新八项通过。真实 UAC 按独立行为分段验证，保留失败轮次及一次尚未定位的退出超时，不宣称单轮全部通过。范围见[版本计划](archive/plan_0_1_14.md)。
 
 ## 显示桌面初期开发验证
 

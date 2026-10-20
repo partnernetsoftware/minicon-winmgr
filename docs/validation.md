@@ -1,6 +1,10 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.14](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.14)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.15](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.15)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.15
+
+更新后官方版本化文件名、实际运行路径与版本一致；旧 helper 交接、冲突和回滚通过，准确候选三附件原样公开为 Latest。真实公开 .14 更新器经 GitHub 下载、校验和重启到 .15，新名与普通权限核实，原环境恢复。范围与限制见[本版验收](validation_0_1_15.md)。本轮起按功能依赖及阶段选择测试，不默认重复全套。
 
 ## 0.1.14
 
