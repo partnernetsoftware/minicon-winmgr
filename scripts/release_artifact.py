@@ -12,7 +12,7 @@ import tomllib
 ROOT=Path(__file__).resolve().parents[1]
 REPO='partnernetsoftware/minicon-winmgr'
 ARTIFACT='windows-x64-candidate'
-INPUTS=['src','Cargo.toml','Cargo.lock','build.rs','app.manifest','.cargo']
+INPUTS=['src','Cargo.toml','Cargo.lock','build.rs','app.manifest','tskmgr.manifest','.cargo']
 FIELDS={'version','run_id','source_commit','source_sha256','exe_sha256'}
 
 

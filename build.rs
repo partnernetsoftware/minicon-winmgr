@@ -8,5 +8,14 @@ fn main() {
             "cargo:rustc-link-arg-bin=minicon-winmgr=/MANIFESTINPUT:{}",
             manifest.display()
         );
+        let task_manifest =
+            std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+                .join("tskmgr.manifest");
+        println!("cargo:rerun-if-changed=tskmgr.manifest");
+        println!("cargo:rustc-link-arg-bin=minicon-tskmgr=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-bin=minicon-tskmgr=/MANIFESTINPUT:{}",
+            task_manifest.display()
+        );
     }
 }
