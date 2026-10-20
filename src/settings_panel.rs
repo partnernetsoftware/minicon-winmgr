@@ -25,6 +25,7 @@ const UPDATE_STATUS: u16 = 6400;
 const MY_TASKS: u16 = 6410;
 const SYSTEM_TASKS: u16 = 6411;
 const TOOL_STATUS: u16 = 6412;
+const ALL_TASKS: u16 = 6413;
 const CHECK_UPDATE: u16 = 6401;
 const DOWNLOAD_UPDATE: u16 = 6402;
 const RESTART_UPDATE: u16 = 6403;
@@ -639,6 +640,12 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
             32,
             push,
         ),
+        (
+            ALL_TASKS,
+            crate::i18n::text("所有用户与系统任务（管理员）…"),
+            32,
+            push,
+        ),
         (TOOL_STATUS, "", 28, note),
         (UPDATE_STATUS, "", 26, note),
         (
@@ -1116,6 +1123,7 @@ fn apply(id: u16) {
             }
         }
         MY_TASKS => crate::tool_manager::open(handle(), None),
+        ALL_TASKS => crate::tool_manager::administrator(handle()),
         SYSTEM_TASKS => crate::tool_manager::system_task_manager(handle()),
         CONFIG_INFO => {
             let executable = std::env::current_exe()
@@ -1720,6 +1728,7 @@ pub(crate) fn filter(msg: &MSG) -> bool {
             let id = unsafe { GetDlgCtrlID(msg.hwnd) } as u16;
             if [
                 MY_TASKS,
+                ALL_TASKS,
                 SYSTEM_TASKS,
                 CHECK_UPDATE,
                 DOWNLOAD_UPDATE,
@@ -1795,6 +1804,7 @@ unsafe extern "system" fn childproc(
                 id,
                 CHECK_UPDATE
                     | MY_TASKS
+                    | ALL_TASKS
                     | SYSTEM_TASKS
                     | DOWNLOAD_UPDATE
                     | RESTART_UPDATE

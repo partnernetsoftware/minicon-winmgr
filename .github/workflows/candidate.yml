@@ -30,6 +30,12 @@ jobs:
           }
       - name: Native menu shutdown regression
         run: python scripts/isolated_tray_probe.py --test-dir target/release/deps --test menu-close
+      - name: Native administrator context with existing CI token (no UAC)
+        run: cargo test --release --locked --lib task_access::tests::administrator_context_reads_all_tasks_without_widening_own_scope -- --ignored --exact --nocapture
+      - name: Observe owned TCP counter capability (not process rate acceptance)
+        run: python scripts/tcp_capability_probe.py
+      - name: Cross-account identity on disposable hosted runner (no UAC GUI)
+        run: python scripts/cross_account_probe.py
       - name: Build optimized candidate
         run: cargo build --release --locked
       - name: Record portable build provenance

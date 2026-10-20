@@ -42,13 +42,16 @@ const CLOSE: i32 = 1113;
 const END: i32 = 1114;
 const STATUS: i32 = 1115;
 const SUMMARY: i32 = 1116;
-const CONTROLS: [i32; 16] = [
+const ADMIN: i32 = 1117;
+const ACCOUNT: i32 = 1118;
+const CONTROLS: [i32; 18] = [
     SEARCH,
     REFRESH,
     NETWORK,
     TREE,
     LANGUAGE,
     THEME,
+    ADMIN,
     LIST,
     DETAIL,
     LOCATION,
@@ -59,6 +62,7 @@ const CONTROLS: [i32; 16] = [
     END,
     STATUS,
     SUMMARY,
+    ACCOUNT,
 ];
 type Slot<T> = Arc<Mutex<Option<T>>>;
 fn slot<T>() -> Slot<T> {
@@ -78,8 +82,19 @@ pub struct Options {
     pub chinese: bool,
     pub light: bool,
     pub focus: Option<Identity>,
+    pub search: String,
+    pub network: bool,
+    pub access: Option<crate::task_access::Access>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ViewRequest {
+    focus: Option<Identity>,
+    search: String,
+    network: bool,
+}
+
 enum Action {
+    Administrator(isize, crate::task_launch::Request),
     Location(Identity),
     Switch(Identity, String),
     Close(Identity, String),
@@ -96,19 +111,17 @@ struct Workers {
     acted: Slot<Result<&'static str, String>>,
 }
 impl Workers {
-    fn new() -> Self {
+    fn new(access: crate::task_access::Access) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let (sample, rx) = mpsc::sync_channel(1);
         let sampled = slot();
         let target = sampled.clone();
         let closing = stop.clone();
+        let sampler_access = access.clone();
         std::thread::spawn(move || {
-            let mut collector = service::Collector::new();
+            let mut collector = service::Collector::with_access(sampler_access);
             while rx.recv().is_ok() && !closing.load(Ordering::Relaxed) {
-                let result = match &mut collector {
-                    Ok(c) => c.sample(),
-                    Err(e) => Err(e.clone()),
-                };
+                let result = collector.sample();
                 if !closing.load(Ordering::Relaxed) {
                     put(&target, result);
                 }
@@ -117,13 +130,14 @@ impl Workers {
         let (detail_wake, rx) = mpsc::sync_channel(1);
         let detail = slot();
         let pending = detail.clone();
+        let detail_access = access.clone();
         let detailed = slot();
         let target = detailed.clone();
         let closing = stop.clone();
         std::thread::spawn(move || {
             while rx.recv().is_ok() && !closing.load(Ordering::Relaxed) {
                 if let Some(identity) = take(&pending) {
-                    let result = service::command_line(identity);
+                    let result = detail_access.command_line(identity);
                     if !closing.load(Ordering::Relaxed) {
                         put(&target, (identity, result));
                     }
@@ -140,14 +154,19 @@ impl Workers {
                     break;
                 }
                 let result = match action {
-                    Action::Location(key) => service::open_location(key).map(|_| "location"),
-                    Action::Switch(key, window) => {
-                        service::activate(key, &window).map(|_| "switch")
-                    }
+                    Action::Administrator(owner, request) => std::env::current_exe()
+                        .map_err(|e| e.to_string())
+                        .and_then(|path| crate::task_launch::administrator(&path, owner, request))
+                        .map(|outcome| match outcome {
+                            crate::task_launch::Outcome::Opened => "admin",
+                            crate::task_launch::Outcome::Cancelled => "admin-cancel",
+                        }),
+                    Action::Location(key) => access.open_location(key).map(|_| "location"),
+                    Action::Switch(key, window) => access.activate(key, &window).map(|_| "switch"),
                     Action::Close(key, window) => {
-                        service::close_window(key, &window).map(|_| "close")
+                        access.close_window(key, &window).map(|_| "close")
                     }
-                    Action::End(key) => service::terminate(key).map(|_| "end"),
+                    Action::End(key) => access.terminate(key).map(|_| "end"),
                 };
                 put(&target, result);
             }
@@ -178,10 +197,12 @@ enum Notice {
 }
 struct State {
     options: Options,
+    access: crate::task_access::Access,
     elevated: bool,
     snapshot: Option<Rc<Snapshot>>,
     rows: Rc<Vec<view::Row>>,
     selected: Option<Identity>,
+    limited: Option<u32>,
     focus: Option<Identity>,
     filter: String,
     network: bool,
@@ -232,21 +253,29 @@ fn colors() -> palette::Theme {
     palette::base(read(|s| s.options.light).unwrap_or(false))
 }
 
-pub fn run(options: Options) -> Result<(), String> {
+pub fn run(mut options: Options) -> Result<(), String> {
+    let access = match options.access.take() {
+        Some(access) => access,
+        None => crate::task_access::Access::current()?,
+    };
     unsafe {
-        let (owner, session) = service::user_context()?;
         let elevated = service::elevated()?;
+        let instance_key = access.instance_key()?;
         let class = format!(
             "minicon_tskmgr_{}",
             env!("CARGO_PKG_VERSION").replace('.', "_")
         );
-        let class = format!("{}_{}", class.replace('.', "_"), u8::from(elevated));
+        let class = format!(
+            "{}_{}_{}",
+            class.replace('.', "_"),
+            u8::from(elevated),
+            instance_key
+        );
         let name = wide(&format!(
-            "Local\\minicon-tskmgr.{}.{}.{}.{}",
+            "Local\\minicon-tskmgr.{}.{}.{}",
             env!("CARGO_PKG_VERSION"),
-            owner,
-            session,
-            u8::from(elevated)
+            u8::from(elevated),
+            instance_key
         ));
         let mutex = CreateMutexW(None, false, PCWSTR(name.as_ptr())).map_err(|e| e.to_string())?;
         let already = GetLastError() == ERROR_ALREADY_EXISTS;
@@ -271,13 +300,19 @@ pub fn run(options: Options) -> Result<(), String> {
             if normalize(&image) != normalize(&current.to_string_lossy()) {
                 return Err("Another build of this task manager is running. Close it before opening this build.".into());
             }
-            if let Some(identity) = options.focus {
-                let mut payload = [0u8; 12];
-                payload[..4].copy_from_slice(&identity.pid.to_le_bytes());
-                payload[4..].copy_from_slice(&identity.created_100ns.to_le_bytes());
+            if options.focus.is_some() || !options.search.is_empty() || options.network {
+                let mut payload = serde_json::to_vec(&ViewRequest {
+                    focus: options.focus,
+                    search: options.search.clone(),
+                    network: options.network,
+                })
+                .map_err(|e| e.to_string())?;
+                if payload.len() > 4096 || options.search.encode_utf16().count() > 512 {
+                    return Err("Search request is too long".into());
+                }
                 let data = COPYDATASTRUCT {
-                    dwData: 0x54534b31,
-                    cbData: 12,
+                    dwData: 0x54534b32,
+                    cbData: payload.len() as u32,
                     lpData: payload.as_mut_ptr().cast(),
                 };
                 let mut result = 0usize;
@@ -291,7 +326,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     Some(&mut result),
                 );
                 if delivered.0 == 0 || result != 1 {
-                    return Err("The running task manager did not accept the focus request.".into());
+                    return Err("The running task manager did not accept the view request.".into());
                 }
             }
             let _ = crate::win_util::force_foreground(existing);
@@ -317,16 +352,20 @@ pub fn run(options: Options) -> Result<(), String> {
             return Err(windows::core::Error::from_thread().to_string());
         }
         let focus = options.focus;
+        let filter = options.search.clone();
+        let network = options.network;
         STATE.with(|s| {
             *s.borrow_mut() = Some(State {
                 options,
+                access: access.clone(),
                 elevated,
                 snapshot: None,
                 rows: Rc::new(vec![]),
                 selected: focus,
+                limited: None,
                 focus,
-                filter: String::new(),
-                network: false,
+                filter,
+                network,
                 tree: false,
                 expanded: HashSet::new(),
                 sort: (0, false),
@@ -334,7 +373,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 commands: HashMap::new(),
                 requested: None,
                 notice: None,
-                workers: Workers::new(),
+                workers: Workers::new(access),
                 next: Instant::now(),
                 busy: false,
                 font: HFONT::default(),
@@ -365,6 +404,10 @@ pub fn run(options: Options) -> Result<(), String> {
             let _ = DestroyWindow(hwnd);
             return Err(error);
         }
+        let initial_search = read(|s| s.filter.clone()).unwrap_or_default();
+        message(control(hwnd, SEARCH), EM_SETLIMITTEXT, 512, 0);
+        set(control(hwnd, SEARCH), &initial_search);
+        message(control(hwnd, NETWORK), BM_SETCHECK, usize::from(network), 0);
         labels(hwnd);
         theme(hwnd);
         font(hwnd);
@@ -459,7 +502,7 @@ unsafe fn install(hwnd: HWND, instance: HINSTANCE) -> Result<(), String> {
                         ),
                 ),
                 NETWORK | TREE => ("BUTTON", WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32)),
-                STATUS | SUMMARY => ("STATIC", WINDOW_STYLE(0)),
+                STATUS | SUMMARY | ACCOUNT => ("STATIC", WINDOW_STYLE(0)),
                 _ => ("BUTTON", WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32)),
             };
             let child = CreateWindowExW(
@@ -505,6 +548,11 @@ unsafe fn install(hwnd: HWND, instance: HINSTANCE) -> Result<(), String> {
 fn labels(hwnd: HWND) {
     for (id, en, zh) in [
         (REFRESH, "Refresh", "刷新"),
+        (
+            ADMIN,
+            "All users / system (admin)…",
+            "所有用户 / 系统（管理员）…",
+        ),
         (NETWORK, "Network", "网络"),
         (TREE, "Process tree", "进程树"),
         (LANGUAGE, "中文", "English"),
@@ -518,12 +566,40 @@ fn labels(hwnd: HWND) {
     ] {
         set(control(hwnd, id), &text(en, zh));
     }
+    if let Some(accounts) = read(|s| {
+        if s.access.scope() == service::Scope::OwnTasks {
+            return format!(
+                "{}: {} · {} {}",
+                text("Account", "账户"),
+                s.access.origin().owner,
+                text("Session", "会话"),
+                s.access.origin().session
+            );
+        }
+        format!(
+            "{}: {} · {} {}\r\n{}: {} · {} {}",
+            text("Origin", "原用户"),
+            s.access.origin().owner,
+            text("Session", "会话"),
+            s.access.origin().session,
+            text("Execution", "执行账户"),
+            s.access.execution().owner,
+            text("Session", "会话"),
+            s.access.execution().session
+        )
+    }) {
+        set(control(hwnd, ACCOUNT), &accounts);
+    }
     set(
         hwnd,
         &format!(
             "minicon-tskmgr {} — {}{}",
             env!("CARGO_PKG_VERSION"),
-            text("My tasks", "我的任务"),
+            if read(|s| s.access.scope() == service::Scope::AllTasks).unwrap_or(false) {
+                text("All users and system tasks", "所有用户与系统任务")
+            } else {
+                text("My tasks", "我的任务")
+            },
             if read(|s| s.elevated).unwrap_or(false) {
                 text(" · Administrator", " · 管理员权限")
             } else {
@@ -536,8 +612,8 @@ fn labels(hwnd: HWND) {
         EM_SETCUEBANNER,
         0,
         wide(&text(
-            "Search name, PID, path or window title",
-            "搜索名称、PID、路径或窗口标题",
+            "Search processes, users or endpoints",
+            "搜索进程、用户或网络端点",
         ))
         .as_ptr() as isize,
     );
@@ -631,8 +707,24 @@ fn resize(hwnd: HWND) {
         let detail_h = scale(104);
         let detail_y = (bottom - scale(42) - detail_h).max(m + scale(110));
         place(DETAIL, m, detail_y, width, detail_h);
-        place(SUMMARY, m, m + h + scale(5), width, scale(25));
-        let list_y = m + h + scale(34);
+        let own = read(|s| s.access.scope() == service::Scope::OwnTasks).unwrap_or(true);
+        let _ = ShowWindow(control(hwnd, ADMIN), if own { SW_SHOW } else { SW_HIDE });
+        place(
+            ADMIN,
+            m + width - scale(255),
+            m + h + scale(5),
+            scale(255),
+            scale(25),
+        );
+        place(
+            SUMMARY,
+            m,
+            m + h + scale(5),
+            if own { width - scale(265) } else { width },
+            scale(25),
+        );
+        place(ACCOUNT, m, m + h + scale(34), width, scale(36));
+        let list_y = m + h + scale(78);
         place(
             LIST,
             m,
@@ -654,12 +746,15 @@ fn columns(hwnd: HWND) {
             ("Local endpoint", "本地端点", 245),
             ("Remote endpoint", "远端端点", 245),
             ("State", "状态", 140),
+            ("Owner", "所属用户", 230),
+            ("Session", "会话", 75),
         ]
     } else {
         vec![
             ("Process", "进程", 230),
             ("PID", "PID", 75),
             ("Session", "会话", 75),
+            ("Owner", "所属用户", 290),
             ("CPU %", "CPU %", 75),
             ("Working MiB", "工作集 MiB", 115),
             ("Private MiB", "私有提交 MiB", 115),
@@ -706,10 +801,21 @@ fn rebuild(hwnd: HWND) {
         &snapshot, &filter, network, tree, &expanded, sort,
     ));
     let desired = focus.or(selected);
-    let index = desired.and_then(|key| rows.iter().position(|row| row.identity == key));
+    let limited = read(|s| s.limited).flatten();
+    let index = desired
+        .and_then(|key| rows.iter().position(|row| row.identity == Some(key)))
+        .or_else(|| {
+            limited.and_then(|pid| {
+                rows.iter()
+                    .position(|row| row.identity.is_none() && row.pid == pid)
+            })
+        });
     edit(|s| {
         s.rows = rows.clone();
         s.rebuilding = true;
+        if index.is_none() {
+            s.limited = None;
+        }
         if focus.is_some() {
             s.focus = None;
         }
@@ -751,8 +857,12 @@ fn rebuild(hwnd: HWND) {
     }
     let summary = format!(
         "{} · {} {} · {} {} · {}",
-        text("My account", "当前用户"),
-        snapshot.processes.len(),
+        if snapshot.scope == service::Scope::AllTasks {
+            text("All users", "所有用户")
+        } else {
+            text("My account", "当前用户")
+        },
+        snapshot.processes.len() + snapshot.unavailable.len(),
         text("processes", "个进程"),
         snapshot.endpoints.len(),
         text("endpoints", "个端点"),
@@ -765,14 +875,22 @@ fn rebuild(hwnd: HWND) {
         format!(
             " {} {}",
             snapshot.ownership_unavailable,
-            text("process owners unavailable", "个进程无法确认归属")
+            text("processes have limited metadata", "个进程信息受限")
         )
     } else {
         String::new()
     };
     set(control(hwnd, SUMMARY), &(summary + &extra));
     if !snapshot.limitations.is_empty() {
-        notify(hwnd, Notice::Partial(snapshot.limitations.join("; ")));
+        edit(|s| {
+            if matches!(
+                s.notice,
+                None | Some(Notice::Sampling(_) | Notice::Partial(_))
+            ) {
+                s.notice = Some(Notice::Partial(snapshot.limitations.join("; ")));
+            }
+        });
+        render_notice(hwnd);
     } else {
         edit(|s| {
             if matches!(s.notice, Some(Notice::Sampling(_) | Notice::Partial(_))) {
@@ -787,7 +905,7 @@ fn selected_detail(hwnd: HWND) {
     let Some((snapshot, key, visible, command, busy, requested)) = read(|s| {
         let visible = s
             .selected
-            .is_some_and(|key| s.rows.iter().any(|r| r.identity == key));
+            .is_some_and(|key| s.rows.iter().any(|r| r.identity == Some(key)));
         (
             s.snapshot.clone(),
             s.selected,
@@ -858,10 +976,39 @@ fn selected_detail(hwnd: HWND) {
                     "所选进程已不可见，请清除搜索或重新选择任务。",
                 )
             } else {
-                text(
-                    "Select a process or endpoint to view details.",
-                    "选择进程或端点查看详情。",
-                )
+                read(|s| {
+                    s.limited.and_then(|pid| {
+                        s.snapshot
+                            .as_ref()?
+                            .unavailable
+                            .iter()
+                            .find(|p| p.pid == pid)
+                            .map(|p| {
+                                format!(
+                                    "{} · PID {} · {}: {}\r\n{}: {}\r\n{}: {}\r\n{}",
+                                    p.name,
+                                    p.pid,
+                                    text("Session", "会话"),
+                                    p.session.map_or_else(|| "—".into(), |n| n.to_string()),
+                                    text("Owner", "所属用户"),
+                                    p.owner.as_deref().unwrap_or("—"),
+                                    text("Unavailable", "不可用"),
+                                    p.reason,
+                                    text(
+                                        "Identity unavailable; management actions are disabled.",
+                                        "无法核实进程身份，管理操作已禁用。"
+                                    )
+                                )
+                            })
+                    })
+                })
+                .flatten()
+                .unwrap_or_else(|| {
+                    text(
+                        "Select a process or endpoint to view details.",
+                        "选择进程或端点查看详情。",
+                    )
+                })
             },
         );
     }
@@ -872,6 +1019,9 @@ fn selected_detail(hwnd: HWND) {
         unsafe {
             let _ = EnableWindow(control(hwnd, *id), allowed[index] && !busy);
         }
+    }
+    unsafe {
+        let _ = EnableWindow(control(hwnd, ADMIN), !busy);
     }
 }
 fn selection(hwnd: HWND) {
@@ -887,13 +1037,23 @@ fn selection(hwnd: HWND) {
     .0;
     let key = read(|s| {
         if index >= 0 {
-            s.rows.get(index as usize).map(|r| r.identity)
+            s.rows.get(index as usize).and_then(|r| r.identity)
         } else {
             None
         }
     })
     .flatten();
-    edit(|s| s.selected = key);
+    edit(|s| {
+        s.selected = key;
+        s.limited = if index >= 0 {
+            s.rows
+                .get(index as usize)
+                .filter(|r| r.identity.is_none())
+                .map(|r| r.pid)
+        } else {
+            None
+        };
+    });
     selected_detail(hwnd);
 }
 fn tick(hwnd: HWND) {
@@ -951,6 +1111,35 @@ fn tick(hwnd: HWND) {
 }
 fn command(hwnd: HWND, id: i32) {
     match id {
+        ADMIN => {
+            let Some(request) = read(|s| {
+                if s.busy || s.access.scope() != service::Scope::OwnTasks {
+                    return None;
+                }
+                Some(crate::task_launch::Request {
+                    focus: s.selected,
+                    search: s.filter.clone(),
+                    network: s.network,
+                    chinese: s.options.chinese,
+                    light: s.options.light,
+                })
+            })
+            .flatten() else {
+                return;
+            };
+            let queued = edit(|s| {
+                s.workers
+                    .action
+                    .try_send(Action::Administrator(hwnd.0 as isize, request))
+                    .is_ok()
+            })
+            .unwrap_or(false);
+            if queued {
+                edit(|s| s.busy = true);
+            }
+            notify(hwnd, Notice::Pending(queued));
+            selected_detail(hwnd);
+        }
         REFRESH => {
             edit(|s| {
                 s.next = Instant::now();
@@ -998,7 +1187,7 @@ fn command(hwnd: HWND, id: i32) {
         _ => {
             let Some((key, process, command, busy)) = read(|s| {
                 let key = s.selected?;
-                if !s.rows.iter().any(|r| r.identity == key) {
+                if !s.rows.iter().any(|r| r.identity == Some(key)) {
                     return None;
                 }
                 Some((
@@ -1108,6 +1297,13 @@ fn render_notice(hwnd: HWND) {
         Some(Notice::Outcome(Ok("cancel"))) => {
             text("Cancelled; task unchanged.", "已取消，任务未改变。")
         }
+        Some(Notice::Outcome(Ok("admin"))) => {
+            text("Administrator tasks opened.", "已打开管理员任务窗口。")
+        }
+        Some(Notice::Outcome(Ok("admin-cancel"))) => text(
+            "Authorization cancelled; this view is unchanged.",
+            "已取消授权，当前视图未改变。",
+        ),
         Some(Notice::Outcome(Ok(_))) => text("Opened file location.", "已打开文件位置。"),
         Some(Notice::Outcome(Err(e))) => format!("{}: {e}", text("Operation failed", "操作失败")),
         Some(Notice::Sampling(e)) => format!(
@@ -1131,7 +1327,7 @@ fn tree_key(hwnd: HWND, key: usize) -> bool {
             return None;
         }
         let identity = s.selected?;
-        let row = s.rows.iter().find(|r| r.identity == identity)?;
+        let row = s.rows.iter().find(|r| r.identity == Some(identity))?;
         Some((
             identity,
             row.children,
@@ -1286,7 +1482,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                                     s.sort = if s.sort.0 == column {
                                         (column, !s.sort.1)
                                     } else {
-                                        (column, (3..=5).contains(&column) && !s.network)
+                                        (column, (4..=6).contains(&column) && !s.network)
                                     };
                                 });
                                 rebuild(hwnd);
@@ -1295,7 +1491,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                             NM_DBLCLK => {
                                 let key = read(|s| {
                                     let key = s.selected?;
-                                    let row = s.rows.iter().find(|r| r.identity == key)?;
+                                    let row = s.rows.iter().find(|r| r.identity == Some(key))?;
                                     Some((key, row.children, s.tree && !s.network))
                                 })
                                 .flatten();
@@ -1319,26 +1515,42 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 }
                 WM_COPYDATA => {
                     let data = &*(l.0 as *const COPYDATASTRUCT);
-                    if data.dwData == 0x54534b31 && data.cbData == 12 && !data.lpData.is_null() {
-                        let bytes = std::slice::from_raw_parts(data.lpData.cast::<u8>(), 12);
-                        let key = Identity {
-                            pid: u32::from_le_bytes(bytes[..4].try_into().unwrap()),
-                            created_100ns: u64::from_le_bytes(bytes[4..].try_into().unwrap()),
-                        };
-                        edit(|s| {
-                            s.focus = Some(key);
-                            s.selected = Some(key);
-                            s.next = Instant::now();
-                            s.filter.clear();
-                            s.tree = false;
-                        });
-                        message(control(hwnd, TREE), BM_SETCHECK, 0, 0);
-                        set(control(hwnd, SEARCH), "");
-                        rebuild(hwnd);
-                        LRESULT(1)
-                    } else {
-                        LRESULT(0)
+                    if data.dwData != 0x54534b32
+                        || data.cbData == 0
+                        || data.cbData > 4096
+                        || data.lpData.is_null()
+                    {
+                        return LRESULT(0);
                     }
+                    let bytes =
+                        std::slice::from_raw_parts(data.lpData.cast::<u8>(), data.cbData as usize);
+                    let Ok(request) = serde_json::from_slice::<ViewRequest>(bytes) else {
+                        return LRESULT(0);
+                    };
+                    if request.search.encode_utf16().count() > 512 || request.search.contains('\0')
+                    {
+                        return LRESULT(0);
+                    }
+                    edit(|s| {
+                        s.focus = request.focus;
+                        s.selected = request.focus.or(s.selected);
+                        s.limited = None;
+                        s.next = Instant::now();
+                        s.filter = request.search.clone();
+                        s.network = request.network;
+                        s.tree = false;
+                    });
+                    message(control(hwnd, TREE), BM_SETCHECK, 0, 0);
+                    message(
+                        control(hwnd, NETWORK),
+                        BM_SETCHECK,
+                        usize::from(request.network),
+                        0,
+                    );
+                    set(control(hwnd, SEARCH), &request.search);
+                    columns(hwnd);
+                    rebuild(hwnd);
+                    LRESULT(1)
                 }
                 WM_SIZE => {
                     resize(hwnd);

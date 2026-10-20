@@ -13,6 +13,8 @@ use windows::{
 };
 
 const PREFIX: &str = r"\\.\pipe\minicon-tskmgr-origin-";
+#[cfg(test)]
+mod cross_account_tests;
 
 struct Handle(HANDLE);
 impl Drop for Handle {
@@ -27,6 +29,7 @@ pub struct Access {
     scope: Scope,
     origin: Actor,
     execution: Actor,
+    debug_warning: Option<String>,
 }
 impl Access {
     pub fn current() -> Result<Self, String> {
@@ -35,6 +38,7 @@ impl Access {
             scope: Scope::OwnTasks,
             origin: execution.clone(),
             execution,
+            debug_warning: None,
         })
     }
 
@@ -44,6 +48,10 @@ impl Access {
             return Err("All tasks requires explicit Windows administrator authorization.".into());
         }
         let execution = actor_for_process(unsafe { GetCurrentProcessId() })?;
+        if !local_name(pipe) {
+            return Err("Invalid local caller reference".into());
+        }
+        let debug_warning = enable_debug().err();
         let origin = peer(pipe, expected)?;
         if origin.session != execution.session {
             return Err("Caller and administrator tool are in different Windows sessions.".into());
@@ -52,6 +60,7 @@ impl Access {
             scope: Scope::AllTasks,
             origin,
             execution,
+            debug_warning,
         })
     }
     pub fn scope(&self) -> Scope {
@@ -63,18 +72,79 @@ impl Access {
     pub fn execution(&self) -> &Actor {
         &self.execution
     }
+    pub fn debug_warning(&self) -> Option<&str> {
+        self.debug_warning.as_deref()
+    }
 
     /// Role, both accounts, and both sessions are part of instance isolation.
-    pub fn instance_key(&self) -> String {
-        format!(
+    pub fn instance_key(&self) -> Result<String, String> {
+        use windows::Win32::Security::Cryptography::*;
+        let identity = format!(
             "{:?}.{}.{}.{}.{}",
             self.scope,
             self.origin.owner,
             self.origin.session,
             self.execution.owner,
             self.execution.session
+        );
+        struct Algorithm(BCRYPT_ALG_HANDLE);
+        impl Drop for Algorithm {
+            fn drop(&mut self) {
+                let _ = unsafe { BCryptCloseAlgorithmProvider(self.0, 0) };
+            }
+        }
+        let mut handle = BCRYPT_ALG_HANDLE::default();
+        unsafe {
+            BCryptOpenAlgorithmProvider(
+                &mut handle,
+                BCRYPT_SHA256_ALGORITHM,
+                None,
+                BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0),
+            )
+        }
+        .ok()
+        .map_err(|e| e.to_string())?;
+        let handle = Algorithm(handle);
+        let mut hash = [0u8; 32];
+        unsafe { BCryptHash(handle.0, None, identity.as_bytes(), &mut hash) }
+            .ok()
+            .map_err(|e| e.to_string())?;
+        Ok(hash.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+}
+
+fn enable_debug() -> Result<(), String> {
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut token = HANDLE::default();
+    unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
         )
     }
+    .map_err(|e| e.to_string())?;
+    let token = Handle(token);
+    let mut luid = LUID::default();
+    unsafe { LookupPrivilegeValueW(None, SE_DEBUG_NAME, &mut luid) }.map_err(|e| e.to_string())?;
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    unsafe {
+        SetLastError(ERROR_SUCCESS);
+        AdjustTokenPrivileges(token.0, false, Some(&privileges), 0, None, None)
+            .map_err(|e| e.to_string())?;
+        if GetLastError() == ERROR_NOT_ALL_ASSIGNED {
+            return Err(
+                "Windows did not grant SeDebugPrivilege; some tasks remain inaccessible".into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Keep this alive across ShellExecute/UAC until the child completes bootstrap.
@@ -188,6 +258,65 @@ fn peer(name: &str, expected: Identity) -> Result<Actor, String> {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires the isolated CI administrator token; does not initiate UAC"]
+    fn administrator_context_reads_all_tasks_without_widening_own_scope() {
+        assert!(
+            elevated().unwrap(),
+            "This component check requires an existing administrator token"
+        );
+        let origin = OriginServer::new().unwrap();
+        let access = Access::administrator_from_origin(origin.name(), origin.identity()).unwrap();
+        assert_eq!(access.scope(), Scope::AllTasks);
+        assert_eq!(access.origin().identity, origin.identity());
+        let snapshot = crate::task_service::Collector::with_access(access)
+            .sample()
+            .unwrap();
+        assert_eq!(snapshot.scope, Scope::AllTasks);
+        assert!(
+            snapshot
+                .processes
+                .iter()
+                .any(|p| p.identity.pid == origin.identity().pid)
+        );
+        assert!(
+            snapshot.unavailable.iter().any(|p| p.pid == 0),
+            "Idle must remain an explicit metadata-only row"
+        );
+        let own = Access::current().unwrap();
+        let own_snapshot = crate::task_service::Collector::with_access(own.clone())
+            .sample()
+            .unwrap();
+        assert!(own_snapshot.unavailable.is_empty());
+        assert!(
+            own_snapshot
+                .processes
+                .iter()
+                .all(|p| p.owner.as_deref() == Some(own.origin().owner.as_str()))
+        );
+        let others = snapshot
+            .processes
+            .iter()
+            .filter(|p| {
+                p.owner
+                    .as_ref()
+                    .is_some_and(|owner| owner != &own.origin().owner)
+            })
+            .count();
+        if let Some(other) = snapshot.processes.iter().find(|p| {
+            p.owner
+                .as_ref()
+                .is_some_and(|owner| owner != &own.origin().owner)
+        }) {
+            assert!(own.identify(other.identity.pid).is_err());
+        }
+        println!(
+            "Existing-admin component: {} verified rows, {} metadata-only, {} other-account rows; no UAC or management actions",
+            snapshot.processes.len(),
+            snapshot.unavailable.len(),
+            others
+        );
+    }
+    #[test]
     fn startup_reference_uses_kernel_peer_and_rejects_recycled_identity() {
         let origin = OriginServer::new().unwrap();
         assert!(local_name(origin.name()));
@@ -211,6 +340,12 @@ mod tests {
         let access = Access::current().unwrap();
         assert_eq!(access.scope(), Scope::OwnTasks);
         assert_eq!(access.origin(), access.execution());
+        let key = access.instance_key().unwrap();
+        assert_eq!(key.len(), 64);
+        assert_eq!(Access::current().unwrap().instance_key().unwrap(), key);
+        let mut other_context = access.clone();
+        other_context.origin.owner = "different verified caller".into();
+        assert_ne!(other_context.instance_key().unwrap(), key);
         if !elevated().unwrap() {
             let origin = OriginServer::new().unwrap();
             assert!(Access::administrator_from_origin(origin.name(), origin.identity()).is_err());

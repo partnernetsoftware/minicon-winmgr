@@ -6,7 +6,10 @@ use std::{
 };
 
 pub(super) struct Row {
-    pub identity: Identity,
+    pub identity: Option<Identity>,
+    pub pid: u32,
+    pub owner: Option<String>,
+    pub session: Option<u32>,
     pub cells: Vec<String>,
     pub children: bool,
 }
@@ -26,6 +29,9 @@ pub(super) fn rows(
             || p.path
                 .as_ref()
                 .is_some_and(|path| path.to_lowercase().contains(&query))
+            || p.owner
+                .as_ref()
+                .is_some_and(|owner| owner.to_lowercase().contains(&query))
             || p.identity.pid.to_string().contains(&query)
             || p.windows
                 .iter()
@@ -39,6 +45,11 @@ pub(super) fn rows(
             .filter_map(|e| {
                 let p = by_id.get(&e.process)?;
                 if !matches(p)
+                    && !e.protocol.to_lowercase().contains(&query)
+                    && !e
+                        .state
+                        .as_ref()
+                        .is_some_and(|state| state.to_lowercase().contains(&query))
                     && !e.local.to_lowercase().contains(&query)
                     && !e
                         .remote
@@ -48,7 +59,10 @@ pub(super) fn rows(
                     return None;
                 }
                 Some(Row {
-                    identity: e.process,
+                    identity: Some(e.process),
+                    pid: e.process.pid,
+                    owner: p.owner.clone(),
+                    session: p.session,
                     children: false,
                     cells: vec![
                         p.name.clone(),
@@ -57,24 +71,24 @@ pub(super) fn rows(
                         e.local.clone(),
                         e.remote.clone().unwrap_or_else(|| "—".into()),
                         e.state.clone().unwrap_or_else(|| "—".into()),
+                        p.owner.clone().unwrap_or_else(|| "—".into()),
+                        p.session.map_or_else(|| "—".into(), |n| n.to_string()),
                     ],
                 })
             })
             .collect();
         result.sort_by(|a, b| {
-            let column = sort.0.min(5);
+            let column = sort.0.min(7);
             let order = if column == 1 {
-                a.identity.pid.cmp(&b.identity.pid)
+                a.pid.cmp(&b.pid)
+            } else if column == 7 {
+                a.session.cmp(&b.session)
             } else {
                 a.cells[column].cmp(&b.cells[column])
             };
-            let a_session = by_id[&a.identity].session;
-            let b_session = by_id[&b.identity].session;
-            (a_session != Some(snapshot.session))
-                .cmp(&(b_session != Some(snapshot.session)))
-                .then(a_session.cmp(&b_session))
+            group(snapshot, &a.owner, a.session, &b.owner, b.session)
                 .then(if sort.1 { order.reverse() } else { order })
-                .then(a.identity.pid.cmp(&b.identity.pid))
+                .then(a.pid.cmp(&b.pid))
                 .then(a.cells.cmp(&b.cells))
         });
         return result;
@@ -84,34 +98,36 @@ pub(super) fn rows(
         let order = match sort.0 {
             1 => a.identity.pid.cmp(&b.identity.pid),
             2 => a.session.cmp(&b.session),
-            3 => number(a.cpu_percent, b.cpu_percent, sort.1),
-            4 => number(
+            3 => a.owner.cmp(&b.owner),
+            4 => number(a.cpu_percent, b.cpu_percent, sort.1),
+            5 => number(
                 a.working_bytes.map(|n| n as f64),
                 b.working_bytes.map(|n| n as f64),
                 sort.1,
             ),
-            5 => number(
+            6 => number(
                 a.private_bytes.map(|n| n as f64),
                 b.private_bytes.map(|n| n as f64),
                 sort.1,
             ),
             _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         };
-        let order = if sort.1 && !(3..=5).contains(&sort.0) {
+        let order = if sort.1 && !(4..=6).contains(&sort.0) {
             order.reverse()
         } else {
             order
         };
-        (a.session != Some(snapshot.session))
-            .cmp(&(b.session != Some(snapshot.session)))
-            .then(a.session.cmp(&b.session))
+        group(snapshot, &a.owner, a.session, &b.owner, b.session)
             .then(order)
             .then(a.identity.pid.cmp(&b.identity.pid))
             .then(a.identity.created_100ns.cmp(&b.identity.created_100ns))
     };
     processes.sort_by(comparison);
     let make = |p: &Process, depth: usize, children: bool| Row {
-        identity: p.identity,
+        identity: Some(p.identity),
+        pid: p.identity.pid,
+        owner: p.owner.clone(),
+        session: p.session,
         children,
         cells: vec![
             format!(
@@ -138,6 +154,7 @@ pub(super) fn rows(
             ),
             p.identity.pid.to_string(),
             p.session.map_or_else(|| "—".into(), |n| n.to_string()),
+            p.owner.clone().unwrap_or_else(|| "—".into()),
             p.cpu_percent
                 .map_or_else(|| "—".into(), |n| format!("{n:.1}")),
             mib(p.working_bytes),
@@ -148,7 +165,11 @@ pub(super) fn rows(
         ],
     };
     if !tree || !query.is_empty() {
-        return processes.into_iter().map(|p| make(p, 0, false)).collect();
+        return include_unavailable(
+            snapshot,
+            processes.into_iter().map(|p| make(p, 0, false)).collect(),
+            &query,
+        );
     }
     let pid: HashMap<_, _> = processes.iter().map(|p| (p.identity.pid, *p)).collect();
     let mut children: HashMap<Identity, Vec<&Process>> = HashMap::new();
@@ -158,6 +179,7 @@ pub(super) fn rows(
             parent.identity != p.identity
                 && parent.identity.created_100ns < p.identity.created_100ns
                 && parent.session == p.session
+                && parent.owner == p.owner
         }) {
             children.entry(parent.identity).or_default().push(*p);
         } else {
@@ -178,7 +200,75 @@ pub(super) fn rows(
             }
         }
     }
-    output
+    include_unavailable(snapshot, output, &query)
+}
+
+fn group(
+    snapshot: &Snapshot,
+    a: &Option<String>,
+    a_session: Option<u32>,
+    b: &Option<String>,
+    b_session: Option<u32>,
+) -> Ordering {
+    (a.as_deref() != Some(snapshot.owner.as_str()))
+        .cmp(&(b.as_deref() != Some(snapshot.owner.as_str())))
+        .then(a.is_none().cmp(&b.is_none()))
+        .then(a.cmp(b))
+        .then((a_session != Some(snapshot.session)).cmp(&(b_session != Some(snapshot.session))))
+        .then(a_session.is_none().cmp(&b_session.is_none()))
+        .then(a_session.cmp(&b_session))
+}
+fn include_unavailable(snapshot: &Snapshot, rows: Vec<Row>, query: &str) -> Vec<Row> {
+    let mut combined: Vec<_> = rows.into_iter().enumerate().collect();
+    for process in &snapshot.unavailable {
+        if !query.is_empty()
+            && !process.name.to_lowercase().contains(query)
+            && !process.pid.to_string().contains(query)
+            && !process
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.to_lowercase().contains(query))
+        {
+            continue;
+        }
+        combined.push((
+            combined.len(),
+            Row {
+                identity: None,
+                pid: process.pid,
+                owner: process.owner.clone(),
+                session: process.session,
+                children: false,
+                cells: vec![
+                    process.name.clone(),
+                    process.pid.to_string(),
+                    process
+                        .session
+                        .map_or_else(|| "—".into(), |n| n.to_string()),
+                    process.owner.clone().unwrap_or_else(|| "—".into()),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                ],
+            },
+        ));
+    }
+    combined.sort_by(|(a_index, a), (b_index, b)| {
+        group(snapshot, &a.owner, a.session, &b.owner, b.session)
+            .then(a.identity.is_none().cmp(&b.identity.is_none()))
+            .then_with(|| {
+                if a.identity.is_none() && b.identity.is_none() {
+                    a.cells[0]
+                        .to_lowercase()
+                        .cmp(&b.cells[0].to_lowercase())
+                        .then(a.pid.cmp(&b.pid))
+                } else {
+                    a_index.cmp(b_index)
+                }
+            })
+    });
+    combined.into_iter().map(|(_, row)| row).collect()
 }
 
 fn number(a: Option<f64>, b: Option<f64>, descending: bool) -> Ordering {
@@ -202,6 +292,62 @@ fn mib(bytes: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn users_remain_grouped_and_unknown_identity_is_read_only() {
+        let known = |pid, owner: &str, parent| Process {
+            identity: Identity {
+                pid,
+                created_100ns: pid as u64,
+            },
+            parent_pid: parent,
+            name: format!("task-{pid}"),
+            owner: Some(owner.into()),
+            session: Some(1),
+            path: None,
+            cpu_percent: None,
+            working_bytes: None,
+            private_bytes: None,
+            windows: vec![],
+        };
+        let snapshot = Snapshot {
+            schema: 2,
+            platform: "fixture".into(),
+            sampled_unix_ms: 0,
+            owner: "original".into(),
+            execution_owner: "credential".into(),
+            scope: crate::task_service::Scope::AllTasks,
+            session: 1,
+            processes: vec![known(1, "credential", 0), known(2, "original", 1)],
+            unavailable: vec![crate::task_service::UnavailableProcess {
+                pid: 4,
+                parent_pid: 0,
+                name: "Protected task".into(),
+                owner: None,
+                session: None,
+                reason: "Access denied".into(),
+            }],
+            endpoints: vec![],
+            ownership_unavailable: 1,
+            limitations: vec![],
+        };
+        let list = rows(&snapshot, "", false, true, &HashSet::new(), (1, false));
+        assert_eq!(
+            list.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            vec![2, 1, 4]
+        );
+        assert!(list.iter().all(|row| !row.children));
+        let limited = rows(
+            &snapshot,
+            "Protected",
+            false,
+            false,
+            &HashSet::new(),
+            (1, false),
+        );
+        assert_eq!(limited.len(), 1);
+        assert!(limited[0].identity.is_none());
+        assert_eq!(&limited[0].cells[4..7], &["—", "—", "—"]);
+    }
     #[test]
     fn missing_metrics_stay_last_and_recycled_parent_is_not_a_tree_parent() {
         assert_eq!(number(None, Some(1.0), true), Ordering::Greater);

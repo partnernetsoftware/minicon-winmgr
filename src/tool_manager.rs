@@ -32,6 +32,9 @@ pub(crate) fn status() -> String {
         4 => crate::i18n::text("已启动任务工具。").into(),
         5 => crate::i18n::text("任务工具未能打开，可重试。").into(),
         6 => crate::i18n::text("已取消下载任务工具。").into(),
+        7 => crate::i18n::text("等待 Windows 管理员授权…").into(),
+        8 => crate::i18n::text("已取消管理员授权，当前任务未改变。").into(),
+        9 => crate::i18n::text("已打开管理员任务窗口。").into(),
         _ => crate::i18n::text("独立管理自己的进程和网络端点。").into(),
     }
 }
@@ -204,6 +207,12 @@ fn launch(path: &Path, focus: Option<Identity>, language: &str, light: bool) -> 
 
 /// One finite acquisition/launch at a time; no persistent worker or startup I/O.
 pub(crate) fn open(owner: HWND, focus: Option<Identity>) {
+    open_requested(owner, focus, false);
+}
+pub(crate) fn administrator(owner: HWND) {
+    open_requested(owner, None, true);
+}
+fn open_requested(owner: HWND, focus: Option<Identity>, administrator: bool) {
     if BUSY.swap(true, Ordering::AcqRel) {
         dialog(
             owner.0 as isize,
@@ -242,6 +251,16 @@ pub(crate) fn open(owner: HWND, focus: Option<Identity>) {
                     download(&cache)?
                 }
             };
+            if administrator {
+                PHASE.store(7, Ordering::Release);
+                let outcome = minicon_winmgr::task_launch::administrator(&path, owner,
+                    minicon_winmgr::task_launch::Request {
+                        focus, chinese: language == "zh", light, ..Default::default()
+                    })?;
+                PHASE.store(match outcome { minicon_winmgr::task_launch::Outcome::Opened => 9,
+                    minicon_winmgr::task_launch::Outcome::Cancelled => 8 }, Ordering::Release);
+                return Ok(());
+            }
             launch(&path, focus, language, light)?;
             PHASE.store(4, Ordering::Release);
             Ok(())

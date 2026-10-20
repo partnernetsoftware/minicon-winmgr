@@ -44,3 +44,5 @@ scripts/__pycache__/
 
 !scripts/tskmgr_probe.py
 !scripts/tool_entry_probe.py
+!scripts/tcp_capability_probe.py
+!scripts/cross_account_probe.py

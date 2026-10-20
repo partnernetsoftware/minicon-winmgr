@@ -276,6 +276,9 @@ impl Collector {
             .iter()
             .map(|p| (p.identity.pid, p.identity))
             .collect();
+        if let Some(warning) = self.access.debug_warning() {
+            result.limitations.push(warning.into());
+        }
         if cores == 0 {
             result
                 .limitations
@@ -620,7 +623,8 @@ fn activate_in(context: &Access, identity: Identity, window: &str) -> Result<(),
 }
 
 fn close_window_in(context: &Access, identity: Identity, window: &str) -> Result<(), String> {
-    let (_process, hwnd) = checked_window(context, identity, window)?;
+    let (process, hwnd) = checked_window(context, identity, window)?;
+    refuse_critical(process.0)?;
     unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.map_err(|e| e.to_string())
 }
 
@@ -629,16 +633,23 @@ fn terminate_in(context: &Access, identity: Identity) -> Result<(), String> {
         return Err("Use Close to exit this task manager.".into());
     }
     let process = verified_in(context, identity, PROCESS_TERMINATE | PROCESS_SYNCHRONIZE)?;
+    refuse_critical(process.0)?;
     unsafe {
-        let mut critical = ::windows::core::BOOL(0);
-        IsProcessCritical(process.0, &mut critical).map_err(|e| e.to_string())?;
-        if critical.as_bool() {
-            return Err("Windows marks this process as critical; it cannot be ended here.".into());
-        }
         TerminateProcess(process.0, 1).map_err(|e| e.to_string())?;
         if WaitForSingleObject(process.0, 2000) != WAIT_OBJECT_0 {
             return Err("Termination was requested, but the process has not exited yet.".into());
         }
+    }
+    Ok(())
+}
+
+fn refuse_critical(process: HANDLE) -> Result<(), String> {
+    let mut critical = ::windows::core::BOOL(0);
+    unsafe { IsProcessCritical(process, &mut critical) }.map_err(|e| e.to_string())?;
+    if critical.as_bool() {
+        return Err(
+            "Windows marks this process as critical; it cannot be closed or ended here.".into(),
+        );
     }
     Ok(())
 }
@@ -804,6 +815,15 @@ fn command_line_in(context: &Access, identity: Identity) -> Result<String, Strin
 }
 
 impl Access {
+    pub fn identify(&self, pid: u32) -> Result<Identity, String> {
+        let process = Owned(
+            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+                .map_err(|e| e.to_string())?,
+        );
+        let identity = times(process.0, pid).ok_or("The process is unavailable")?.0;
+        verified_in(self, identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
+        Ok(identity)
+    }
     pub fn activate(&self, identity: Identity, window: &str) -> Result<(), String> {
         activate_in(self, identity, window)
     }

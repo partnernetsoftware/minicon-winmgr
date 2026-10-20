@@ -13,7 +13,7 @@ fn main() {
             );
         }
         println!(
-            "minicon-tskmgr {}\n--language en|zh --theme light|dark --focus-pid PID --focus-created FILETIME\n--snapshot-json PATH",
+            "minicon-tskmgr {}\n--language en|zh --theme light|dark --focus-pid PID --focus-created FILETIME\n--search TEXT --network\n--snapshot-json PATH\nUse the UI All users entry for administrator authorization.",
             env!("CARGO_PKG_VERSION")
         );
         return;
@@ -56,8 +56,18 @@ fn main() {
             }
             let mut pid = None;
             let mut created = None;
+            let mut all = false;
+            let mut pipe = None;
+            let mut origin_pid = None;
+            let mut origin_created = None;
             while let Some(argument) = args.next() {
                 match argument.to_str(){
+                    Some("--all-users")=>all=true,
+                    Some("--origin-pipe")=>pipe=Some(args.next().and_then(|v|v.into_string().ok()).ok_or("Expected local caller reference")?),
+                    Some("--origin-pid")=>origin_pid=Some(args.next().and_then(|v|v.into_string().ok()).and_then(|v|v.parse::<u32>().ok()).ok_or("Expected caller PID")?),
+                    Some("--origin-created")=>origin_created=Some(args.next().and_then(|v|v.into_string().ok()).and_then(|v|v.parse::<u64>().ok()).ok_or("Expected caller creation time")?),
+                    Some("--network")=>options.network=true,
+                    Some("--search")=>{ options.search=args.next().and_then(|v|v.into_string().ok()).ok_or("Expected search text")?; if options.search.encode_utf16().count()>512 || options.search.contains('\0') {return Err("Search text is too long or invalid".into());} },
                     Some("--language")=>{options.chinese=match args.next().and_then(|v|v.into_string().ok()).as_deref(){Some("zh")=>true,Some("en")=>false,_=>return Err("Expected --language en or zh".into())};},
                     Some("--theme")=>{options.light=match args.next().and_then(|v|v.into_string().ok()).as_deref(){Some("light")=>true,Some("dark")=>false,_=>return Err("Expected --theme light or dark".into())};},
                     Some("--focus-pid")=>pid=Some(args.next().and_then(|v|v.into_string().ok()).and_then(|v|v.parse::<u32>().ok()).ok_or("Expected process ID")?),
@@ -65,11 +75,33 @@ fn main() {
                     _=>return Err("Arguments: --language en|zh --theme light|dark --focus-pid PID --focus-created FILETIME; or --snapshot-json PATH".into()),
                 }
             }
+            if all {
+                let reference =
+                    pipe.ok_or("Open all tasks through the explicit administrator entry")?;
+                let identity = minicon_winmgr::task_service::Identity {
+                    pid: origin_pid.ok_or("Missing verified caller PID")?,
+                    created_100ns: origin_created.ok_or("Missing caller creation time")?,
+                };
+                // Authorization and peer verification precede all instance/UI work.
+                options.access = Some(
+                    minicon_winmgr::task_access::Access::administrator_from_origin(
+                        &reference, identity,
+                    )?,
+                );
+            } else if pipe.is_some() || origin_pid.is_some() || origin_created.is_some() {
+                return Err("Caller references require the explicit administrator role".into());
+            }
+            if created.is_some() && pid.is_none() {
+                return Err("Creation time requires a target PID".into());
+            }
             if let Some(pid) = pid {
                 options.focus = Some(if let Some(created_100ns) = created {
                     minicon_winmgr::task_service::Identity { pid, created_100ns }
                 } else {
-                    minicon_winmgr::task_service::identify(pid)?
+                    match &options.access {
+                        Some(access) => access.identify(pid)?,
+                        None => minicon_winmgr::task_service::identify(pid)?,
+                    }
                 });
             }
             minicon_winmgr::task_ui::run(options)

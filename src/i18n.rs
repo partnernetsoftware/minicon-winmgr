@@ -69,6 +69,19 @@ macro_rules! ui_format {
     ($zh:literal,$en:literal $(,$($args:tt)*)?)=>{if $crate::i18n::language()==$crate::i18n::Language::En {format!($en $(,$($args)*)?)}else{format!($zh $(,$($args)*)?)}};
 }
 const CATALOG: &[(&str, &str)] = &[
+    (
+        "所有用户与系统任务（管理员）…",
+        "All users and system tasks (administrator)…",
+    ),
+    (
+        "等待 Windows 管理员授权…",
+        "Waiting for Windows administrator authorization…",
+    ),
+    (
+        "已取消管理员授权，当前任务未改变。",
+        "Administrator authorization cancelled; tasks unchanged.",
+    ),
+    ("已打开管理员任务窗口。", "Administrator tasks opened."),
     ("我的任务…", "My tasks…"),
     ("Windows 任务管理器…", "Windows Task Manager…"),
     ("在我的任务中定位…", "Find in my tasks…"),
