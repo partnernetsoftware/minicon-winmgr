@@ -29,6 +29,25 @@ fn hosted() {
 #[test]
 #[ignore = "owned standard-account fixture; created only by the hosted CI driver"]
 fn origin_fixture() {
+    let result = std::panic::catch_unwind(origin_fixture_run);
+    if let Err(error) = result {
+        if let Some(destination) = std::env::var_os("MINICON_CI_ORIGIN_REPORT") {
+            let text = error
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    error
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).into())
+                })
+                .unwrap_or_else(|| "Non-string fixture panic".into());
+            let _ = std::fs::write(PathBuf::from(destination).with_extension("error"), text);
+        }
+        std::panic::resume_unwind(error);
+    }
+}
+
+fn origin_fixture_run() {
     hosted();
     assert!(!elevated().unwrap());
     let own = Access::current().unwrap();
@@ -97,6 +116,30 @@ fn parent_retains_original_user_with_different_credentials() {
         ..Default::default()
     };
     let mut info = PROCESS_INFORMATION::default();
+    // Unlike CreateProcessW, a null environment here creates the target user's
+    // profile environment. Supply only fixture references, never credentials or
+    // a claimed account identity as authority; the real token is still checked.
+    let mut variables: Vec<_> = [
+        "SystemRoot",
+        "WINDIR",
+        "GITHUB_ACTIONS",
+        "RUNNER_ENVIRONMENT",
+        "MINICON_CI_USER_SID",
+        "MINICON_CI_ORIGIN_REPORT",
+    ]
+    .into_iter()
+    .filter_map(|key| std::env::var_os(key).map(|value| (key, value)))
+    .collect();
+    variables.sort_by_key(|(key, _)| key.to_ascii_lowercase());
+    use std::os::windows::ffi::OsStrExt;
+    let mut environment = Vec::<u16>::new();
+    for (key, value) in variables {
+        environment.extend(key.encode_utf16());
+        environment.push(b'=' as u16);
+        environment.extend(value.encode_wide());
+        environment.push(0);
+    }
+    environment.push(0);
     let launched = unsafe {
         CreateProcessWithLogonW(
             PCWSTR(user.as_ptr()),
@@ -105,8 +148,8 @@ fn parent_retains_original_user_with_different_credentials() {
             CREATE_PROCESS_LOGON_FLAGS(0),
             PCWSTR(file.as_ptr()),
             Some(PWSTR(arguments.as_mut_ptr())),
-            CREATE_NO_WINDOW,
-            None,
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            Some(environment.as_ptr().cast()),
             None,
             &startup,
             &mut info,
@@ -140,7 +183,9 @@ fn parent_retains_original_user_with_different_credentials() {
         assert_eq!(
             unsafe { WaitForSingleObject(child.0.hProcess, 0) },
             WAIT_TIMEOUT,
-            "Owned standard fixture exited before identity handoff: {code:#x}"
+            "Owned standard fixture exited before identity handoff: {code:#x}; {}",
+            std::fs::read_to_string(destination.with_extension("error"))
+                .unwrap_or_else(|_| "No fixture panic report".into())
         );
         assert!(
             started.elapsed() < Duration::from_secs(12),

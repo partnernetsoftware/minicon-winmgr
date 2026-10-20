@@ -19,6 +19,8 @@
 
 第二轮 [39374785088](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39374785088)，提交 `e2220fc`，产品源码未改变：质量和前述原生组件再次通过；跨账户 fixture 已创建并清理自有账户，但添加组成员的管道参数绑定失败，尚未执行令牌交接。改为显式组 SID，并将该验证前移：账户准备失败立即结束，成功后才编译和运行对应身份测试。没有放宽产品身份断言。
 
+第三轮 [39375414253](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39375414253)，提交 `6b7e61b`：账户准备和对应编译通过，标准账户子进程实际启动，但在身份交接前以 101 退出，没有取得子进程错误详情。核对微软 [CreateProcessWithLogonW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw) 契约后发现，空环境参数会创建目标账户环境，而不是继承测试变量。驱动改为显式传入最少测试引用和系统变量，排除密码；同时保存子进程 panic 原因。失败原因及跨账户结果仍需下一轮直接核实，不以接口分析冒充通过。
+
 ## 人工授权与环境边界
 
 真实 UAC 批准、取消尚未执行。每次只说明当次操作；由用户手动选择，不操作安全桌面。跨账户 CI 使用一次性 hosted Windows VM 的自有标准账户，不修改工作站账户，也不能证明凭据输入界面已验收。
