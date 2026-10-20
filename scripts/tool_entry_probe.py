@@ -8,6 +8,7 @@ parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--main',type=Path,required=True)
 parser.add_argument('--tool',type=Path,required=True)
 parser.add_argument('--restore-exe',type=Path,required=True)
+parser.add_argument('--public-download',action='store_true',help='Acquire from the matching public tag instead of preparing local files')
 args=parser.parse_args()
 main=args.main.resolve(strict=True);tool=args.tool.resolve(strict=True)
 # Derive names/version from the candidate, never from the working tree.
@@ -49,31 +50,44 @@ try:
   assert version in '\n'.join(texts) and 'Download and open' in '\n'.join(texts)
   assert p.u.SendMessageW(dlg,0x400,0,0)&0xffff==7
   desktop.send(p.message(),0x8000+142,pid=child.pid)
-  p.u.SendMessageW(p.u.GetDlgItem(dlg,7),0xf5,0,0)
-  p.wait(lambda:'cancelled' in p.text(p.ctrl(6412)))
-  assert not task_window()
-  report['missing_tool_cancel_and_responsive_shell']=True
-  sums=f'{s.digest(main)}  minicon-winmgr-v{version}-x86_64-windows.exe\n{s.digest(tool)}  {tool.name}\n'
-  (p.LIVE.parent/'SHA256SUMS.txt').write_text(sums,encoding='ascii')
-  sibling=p.LIVE.parent/tool.name;shutil.copy2(tool,sibling)
-  p.click(6410);hwnd=p.wait(task_window);owned.append(hwnd)
-  process=m.Process(p.pid(hwnd))
-  try:assert desktop.image(process)==sibling.resolve()
-  finally:process.close()
-  assert child.poll() is None
-  close_tool(hwnd);owned.remove(hwnd)
-  assert child.poll() is None
-  report['verified_sibling_entry_and_independent_exit']=True
-  cache=out/'profile/minicon-winmgr/tools'/version;cache.mkdir(parents=True)
-  shutil.move(sibling,cache/tool.name);(cache/'SHA256SUMS.txt').write_text(sums,encoding='ascii')
-  p.click(6410);hwnd=p.wait(task_window);owned.append(hwnd)
-  process=m.Process(p.pid(hwnd))
-  try:assert desktop.image(process)==(cache/tool.name).resolve()
-  finally:process.close()
-  assert child.poll() is None
-  close_tool(hwnd);owned.remove(hwnd)
-  report['verified_versioned_cache_entry']=True
-  p.capture_settings(out/'entry-en-dark.png',p.panel())
+  if args.public_download:
+   p.u.SendMessageW(p.u.GetDlgItem(dlg,6),0xf5,0,0)
+   hwnd=p.wait(task_window,timeout=90);owned.append(hwnd)
+   process=m.Process(p.pid(hwnd))
+   try:
+    actual=desktop.image(process)
+    assert actual.is_relative_to(out/'profile/minicon-winmgr/tools'/version)
+    assert process.image_hash==s.digest(tool)
+   finally:process.close()
+   assert child.poll() is None
+   close_tool(hwnd);owned.remove(hwnd)
+   report['matching_public_tag_download_verified_and_opened']=True
+  else:
+   p.u.SendMessageW(p.u.GetDlgItem(dlg,7),0xf5,0,0)
+   p.wait(lambda:'cancelled' in p.text(p.ctrl(6412)))
+   assert not task_window()
+   report['missing_tool_cancel_and_responsive_shell']=True
+   sums=f'{s.digest(main)}  minicon-winmgr-v{version}-x86_64-windows.exe\n{s.digest(tool)}  {tool.name}\n'
+   (p.LIVE.parent/'SHA256SUMS.txt').write_text(sums,encoding='ascii')
+   sibling=p.LIVE.parent/tool.name;shutil.copy2(tool,sibling)
+   p.click(6410);hwnd=p.wait(task_window);owned.append(hwnd)
+   process=m.Process(p.pid(hwnd))
+   try:assert desktop.image(process)==sibling.resolve()
+   finally:process.close()
+   assert child.poll() is None
+   close_tool(hwnd);owned.remove(hwnd)
+   assert child.poll() is None
+   report['verified_sibling_entry_and_independent_exit']=True
+   cache=out/'profile/minicon-winmgr/tools'/version;cache.mkdir(parents=True)
+   shutil.move(sibling,cache/tool.name);(cache/'SHA256SUMS.txt').write_text(sums,encoding='ascii')
+   p.click(6410);hwnd=p.wait(task_window);owned.append(hwnd)
+   process=m.Process(p.pid(hwnd))
+   try:assert desktop.image(process)==(cache/tool.name).resolve()
+   finally:process.close()
+   assert child.poll() is None
+   close_tool(hwnd);owned.remove(hwnd)
+   report['verified_versioned_cache_entry']=True
+   p.capture_settings(out/'entry-en-dark.png',p.panel())
  report['original_desktop_restored']=bool(isolation['restored'])
  report['passed']=report['original_desktop_restored']
 except BaseException as error:
