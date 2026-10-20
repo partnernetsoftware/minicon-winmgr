@@ -21,6 +21,16 @@
 
 第三轮 [39375414253](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39375414253)，提交 `6b7e61b`：账户准备和对应编译通过，标准账户子进程实际启动，但在身份交接前以 101 退出，没有取得子进程错误详情。核对微软 [CreateProcessWithLogonW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw) 契约后发现，空环境参数会创建目标账户环境，而不是继承测试变量。驱动改为显式传入最少测试引用和系统变量，排除密码；同时保存子进程 panic 原因。失败原因及跨账户结果仍需下一轮直接核实，不以接口分析冒充通过。
 
+第四轮 [39375784633](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39375784633) 全部通过，提交 `8a6e1b5661f049af53108258f99c11ad857b121d`。实际日志确认具名跨账户测试执行通过：原标准用户保留、执行账户不同、普通范围约束和实例隔离成立，且自有临时账户已移除。质量、优化普通单元、原生菜单退出、现有管理员上下文与 TCP 能力观察均通过。
+
+已下载该 run 的两个 exe，并核对构建记录：
+
+- 产品源码指纹：`92190128a7f7f50682a32c172991658bd936a27fa8efdbd810bcb0ba7a44534a`
+- Winmgr SHA-256：`347d163952e7ba563e9f624448f2820946afae1b23e066e503a12f865b8b248b`
+- Tskmgr SHA-256：`52a8a12f368364e4f18828560cc74d6339272845f329bff99400bf20ec7582fc`
+
+准确工具的定向普通冒烟在输入桌面检查阶段停止：无法打开当前输入桌面，尚未启动工具、测试目标或 UAC，不计为功能失败或通过。等待用户解锁后再运行此路径；不重跑已通过的 CI 组件。
+
 ## 人工授权与环境边界
 
 真实 UAC 批准、取消尚未执行。每次只说明当次操作；由用户手动选择，不操作安全桌面。跨账户 CI 使用一次性 hosted Windows VM 的自有标准账户，不修改工作站账户，也不能证明凭据输入界面已验收。
