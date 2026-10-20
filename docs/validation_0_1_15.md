@@ -1,6 +1,6 @@
 # 0.1.15 验收记录
 
-状态：已合 main 并于 2026-10-20 02:59:59 UTC 公开为 [v0.1.15 Latest](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.15)，非草稿、非预发布；真实公开 .14 → .15 更新通过，原环境恢复。范围见[版本计划](plan_0_1_15.md)与[更新文件名规格](update_filename_fix.md)。本页只记录可公开摘要，原始报告和截图保留在忽略目录。
+状态：已合 main 并于 2026-10-20 02:59:59 UTC 公开为 [v0.1.15 Latest](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.15)，非草稿、非预发布；真实公开 .14 → .15 更新通过，原环境恢复。范围见[版本计划](archive/plan_0_1_15.md)与[更新文件名规格](update_filename_fix.md)。本页只记录可公开摘要，原始报告和截图保留在忽略目录。
 
 ## 准确候选
 

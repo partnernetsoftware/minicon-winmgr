@@ -1,6 +1,6 @@
 # 代码与文档地图
 
-> 2026-10-18 · 当前公开版 0.1.12；实际范围见[实施计划](archive/plan_0_1_12.md)，证据与限制见[验收记录](validation_0_1_12.md)。[本轮梳理](review_0_1_12.md)保留开发前发现。
+> 2026-10-20 · 当前公开版 0.1.16；实际范围见[实施计划](plan_0_1_16.md)，证据与限制见[验收记录](validation_0_1_16.md)。[本轮梳理](review_0_1_12.md)保留开发前发现。
 
 | 用户路径 | 主要实现 | 规格/证据 |
 |---|---|---|
@@ -13,9 +13,10 @@
 | 兼容的旧菜单、快捷固定项、文件夹 | `start_menu`、`quick_launch`、`folder_stack`、`recents` | [后续清单](prd_5_1.md)；默认 UI 入口已退役 |
 | 外壳接管与回滚 | `shell_registry`、`shell_recovery`、`shell_swap` | [外壳规格](prd_3_1.md)、[验收边界](validation_0_1_12.md) |
 | 手动更新与交接 | `update`、`update_cancel`、`update_http`、`update_install`、`update_stream` | [更新设计](archive/plan_0_1_9.md) |
+| 独立任务工具与定位 | `bin/minicon-tskmgr`、`task_service` / `task_service/windows`、`task_ui` / `task_ui/view`、`tool_manager`、`palette` | [工具 PRD](prd_7_1.md)、[.16 验收](validation_0_1_16.md) |
 | 诊断、导出、指标与日志 | `diagnostics`、`diagnostic_ui`、`diagnostic_export`、`metrics`、`logging`、`log_store` | [资源审计](resources_0_1_10.md)、[已验范围](validation_0_1_10.md) |
 
-`lib.rs` 目前为空；实际产品模块由 `main.rs` 组装。重叠职责以调用链判断，不把文件数量当作重构目标。
+`main.rs` 组装轻量外壳；`bin/minicon-tskmgr.rs` 是独立工具入口。`lib.rs` 导出共享色板、平台无关任务模型及 Windows 查询/动作和原生工具 UI；`win_util` 共享源码，各宿主只使用所需部分。重叠职责以调用链判断，不把文件数量当作重构目标。
 
 ## 已交付基础与覆盖边界
 
@@ -56,3 +57,5 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 0.1.11 已公开：管理员启动必须通过真实普通权限令牌完成自重启；失败不进入外壳主路径。任务栏时钟为 `Www yyyy-mm-dd HH:MM`，Run 增加上下键文本预览及草稿恢复；检查与覆盖限制见[验收记录](validation_0_1_11.md)。
 
 0.1.12 实施：`shell_recovery` 负责账户操作互斥与身份绑定的原始登记记录；`shell_registry` 保留原始类型/字节并复读写入结果；`settings_ui` 的后台交接通过 `window` 消息让 UI 线程安装/释放通知宿主。`window::complete_startup` 统一成功信号，失败不写更新回执。
+
+0.1.16：`tool_manager` 负责同版工具校验、显式后台下载和版本缓存；主程序更新协议保持单 exe，发布清单和校验表同时绑定两份 exe。`task_service` 提供 PID/创建时间身份、指标与端点；`task_ui` 使用有界 worker，结束进程默认取消。外壳退出在销毁消息窗口前结束当前线程的原生菜单，避免菜单仍等待输入。相关测试按[影响路径](testing.md)选择。
