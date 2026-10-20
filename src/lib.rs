@@ -1,5 +1,7 @@
 //! Reusable product capabilities; UI and platform adapters have separate roles.
 pub mod palette;
+#[cfg(windows)]
+pub mod task_access;
 pub mod task_service;
 #[cfg(windows)]
 pub mod task_ui;

@@ -6,6 +6,8 @@ mod windows;
 #[cfg(windows)]
 pub use windows::Collector;
 #[cfg(windows)]
+pub(crate) use windows::actor_for_process;
+#[cfg(windows)]
 pub use windows::{
     activate, close_window, command_line, elevated, identify, open_location, terminate,
     user_context,
@@ -24,18 +26,45 @@ pub struct Identity {
     pub created_100ns: u64,
 }
 
+/// An observed caller; this record alone does not grant an operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Actor {
+    pub identity: Identity,
+    pub owner: String,
+    pub session: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    #[default]
+    OwnTasks,
+    AllTasks,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Process {
     pub identity: Identity,
     pub parent_pid: u32,
     pub name: String,
-    pub owner: String,
+    pub owner: Option<String>,
     pub session: Option<u32>,
     pub path: Option<String>,
     pub cpu_percent: Option<f64>,
     pub working_bytes: Option<u64>,
     pub private_bytes: Option<u64>,
     pub windows: Vec<Window>,
+}
+
+/// Enumerated metadata without a verified process identity. Never an action target.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UnavailableProcess {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub name: String,
+    pub owner: Option<String>,
+    pub session: Option<u32>,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,8 +82,11 @@ pub struct Snapshot {
     pub platform: String,
     pub sampled_unix_ms: u128,
     pub owner: String,
+    pub execution_owner: String,
+    pub scope: Scope,
     pub session: u32,
     pub processes: Vec<Process>,
+    pub unavailable: Vec<UnavailableProcess>,
     pub endpoints: Vec<Endpoint>,
     pub ownership_unavailable: usize,
     pub limitations: Vec<String>,

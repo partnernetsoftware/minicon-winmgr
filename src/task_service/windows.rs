@@ -1,5 +1,8 @@
 //! Windows read-only sampling. No shell state, elevation or UI dependencies.
-use super::{Endpoint, Identity, Process, Snapshot, Window, cpu_percent};
+use super::{
+    Endpoint, Identity, Process, Scope, Snapshot, UnavailableProcess, Window, cpu_percent,
+};
+use crate::task_access::Access;
 use ::windows::{
     Win32::{
         Foundation::*,
@@ -120,25 +123,21 @@ fn enumeration(result: ::windows::core::Result<()>) -> Result<bool, String> {
 }
 
 pub struct Collector {
-    owner: String,
-    session: u32,
+    access: Access,
     previous: HashMap<Identity, u64>,
     sampled: Option<Instant>,
 }
 
 impl Collector {
     pub fn new() -> Result<Self, String> {
-        let owner = sid(unsafe { GetCurrentProcess() })?;
-        let mut session = 0;
-        unsafe {
-            ProcessIdToSessionId(GetCurrentProcessId(), &mut session).map_err(|e| e.to_string())?;
-        }
-        Ok(Self {
-            owner,
-            session,
+        Ok(Self::with_access(Access::current()?))
+    }
+    pub fn with_access(access: Access) -> Self {
+        Self {
+            access,
             previous: HashMap::new(),
             sampled: None,
-        })
+        }
     }
 
     pub fn sample(&mut self) -> Result<Snapshot, String> {
@@ -157,16 +156,41 @@ impl Collector {
         };
         let mut rows = Vec::new();
         let mut unknown = 0;
+        let mut unavailable = Vec::new();
+        let all = self.access.scope() == Scope::AllTasks;
+        if all && !elevated()? {
+            return Err("Administrator authorization is no longer available".into());
+        }
         let mut next = HashMap::new();
         let mut available = enumeration(unsafe { Process32FirstW(snapshot.0, &mut entry) })?;
         while available {
             let pid = entry.th32ProcessID;
-            if let Ok(handle) =
-                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
-            {
-                let process = Owned(handle);
-                match sid(process.0) {
-                    Ok(owner) if owner == self.owner => {
+            let end = entry
+                .szExeFile
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+            let mut session = 0;
+            let session = unsafe { ProcessIdToSessionId(pid, &mut session) }
+                .ok()
+                .map(|_| session);
+            let unreadable = |owner, reason| UnavailableProcess {
+                pid,
+                parent_pid: entry.th32ParentProcessID,
+                name: name.clone(),
+                owner,
+                session,
+                reason,
+            };
+            match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+                Ok(handle) => {
+                    let process = Owned(handle);
+                    let owner = sid(process.0).ok();
+                    if owner.is_none() {
+                        unknown += 1;
+                    }
+                    if all || owner.as_deref() == Some(self.access.origin().owner.as_str()) {
                         if let Some((identity, total)) = times(process.0, pid) {
                             let cpu = elapsed.and_then(|seconds| {
                                 cpu_percent(
@@ -178,20 +202,11 @@ impl Collector {
                                 )
                             });
                             next.insert(identity, total);
-                            let mut session = 0;
-                            let session = unsafe { ProcessIdToSessionId(pid, &mut session) }
-                                .ok()
-                                .map(|_| session);
                             let memory = memory(pid);
-                            let end = entry
-                                .szExeFile
-                                .iter()
-                                .position(|c| *c == 0)
-                                .unwrap_or(entry.szExeFile.len());
                             rows.push(Process {
                                 identity,
                                 parent_pid: entry.th32ParentProcessID,
-                                name: String::from_utf16_lossy(&entry.szExeFile[..end]),
+                                name,
                                 owner,
                                 session,
                                 path: path(process.0),
@@ -201,18 +216,33 @@ impl Collector {
                                 windows: Vec::new(),
                             });
                         } else {
-                            unknown += 1;
+                            if owner.is_some() {
+                                unknown += 1;
+                            }
+                            if all {
+                                unavailable.push(unreadable(
+                                    owner,
+                                    "Creation time unavailable or process exited".into(),
+                                ));
+                            }
                         }
                     }
-                    Ok(_) => (),
-                    Err(_) => unknown += 1,
                 }
-            } else {
-                unknown += 1;
+                Err(error) => {
+                    unknown += 1;
+                    if all {
+                        unavailable.push(unreadable(None, error.to_string()));
+                    }
+                }
             }
             available = enumeration(unsafe { Process32NextW(snapshot.0, &mut entry) })?;
         }
-        rows.sort_by_key(|process| (process.session != Some(self.session), process.identity.pid));
+        rows.sort_by_key(|process| {
+            (
+                process.session != Some(self.access.origin().session),
+                process.identity.pid,
+            )
+        });
         let mut by_pid: HashMap<u32, Vec<Window>> = HashMap::new();
         unsafe {
             EnumWindows(
@@ -225,14 +255,17 @@ impl Collector {
             process.windows = by_pid.remove(&process.identity.pid).unwrap_or_default();
         }
         let mut result = Snapshot {
-            schema: 1,
+            schema: 2,
             platform: "windows".into(),
             sampled_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|e| e.to_string())?
                 .as_millis(),
-            owner: self.owner.clone(),
-            session: self.session,
+            owner: self.access.origin().owner.clone(),
+            execution_owner: self.access.execution().owner.clone(),
+            scope: self.access.scope(),
+            session: self.access.origin().session,
+            unavailable,
             processes: rows,
             endpoints: Vec::new(),
             ownership_unavailable: unknown,
@@ -437,7 +470,14 @@ unsafe extern "system" fn visible_window(hwnd: HWND, data: LPARAM) -> ::windows:
     )
 }
 
-fn verified(identity: Identity, access: PROCESS_ACCESS_RIGHTS) -> Result<Owned, String> {
+fn verified_in(
+    context: &Access,
+    identity: Identity,
+    access: PROCESS_ACCESS_RIGHTS,
+) -> Result<Owned, String> {
+    if context.scope() == Scope::AllTasks && !elevated()? {
+        return Err("Administrator authorization is no longer available".into());
+    }
     let process = Owned(
         unsafe {
             OpenProcess(
@@ -451,10 +491,14 @@ fn verified(identity: Identity, access: PROCESS_ACCESS_RIGHTS) -> Result<Owned, 
     if times(process.0, identity.pid).is_none_or(|(current, _)| current != identity) {
         return Err("The process exited or its identity changed. Refresh the list.".into());
     }
-    if sid(process.0)? != sid(unsafe { GetCurrentProcess() })? {
+    if context.scope() == Scope::OwnTasks && sid(process.0)? != context.origin().owner {
         return Err("This entry manages only the current user's processes.".into());
     }
     Ok(process)
+}
+
+fn verified(identity: Identity, rights: PROCESS_ACCESS_RIGHTS) -> Result<Owned, String> {
+    verified_in(&Access::current()?, identity, rights)
 }
 
 pub fn identify(pid: u32) -> Result<Identity, String> {
@@ -465,6 +509,37 @@ pub fn identify(pid: u32) -> Result<Identity, String> {
     let (identity, _) = times(process.0, pid).ok_or("The process is unavailable")?;
     verified(identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
     Ok(identity)
+}
+
+/// Read the actual process token, without applying an "own tasks" filter.
+/// The authenticated startup path uses this to preserve a different caller SID.
+pub(crate) fn actor_for_process(pid: u32) -> Result<super::Actor, String> {
+    let process = Owned(
+        unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+        }
+        .map_err(|e| e.to_string())?,
+    );
+    let identity = times(process.0, pid)
+        .ok_or("Caller identity is unavailable")?
+        .0;
+    let owner = sid(process.0)?;
+    let mut session = 0;
+    unsafe { ProcessIdToSessionId(pid, &mut session) }.map_err(|e| e.to_string())?;
+    if times(process.0, pid).is_none_or(|(current, _)| current != identity)
+        || unsafe { WaitForSingleObject(process.0, 0) } != WAIT_TIMEOUT
+    {
+        return Err("Caller exited or changed during identity verification".into());
+    }
+    Ok(super::Actor {
+        identity,
+        owner,
+        session,
+    })
 }
 
 pub fn user_context() -> Result<(String, u32), String> {
@@ -498,8 +573,12 @@ pub fn elevated() -> Result<bool, String> {
     Ok(value.TokenIsElevated != 0)
 }
 
-fn checked_window(identity: Identity, window: &str) -> Result<(Owned, HWND), String> {
-    let process = verified(identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
+fn checked_window(
+    context: &Access,
+    identity: Identity,
+    window: &str,
+) -> Result<(Owned, HWND), String> {
+    let process = verified_in(context, identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
     let value = usize::from_str_radix(window, 16).map_err(|_| "Invalid window identity")?;
     let hwnd = HWND(value as *mut _);
     let mut pid = 0;
@@ -512,8 +591,8 @@ fn checked_window(identity: Identity, window: &str) -> Result<(Owned, HWND), Str
     Ok((process, hwnd))
 }
 
-pub fn activate(identity: Identity, window: &str) -> Result<(), String> {
-    let (_process, hwnd) = checked_window(identity, window)?;
+fn activate_in(context: &Access, identity: Identity, window: &str) -> Result<(), String> {
+    let (_process, hwnd) = checked_window(context, identity, window)?;
     let mut response = 0;
     if unsafe {
         SendMessageTimeoutW(
@@ -540,16 +619,16 @@ pub fn activate(identity: Identity, window: &str) -> Result<(), String> {
     }
 }
 
-pub fn close_window(identity: Identity, window: &str) -> Result<(), String> {
-    let (_process, hwnd) = checked_window(identity, window)?;
+fn close_window_in(context: &Access, identity: Identity, window: &str) -> Result<(), String> {
+    let (_process, hwnd) = checked_window(context, identity, window)?;
     unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.map_err(|e| e.to_string())
 }
 
-pub fn terminate(identity: Identity) -> Result<(), String> {
+fn terminate_in(context: &Access, identity: Identity) -> Result<(), String> {
     if identity.pid == unsafe { GetCurrentProcessId() } {
         return Err("Use Close to exit this task manager.".into());
     }
-    let process = verified(identity, PROCESS_TERMINATE | PROCESS_SYNCHRONIZE)?;
+    let process = verified_in(context, identity, PROCESS_TERMINATE | PROCESS_SYNCHRONIZE)?;
     unsafe {
         let mut critical = ::windows::core::BOOL(0);
         IsProcessCritical(process.0, &mut critical).map_err(|e| e.to_string())?;
@@ -581,12 +660,12 @@ fn com(mode: ::windows::Win32::System::Com::COINIT) -> Result<Com, String> {
     Ok(Com)
 }
 
-pub fn open_location(identity: Identity) -> Result<(), String> {
+fn open_location_in(context: &Access, identity: Identity) -> Result<(), String> {
     use ::windows::{
         Win32::{System::Com::*, UI::Shell::*},
         core::PCWSTR,
     };
-    let process = verified(identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let process = verified_in(context, identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
     let path = path(process.0).ok_or("Executable path is unavailable")?;
     let _com = com(COINIT_APARTMENTTHREADED)?;
     let mut pidl = std::ptr::null_mut();
@@ -638,12 +717,12 @@ fn wmi_created(value: &str) -> Option<u64> {
 }
 
 /// Called only by a dedicated detail worker, never by the UI or sampler.
-pub fn command_line(identity: Identity) -> Result<String, String> {
+fn command_line_in(context: &Access, identity: Identity) -> Result<String, String> {
     use ::windows::{
         Win32::System::{Com::*, Variant::*, Wmi::*},
         core::{BSTR, PCWSTR},
     };
-    let process = verified(identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let process = verified_in(context, identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
     let _com = com(COINIT_MULTITHREADED)?;
     unsafe {
         let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)
@@ -722,6 +801,39 @@ pub fn command_line(identity: Identity) -> Result<String, String> {
             Ok(command)
         }
     }
+}
+
+impl Access {
+    pub fn activate(&self, identity: Identity, window: &str) -> Result<(), String> {
+        activate_in(self, identity, window)
+    }
+    pub fn close_window(&self, identity: Identity, window: &str) -> Result<(), String> {
+        close_window_in(self, identity, window)
+    }
+    pub fn terminate(&self, identity: Identity) -> Result<(), String> {
+        terminate_in(self, identity)
+    }
+    pub fn open_location(&self, identity: Identity) -> Result<(), String> {
+        open_location_in(self, identity)
+    }
+    pub fn command_line(&self, identity: Identity) -> Result<String, String> {
+        command_line_in(self, identity)
+    }
+}
+pub fn activate(identity: Identity, window: &str) -> Result<(), String> {
+    Access::current()?.activate(identity, window)
+}
+pub fn close_window(identity: Identity, window: &str) -> Result<(), String> {
+    Access::current()?.close_window(identity, window)
+}
+pub fn terminate(identity: Identity) -> Result<(), String> {
+    Access::current()?.terminate(identity)
+}
+pub fn open_location(identity: Identity) -> Result<(), String> {
+    Access::current()?.open_location(identity)
+}
+pub fn command_line(identity: Identity) -> Result<String, String> {
+    Access::current()?.command_line(identity)
 }
 
 #[cfg(test)]

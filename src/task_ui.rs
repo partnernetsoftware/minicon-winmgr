@@ -826,7 +826,7 @@ fn selected_detail(hwnd: HWND) {
                     .session
                     .map_or_else(|| "—".into(), |n| n.to_string()),
                 text("Owner", "所属用户"),
-                process.owner,
+                process.owner.as_deref().unwrap_or("—"),
                 text("Executable", "程序路径"),
                 process.path.as_deref().unwrap_or("—"),
                 text("Command line", "命令行"),
