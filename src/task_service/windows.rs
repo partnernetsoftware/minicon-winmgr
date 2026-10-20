@@ -1,5 +1,5 @@
 //! Windows read-only sampling. No shell state, elevation or UI dependencies.
-use super::{Endpoint, Identity, Process, Snapshot, cpu_percent};
+use super::{Endpoint, Identity, Process, Snapshot, Window, cpu_percent};
 use ::windows::{
     Win32::{
         Foundation::*,
@@ -9,6 +9,7 @@ use ::windows::{
             Diagnostics::ToolHelp::*, ProcessStatus::*, RemoteDesktop::ProcessIdToSessionId,
             Threading::*,
         },
+        UI::WindowsAndMessaging::*,
     },
     core::{HRESULT, PWSTR},
 };
@@ -145,7 +146,8 @@ impl Collector {
         let elapsed = self
             .sampled
             .map(|prior| now.duration_since(prior).as_secs_f64());
-        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        // The denominator is the whole system, not this tool's CPU affinity.
+        let cores = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) } as usize;
         let snapshot = Owned(unsafe {
             CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(|e| e.to_string())?
         });
@@ -196,6 +198,7 @@ impl Collector {
                                 cpu_percent: cpu,
                                 working_bytes: memory.map(|m| m.0),
                                 private_bytes: memory.map(|m| m.1),
+                                windows: Vec::new(),
                             });
                         } else {
                             unknown += 1;
@@ -210,6 +213,17 @@ impl Collector {
             available = enumeration(unsafe { Process32NextW(snapshot.0, &mut entry) })?;
         }
         rows.sort_by_key(|process| (process.session != Some(self.session), process.identity.pid));
+        let mut by_pid: HashMap<u32, Vec<Window>> = HashMap::new();
+        unsafe {
+            EnumWindows(
+                Some(visible_window),
+                LPARAM((&mut by_pid as *mut HashMap<u32, Vec<Window>>) as isize),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        for process in &mut rows {
+            process.windows = by_pid.remove(&process.identity.pid).unwrap_or_default();
+        }
         let mut result = Snapshot {
             schema: 1,
             platform: "windows".into(),
@@ -229,6 +243,11 @@ impl Collector {
             .iter()
             .map(|p| (p.identity.pid, p.identity))
             .collect();
+        if cores == 0 {
+            result
+                .limitations
+                .push("CPU percentages unavailable: cannot query active processor count".into());
+        }
         for (family, tcp) in [(2, true), (23, true), (2, false), (23, false)] {
             match endpoints(family, tcp, &owners) {
                 Ok(endpoints) => result.endpoints.extend(endpoints),
@@ -387,4 +406,368 @@ fn endpoints(
         }
     }
     Ok(output)
+}
+
+unsafe extern "system" fn visible_window(hwnd: HWND, data: LPARAM) -> ::windows::core::BOOL {
+    crate::win_util::guard_abi(
+        "task window enumeration",
+        || {
+            unsafe {
+                if !IsWindowVisible(hwnd).as_bool()
+                    || GetWindow(hwnd, GW_OWNER).is_ok_and(|owner| !owner.is_invalid())
+                    || GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0
+                {
+                    return ::windows::core::BOOL(1);
+                }
+                let mut title = [0u16; 1024];
+                let length = GetWindowTextW(hwnd, &mut title);
+                if length > 0 {
+                    let mut pid = 0;
+                    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                    let rows = &mut *(data.0 as *mut HashMap<u32, Vec<Window>>);
+                    rows.entry(pid).or_default().push(Window {
+                        id: format!("{:x}", hwnd.0 as usize),
+                        title: String::from_utf16_lossy(&title[..length as usize]),
+                    });
+                }
+            }
+            ::windows::core::BOOL(1)
+        },
+        || ::windows::core::BOOL(0),
+    )
+}
+
+fn verified(identity: Identity, access: PROCESS_ACCESS_RIGHTS) -> Result<Owned, String> {
+    let process = Owned(
+        unsafe {
+            OpenProcess(
+                access | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                identity.pid,
+            )
+        }
+        .map_err(|e| e.to_string())?,
+    );
+    if times(process.0, identity.pid).is_none_or(|(current, _)| current != identity) {
+        return Err("The process exited or its identity changed. Refresh the list.".into());
+    }
+    if sid(process.0)? != sid(unsafe { GetCurrentProcess() })? {
+        return Err("This entry manages only the current user's processes.".into());
+    }
+    Ok(process)
+}
+
+pub fn identify(pid: u32) -> Result<Identity, String> {
+    let process = Owned(
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .map_err(|e| e.to_string())?,
+    );
+    let (identity, _) = times(process.0, pid).ok_or("The process is unavailable")?;
+    verified(identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    Ok(identity)
+}
+
+pub fn user_context() -> Result<(String, u32), String> {
+    let owner = sid(unsafe { GetCurrentProcess() })?;
+    let mut session = 0;
+    unsafe {
+        ProcessIdToSessionId(GetCurrentProcessId(), &mut session).map_err(|e| e.to_string())?;
+    }
+    Ok((owner, session))
+}
+
+pub fn elevated() -> Result<bool, String> {
+    let mut token = HANDLE::default();
+    unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| e.to_string())?;
+    }
+    let token = Owned(token);
+    let mut value = TOKEN_ELEVATION::default();
+    let mut length = 0;
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenElevation,
+            Some((&mut value as *mut TOKEN_ELEVATION).cast()),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut length,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(value.TokenIsElevated != 0)
+}
+
+fn checked_window(identity: Identity, window: &str) -> Result<(Owned, HWND), String> {
+    let process = verified(identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let value = usize::from_str_radix(window, 16).map_err(|_| "Invalid window identity")?;
+    let hwnd = HWND(value as *mut _);
+    let mut pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    if pid != identity.pid || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return Err("The window is no longer available.".into());
+    }
+    Ok((process, hwnd))
+}
+
+pub fn activate(identity: Identity, window: &str) -> Result<(), String> {
+    let (_process, hwnd) = checked_window(identity, window)?;
+    let mut response = 0;
+    if unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            150,
+            Some(&mut response),
+        )
+    }
+    .0 == 0
+    {
+        return Err("The window is not responding. Close or end it explicitly if needed.".into());
+    }
+    // Give a non-UI action worker its own message queue before foreground work.
+    let mut message = MSG::default();
+    let _ = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE) };
+    if unsafe { crate::win_util::force_foreground(hwnd) } {
+        Ok(())
+    } else {
+        Err("Windows refused to activate this window.".into())
+    }
+}
+
+pub fn close_window(identity: Identity, window: &str) -> Result<(), String> {
+    let (_process, hwnd) = checked_window(identity, window)?;
+    unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.map_err(|e| e.to_string())
+}
+
+pub fn terminate(identity: Identity) -> Result<(), String> {
+    if identity.pid == unsafe { GetCurrentProcessId() } {
+        return Err("Use Close to exit this task manager.".into());
+    }
+    let process = verified(identity, PROCESS_TERMINATE | PROCESS_SYNCHRONIZE)?;
+    unsafe {
+        let mut critical = ::windows::core::BOOL(0);
+        IsProcessCritical(process.0, &mut critical).map_err(|e| e.to_string())?;
+        if critical.as_bool() {
+            return Err("Windows marks this process as critical; it cannot be ended here.".into());
+        }
+        TerminateProcess(process.0, 1).map_err(|e| e.to_string())?;
+        if WaitForSingleObject(process.0, 2000) != WAIT_OBJECT_0 {
+            return Err("Termination was requested, but the process has not exited yet.".into());
+        }
+    }
+    Ok(())
+}
+
+struct Com;
+impl Drop for Com {
+    fn drop(&mut self) {
+        unsafe {
+            ::windows::Win32::System::Com::CoUninitialize();
+        }
+    }
+}
+fn com(mode: ::windows::Win32::System::Com::COINIT) -> Result<Com, String> {
+    unsafe {
+        ::windows::Win32::System::Com::CoInitializeEx(None, mode)
+            .ok()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(Com)
+}
+
+pub fn open_location(identity: Identity) -> Result<(), String> {
+    use ::windows::{
+        Win32::{System::Com::*, UI::Shell::*},
+        core::PCWSTR,
+    };
+    let process = verified(identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let path = path(process.0).ok_or("Executable path is unavailable")?;
+    let _com = com(COINIT_APARTMENTTHREADED)?;
+    let mut pidl = std::ptr::null_mut();
+    unsafe {
+        SHParseDisplayName(
+            PCWSTR(crate::win_util::wide(&path).as_ptr()),
+            None,
+            &mut pidl,
+            0,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        let result = SHOpenFolderAndSelectItems(pidl, None, 0).map_err(|e| e.to_string());
+        CoTaskMemFree(Some(pidl.cast()));
+        result
+    }
+}
+
+fn wmi_created(value: &str) -> Option<u64> {
+    use ::windows::Win32::System::Time::SystemTimeToFileTime;
+    if value.len() != 25 || !value.is_ascii() || value.as_bytes()[14] != b'.' {
+        return None;
+    }
+    let part = |a, b| value.get(a..b)?.parse::<u16>().ok();
+    let date = SYSTEMTIME {
+        wYear: part(0, 4)?,
+        wMonth: part(4, 6)?,
+        wDay: part(6, 8)?,
+        wHour: part(8, 10)?,
+        wMinute: part(10, 12)?,
+        wSecond: part(12, 14)?,
+        ..Default::default()
+    };
+    let mut time = FILETIME::default();
+    unsafe {
+        SystemTimeToFileTime(&date, &mut time).ok()?;
+    }
+    let fraction = value[15..21].parse::<u64>().ok()?.checked_mul(10)?;
+    let time = filetime(time).checked_add(fraction)?;
+    let offset = value[22..25]
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(600_000_000)?;
+    match value.as_bytes()[21] {
+        b'+' => time.checked_sub(offset),
+        b'-' => time.checked_add(offset),
+        _ => None,
+    }
+}
+
+/// Called only by a dedicated detail worker, never by the UI or sampler.
+pub fn command_line(identity: Identity) -> Result<String, String> {
+    use ::windows::{
+        Win32::System::{Com::*, Variant::*, Wmi::*},
+        core::{BSTR, PCWSTR},
+    };
+    let process = verified(identity, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let _com = com(COINIT_MULTITHREADED)?;
+    unsafe {
+        let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| e.to_string())?;
+        let empty = BSTR::new();
+        let service = locator
+            .ConnectServer(
+                &BSTR::from("ROOT\\CIMV2"),
+                &empty,
+                &empty,
+                &empty,
+                0,
+                &empty,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        CoSetProxyBlanket(
+            &service,
+            10,
+            0,
+            PCWSTR::null(),
+            RPC_C_AUTHN_LEVEL_CALL,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            None,
+            EOAC_NONE,
+        )
+        .map_err(|e| e.to_string())?;
+        let query = BSTR::from(format!(
+            "SELECT CommandLine, CreationDate FROM Win32_Process WHERE ProcessId = {}",
+            identity.pid
+        ));
+        let result = service
+            .ExecQuery(
+                &BSTR::from("WQL"),
+                &query,
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        let mut values = [None];
+        let mut returned = 0;
+        result
+            .Next(1500, &mut values, &mut returned)
+            .ok()
+            .map_err(|e| e.to_string())?;
+        let object = values[0].as_ref().ok_or("Command line is not available")?;
+        let property = |name: &str| -> Result<String, String> {
+            let mut variant = VARIANT::default();
+            object
+                .Get(
+                    PCWSTR(crate::win_util::wide(name).as_ptr()),
+                    0,
+                    &mut variant,
+                    None,
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
+            let mut buffer = vec![0u16; 32768];
+            let converted = VariantToString(&variant, &mut buffer).map_err(|e| e.to_string());
+            let _ = VariantClear(&mut variant);
+            converted?;
+            let end = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+            Ok(String::from_utf16_lossy(&buffer[..end]))
+        };
+        let created =
+            wmi_created(&property("CreationDate")?).ok_or("Creation time is unavailable")?;
+        if created.abs_diff(identity.created_100ns) >= 10
+            || times(process.0, identity.pid).is_none_or(|(current, _)| current != identity)
+        {
+            return Err("The process identity changed while reading its command line.".into());
+        }
+        let command = property("CommandLine")?;
+        if command.is_empty() {
+            Err("Command line is not available with current permissions.".into())
+        } else {
+            Ok(command)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        os::windows::process::CommandExt,
+        process::{Child, Command, Stdio},
+    };
+    #[test]
+    #[ignore = "private owned-process fixture, invoked by the identity guard test"]
+    fn owned_target_fixture() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn termination_rejects_changed_creation_time_without_touching_owned_target() {
+        struct Target(Child);
+        impl Drop for Target {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "task_service::windows::tests::owned_target_fixture",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW.0)
+            .spawn()
+            .unwrap();
+        let mut target = Target(child);
+        let mut wrong = identify(target.0.id()).unwrap();
+        wrong.created_100ns += 1;
+        let error = terminate(wrong).unwrap_err();
+        assert!(
+            error.contains("identity"),
+            "expected identity refusal, received {error}"
+        );
+        assert!(
+            target.0.try_wait().unwrap().is_none(),
+            "the owned target must remain alive"
+        );
+    }
 }

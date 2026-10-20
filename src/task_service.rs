@@ -5,6 +5,18 @@ use serde::{Deserialize, Serialize};
 mod windows;
 #[cfg(windows)]
 pub use windows::Collector;
+#[cfg(windows)]
+pub use windows::{
+    activate, close_window, command_line, elevated, identify, open_location, terminate,
+    user_context,
+};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Window {
+    /// Platform-specific opaque identifier, never trusted without revalidation.
+    pub id: String,
+    pub title: String,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Identity {
@@ -23,6 +35,7 @@ pub struct Process {
     pub cpu_percent: Option<f64>,
     pub working_bytes: Option<u64>,
     pub private_bytes: Option<u64>,
+    pub windows: Vec<Window>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,14 +69,15 @@ fn cpu_percent(
     logical_processors: usize,
 ) -> Option<f64> {
     let (old, prior) = previous?;
-    if old != identity || elapsed_seconds <= 0.0 || !elapsed_seconds.is_finite() {
+    if old != identity
+        || elapsed_seconds <= 0.0
+        || !elapsed_seconds.is_finite()
+        || logical_processors == 0
+    {
         return None;
     }
     let delta = total_100ns.checked_sub(prior)?;
-    Some(
-        (delta as f64 / 100_000.0 / elapsed_seconds / logical_processors.max(1) as f64)
-            .clamp(0.0, 100.0),
-    )
+    Some((delta as f64 / 100_000.0 / elapsed_seconds / logical_processors as f64).clamp(0.0, 100.0))
 }
 
 #[cfg(test)]
@@ -88,6 +102,10 @@ mod tests {
         assert_eq!(
             cpu_percent(Some((old, 10_000_000)), old, 15_000_000, 1.0, 2),
             Some(25.0)
+        );
+        assert_eq!(
+            cpu_percent(Some((old, 10_000_000)), old, 15_000_000, 1.0, 0),
+            None
         );
     }
 }

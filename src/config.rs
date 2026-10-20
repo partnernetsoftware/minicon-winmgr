@@ -109,29 +109,7 @@ const fn bool_value(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
 
-/// Color tokens as `COLORREF`-style `0x00BBGGRR` values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Theme {
-    pub bg: u32,
-    pub surface: u32,
-    pub hover: u32,
-    pub accent: u32,
-    pub text: u32,
-    pub muted: u32,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Theme {
-            bg: 0x001F_1B1B,
-            surface: 0x002C_2626,
-            hover: 0x003B_3333,
-            accent: 0x00F5_8B4C,
-            text: 0x00E6_E6E6,
-            muted: 0x00A2_9A9A,
-        }
-    }
-}
+pub use minicon_winmgr::palette::Theme;
 
 /// How task-window buttons are collapsed on the bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -795,14 +773,17 @@ fn system_light() -> bool {
     light != 0
 }
 fn resolve_theme(cfg: &Config, system_light: bool) -> Theme {
-    let rgb = |value: u32| (value & 0xff00) | ((value >> 16) & 0xff) | ((value & 0xff) << 16);
     let light =
         cfg.theme_mode == ThemeMode::Light || (cfg.theme_mode == ThemeMode::Auto && system_light);
-    let values = if light {
-        [0xF5F1E9, 0xFFFCF7, 0xE9E0D3, 0x9A5F34, 0x352A24, 0x827568]
-    } else {
-        [0x24211E, 0x2F2A25, 0x40372F, 0xC89864, 0xF0E6D8, 0xB9AB9B]
-    };
+    let shared = minicon_winmgr::palette::base(light);
+    let values = [
+        shared.bg,
+        shared.surface,
+        shared.hover,
+        shared.accent,
+        shared.text,
+        shared.muted,
+    ];
     let custom = [
         cfg.theme.bg,
         cfg.theme.surface,
@@ -815,7 +796,7 @@ fn resolve_theme(cfg: &Config, system_light: bool) -> Theme {
         if cfg.theme_overrides & (1u8 << index) != 0 {
             custom[index]
         } else {
-            rgb(values[index])
+            values[index]
         }
     };
     Theme {

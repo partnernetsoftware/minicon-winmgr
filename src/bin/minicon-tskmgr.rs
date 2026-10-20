@@ -2,8 +2,24 @@
 #![windows_subsystem = "windows"]
 
 fn main() {
-    let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() == Some(std::ffi::OsStr::new("--snapshot-json")) {
+    let mut args = std::env::args_os().skip(1).peekable();
+    if args
+        .peek()
+        .is_some_and(|a| a == "--help" || a == "-h" || a == "--version")
+    {
+        unsafe {
+            let _ = windows::Win32::System::Console::AttachConsole(
+                windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+        println!(
+            "minicon-tskmgr {}\n--language en|zh --theme light|dark --focus-pid PID --focus-created FILETIME\n--snapshot-json PATH",
+            env!("CARGO_PKG_VERSION")
+        );
+        return;
+    }
+    if args.peek().is_some_and(|a| a == "--snapshot-json") {
+        args.next();
         let result = (|| -> Result<(), String> {
             let path = args.next().ok_or("Snapshot output path required")?;
             if args.next().is_some() {
@@ -18,7 +34,59 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        // The native UI is implemented in the next development slice.
-        std::process::exit(2);
+        let result = (|| -> Result<(), String> {
+            let mut options = minicon_winmgr::task_ui::Options::default();
+            if let Some(home) = std::env::var_os("USERPROFILE") {
+                use std::io::Read;
+                if let Ok(file) =
+                    std::fs::File::open(std::path::PathBuf::from(home).join("winmgr.cnf"))
+                {
+                    let mut text = String::new();
+                    let _ = file.take(65536).read_to_string(&mut text);
+                    for line in text.lines() {
+                        if let Some((key, value)) = line.split_once('=') {
+                            match key.trim() {
+                                "ui.language" => options.chinese = value.trim() == "zh",
+                                "appearance.mode" => options.light = value.trim() == "light",
+                                _ => (),
+                            }
+                        }
+                    }
+                }
+            }
+            let mut pid = None;
+            let mut created = None;
+            while let Some(argument) = args.next() {
+                match argument.to_str(){
+                    Some("--language")=>{options.chinese=match args.next().and_then(|v|v.into_string().ok()).as_deref(){Some("zh")=>true,Some("en")=>false,_=>return Err("Expected --language en or zh".into())};},
+                    Some("--theme")=>{options.light=match args.next().and_then(|v|v.into_string().ok()).as_deref(){Some("light")=>true,Some("dark")=>false,_=>return Err("Expected --theme light or dark".into())};},
+                    Some("--focus-pid")=>pid=Some(args.next().and_then(|v|v.into_string().ok()).and_then(|v|v.parse::<u32>().ok()).ok_or("Expected process ID")?),
+                    Some("--focus-created")=>created=Some(args.next().and_then(|v|v.into_string().ok()).and_then(|v|v.parse::<u64>().ok()).ok_or("Expected creation time")?),
+                    _=>return Err("Arguments: --language en|zh --theme light|dark --focus-pid PID --focus-created FILETIME; or --snapshot-json PATH".into()),
+                }
+            }
+            if let Some(pid) = pid {
+                options.focus = Some(if let Some(created_100ns) = created {
+                    minicon_winmgr::task_service::Identity { pid, created_100ns }
+                } else {
+                    minicon_winmgr::task_service::identify(pid)?
+                });
+            }
+            minicon_winmgr::task_ui::run(options)
+        })();
+        if let Err(error) = result {
+            use windows::{Win32::UI::WindowsAndMessaging::*, core::PCWSTR};
+            let text: Vec<u16> = error.encode_utf16().chain(Some(0)).collect();
+            let title: Vec<u16> = "minicon-tskmgr".encode_utf16().chain(Some(0)).collect();
+            unsafe {
+                MessageBoxW(
+                    None,
+                    PCWSTR(text.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
+            std::process::exit(1);
+        }
     }
 }

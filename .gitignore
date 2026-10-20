@@ -41,3 +41,5 @@ scripts/__pycache__/
 !scripts/run_uac_probe.py
 !scripts/legacy_update_path_probe.py
 !scripts/public_update_probe.py
+
+!scripts/tskmgr_probe.py
