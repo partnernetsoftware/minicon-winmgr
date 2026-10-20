@@ -71,23 +71,50 @@ fn cache() -> Result<PathBuf, String> {
     }
     Ok(root.join("minicon-winmgr").join("tools").join(VERSION))
 }
-fn installed(current: &Path, cache: &Path) -> Option<PathBuf> {
+fn installed(current: &Path, cache: &Path) -> Result<Option<PathBuf>, String> {
     // A sibling checksum table must bind this exact shell as well as the tool.
     // This avoids silently pairing a development build with unrelated binaries.
-    if let Some(parent) = current.parent()
-        && let Ok(sums) = bounded_read(&parent.join("SHA256SUMS.txt"))
-        && let Ok(expected) = update::checksum(
-            &sums,
-            &format!("minicon-winmgr-v{VERSION}-x86_64-windows.exe"),
-        )
-        && update_stream::hash_file(current).is_ok_and(|hash| hash == expected)
-        && let Ok(exe) = verified(parent, &sums)
+    let mut problems = Vec::new();
+    for (directory, sibling) in current
+        .parent()
+        .map(|p| (p, true))
+        .into_iter()
+        .chain(std::iter::once((cache, false)))
     {
-        return Some(exe);
+        let file = directory.join(name());
+        match file.try_exists() {
+            Ok(false) => continue,
+            Err(error) => {
+                problems.push(format!("{}: {error}", file.display()));
+                continue;
+            }
+            Ok(true) => {}
+        }
+        let result = (|| {
+            let table = directory.join("SHA256SUMS.txt");
+            let sums =
+                bounded_read(&table).map_err(|error| format!("{}: {error}", table.display()))?;
+            if sibling {
+                let expected = update::checksum(
+                    &sums,
+                    &format!("minicon-winmgr-v{VERSION}-x86_64-windows.exe"),
+                )?;
+                if update_stream::hash_file(current)? != expected {
+                    return Err("SHA256SUMS.txt does not match this running Winmgr".into());
+                }
+            }
+            verified(directory, &sums)
+        })();
+        match result {
+            Ok(path) => return Ok(Some(path)),
+            Err(error) => problems.push(format!("{}: {error}", file.display())),
+        }
     }
-    bounded_read(&cache.join("SHA256SUMS.txt"))
-        .ok()
-        .and_then(|sums| verified(cache, &sums).ok())
+    if problems.is_empty() {
+        Ok(None)
+    } else {
+        Err(problems.join("\n"))
+    }
 }
 
 struct Temporary(PathBuf);
@@ -237,13 +264,16 @@ fn open_requested(owner: HWND, focus: Option<Identity>, administrator: bool) {
             let cache = cache()?;
             let current = std::env::current_exe().map_err(|e| e.to_string())?;
             let path = match installed(&current, &cache) {
-                Some(path) => path,
-                None => {
+                Ok(Some(path)) => path,
+                lookup => {
                     PHASE.store(2, Ordering::Release);
-                    let question = crate::ui_format!(
+                    let question = if let Err(reason) = lookup { crate::ui_format!(
+                        "发现了 Tskmgr 文件，但无法通过本版本校验：\n{reason}\n\n离线使用：将同版 Winmgr、Tskmgr 和 SHA256SUMS.txt 放在同一目录，然后重试。\n是否改为从此版本的 GitHub 公开发布下载？",
+                        "A Tskmgr file was found but could not be verified for this version:\n{reason}\n\nFor offline use, put the matching Winmgr, Tskmgr and SHA256SUMS.txt in the same folder, then retry.\nDownload from this version's public GitHub release instead?"
+                    ) } else { crate::ui_format!(
                         "未找到已校验的 Tskmgr {VERSION}。\n从此版本的 GitHub 公开发布下载并打开？\n下载期间可继续使用 Winmgr。",
                         "Verified Tskmgr {VERSION} was not found.\nDownload and open it from this version's public GitHub release?\nYou can keep using Winmgr during the download."
-                    );
+                    ) };
                     if dialog(owner, &question, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES {
                         PHASE.store(6, Ordering::Release);
                         return Ok(());
@@ -356,6 +386,44 @@ mod tests {
         .into_bytes()
     }
     #[test]
+    fn local_tool_rejection_explains_missing_table_and_preserves_cache_fallback() {
+        let sibling = Directory::new();
+        let cache = Directory::new();
+        let current = sibling.0.join("renamed-shell.exe");
+        assert!(installed(&current, &cache.0).unwrap().is_none());
+        let bytes = payload();
+        let tool = sibling.0.join(name());
+        fs::write(&current, &bytes).unwrap();
+        fs::write(&tool, &bytes).unwrap();
+        assert!(
+            installed(&current, &cache.0)
+                .unwrap_err()
+                .contains("SHA256SUMS.txt")
+        );
+        let pair = format!(
+            "{}  minicon-winmgr-v{VERSION}-x86_64-windows.exe\n{}",
+            update_stream::hash_reader(&bytes[..], update::MAX_EXE).unwrap(),
+            String::from_utf8(sums(&bytes)).unwrap()
+        );
+        fs::write(sibling.0.join("SHA256SUMS.txt"), pair).unwrap();
+        assert_eq!(installed(&current, &cache.0).unwrap(), Some(tool.clone()));
+        fs::write(&current, b"different shell").unwrap();
+        assert!(
+            installed(&current, &cache.0)
+                .unwrap_err()
+                .contains("running Winmgr")
+        );
+        fs::write(&current, &bytes).unwrap();
+        fs::write(&tool, b"corrupted sibling").unwrap();
+        assert!(installed(&current, &cache.0).is_err());
+        let cached = install(&cache.0, &sums(&bytes), |file| {
+            file.write_all(&bytes).map_err(|e| e.to_string())
+        })
+        .unwrap();
+        assert_eq!(installed(&current, &cache.0).unwrap(), Some(cached));
+        assert_eq!(fs::read(tool).unwrap(), b"corrupted sibling");
+    }
+    #[test]
     fn interrupted_or_corrupt_acquisition_is_not_installed_and_retry_succeeds() {
         let root = Directory::new();
         let bytes = payload();
@@ -381,11 +449,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            installed(Path::new("missing.exe"), &root.0),
+            installed(Path::new("missing.exe"), &root.0).unwrap(),
             Some(exe.clone())
         );
         fs::write(&exe, corrupt).unwrap();
-        assert!(installed(Path::new("missing.exe"), &root.0).is_none());
+        assert!(installed(Path::new("missing.exe"), &root.0).is_err());
     }
     #[test]
     fn conflicting_target_is_preserved_and_wrong_version_is_rejected() {
