@@ -1,145 +1,98 @@
 # 按风险选择测试
 
-
 ## 当前规则（2026-10-20）
 
-用户指出测试开始走过场、消耗与价值不匹配。本节替代下文旧流程中“每版必须全套 release”“每阶段重复完整矩阵”的要求；下文脚本清单保留为可选工具，不是每次发布的检查清单。
+用户要求分层、分阶段，并按功能依赖选择测试。本规则替代旧的“每次发布全套 release / 各阶段重复完整矩阵”。脚本是工具库，不是必须全部执行的清单。历史报告保留当时覆盖范围，不因本规则改写为未执行或全部有效。
 
-- 每项验证先说明：本次修改可能造成什么用户可见故障、哪个观察能发现它、已有证据能否复用。不能回答就不运行。
-- 开发时只运行相关静态检查与有价值的定向测试；对可逆小改动不编写镜像实现的测试。
-- 正式候选完成一次优化普通单元与选定风险的实际场景；中英/串行完整矩阵仅在语言、共享状态、并发或相关失败证据要求时追加。main 用快速普通单元；release 晋升复用已成功候选的检查，验证源码指纹和附件身份，不再重建和重复同一套测试。
-- 准确候选的动态验证只覆盖本次变化与依赖边界。未改动的布局、主题、回收站、Run 等复用历史结果，并注明是历史覆盖，不伪装成当前重测。共享 UI/线程模型大改、新工具首发等才扩大范围。
-- 同一文件、同一场景通过后即停止；只有相关源码变化、失败或新风险才重跑对应部分。驱动失败先判断是否改变产品结论，保留失败事实，不全套重开。
-- 产品输入变化需要新候选；纯文档/测试驱动变更不重新构建产品。脚本改动验证脚本本身及受影响场景即可。
-- 人工 UAC 仅用于确实变化的权限路径；批准、取消各验证明确行为，不通过多轮相似弹窗追求数量。
-- 通过项数量不作为发布质量指标。结果按“风险 → 证据 → 结论/限制”汇报；原始日志留本机，避免重复读取整份报告或逐条复述。
+每次先写清：**改动 → 可能的用户故障 → 受影响依赖 → 最小验证 → 停止条件**。普通改动可用一行说明，不另建报告模板或测试框架。不能说明能发现什么故障的测试，不运行。
 
-### 当前版本选择
+## 层级、阶段与验证深度
 
-| 版本 | 主要风险与必要证据 | 默认不重跑 |
+三者分开选择：层级说明验证对象，阶段说明何时做，深度说明做到哪里。
+
+| 层级 | 解决的问题 | 常见证据 |
 |---|---|---|
-| .15 更新修复 | 真实公开 .14 → 准确 .15 的交接；实际文件名/版本/普通权限/就绪；目标冲突与启动失败回滚；原环境恢复；公开附件一致性及真实公开更新 | 未改动的 Run、回收站、四边/主题、诊断/资源专项、UAC。此前已运行的结果保留，不为满足新表再重复 |
-| .16 工具首发 | 进程身份/归属/采样；自有目标操作；TCP/UDP 数据准确；独立启动与 Winmgr 定位；异步响应与退出；多产物交付 | Winmgr 全量历史 UI；不为矩阵数量重复新工具同一正常路径 |
-| .17 权限与网络 | 原用户/凭据账户/会话边界；实际授权与取消；管理员工具关闭；所选网络能力准确性/开销 | 未改动的 .16 普通操作全套与 Winmgr 历史 UI |
+| 静态 | 能否编译、接口与格式是否正确 | check、Clippy、公开文档边界 |
+| 单元 | 易出错的规则是否正确 | 路径/状态转换/解析/身份匹配的正反例 |
+| 组件与集成 | 模块交接是否正确 | worker 结果、持久化、helper 交接、权限反馈 |
+| 用户路径 | 用户是否完成目标 | 从实际入口操作到可观察结果及正常退出 |
+| 交付 | 用户拿到的是否是已验收文件 | CI 来源、摘要、公开附件、真实更新 |
 
-`.15` 的旧 helper 改名失败专项与当前 helper 故障套件有重叠；已有准确 .15 的公开旧 helper 碰撞/回滚证据足够时，不为增加报告数量再补跑相同边界。若仍有未覆盖的具体失败点才单独运行。
+| 阶段 | 默认动作 | 停止或升级条件 |
+|---|---|---|
+| 开发迭代 | 相关静态检查；必要的定向单元；最短冒烟 | 改动行为正确且无未解释问题即停止；失败只追受影响路径 |
+| 合入 | 一次快速质量与普通单元；审阅依赖影响面 | 文档改动不构建 Rust；不重复已覆盖的普通 fault 测试 |
+| 候选验收 | 准确优化文件；变化路径冒烟，再做必要正反例 | 语言/并发/共享底座变化才扩大矩阵；不默认全桌面回归 |
+| 公开交付 | 原文件晋升、附件一致性、真实公开更新 | 身份和交付事实成立即结束，不为数量重复功能测试 |
 
-> 0.1.12 基线：0.1.11 已修复旧格式、公开路径与英文断言隔离问题；0.1.12 增加中英/并发完整隔离矩阵和有界 HTTP 测试夹具。旧失败保留在[历史梳理](review_0_1_12.md)，当前准确候选与覆盖范围见[验收记录](validation_0_1_12.md)。
+**冒烟**：用最短实际路径确认“能启动 → 入口可用 → 关键结果正确 → 能退出/恢复”。例如纯文案看目标控件与布局；只读工具看一次真实快照和正常退出。冒烟不是启动后睡几秒，也不能替代更新回滚、终止进程身份、权限授权等必要反例。
 
-开发期按修改范围选择一层；默认只做格式和编译检查，不运行整套回归。每次运行会在 `target/test-reports/<层>/summary.json` 记录步骤、耗时与结果；旧的其他层结果不代表本次也执行过。
+**定向回归**：验证变化规则及明确相邻边界。**全量/环境矩阵**：用于共享线程模型、全局语言、通用控件、打包体系大改或已有系统性故障。必须说明扩大范围的理由。
 
-| 命令 | 内容与使用时机 |
+## 功能依赖与影响面
+
+下表是测试选择地图，模块实现在变化时同步更新；不是所有边都要测试。修改一个节点，先沿调用方找用户可见影响；下游只重验契约受影响的边。源码导入关系是线索，不能单凭文件变动推断行为影响。
+
+| 改动区域 | 主要依赖路径 | 优先验证 | 无连带改动时复用 |
+|---|---|---|---|
+| 设置文案/局部布局 | settings_panel → settings_info / appearance | 目标控件可见、可达、正确；相关语言或窄屏边界 | 更新、Run、托盘、资源长跑 |
+| 主题/通用控件 | config / appearance → 各实际使用窗口 | 受影响控件的代表窗口；必要明暗/语言边界 | 无关协议、文件事务 |
+| 更新路径/安装 | settings_panel → update → update_install → update_paths → 启动就绪；登录引用经 shell_recovery | 新路径启动、冲突、不就绪回滚、普通权限、原状态恢复 | Run 输入、回收站、四边布局 |
+| 下载/校验 | update → update_http / update_stream → 暂存 | 相关大小/错误/取消/校验边界；一次安装交接冒烟 | 每种 UI 与历史版本全排列 |
+| Run 启动 | run_dialog → shell_launch / privilege → 目标进程；成功才写 run_history | 变化的参数/输入/结果；涉及权限才实际授权/取消 | 托盘、显示桌面、无关更新故障 |
+| 窗口/任务栏 | window_snapshot / window_events → taskbar / grouping → win_util | 对应窗口出现/激活/关闭；几何变化才测停靠 | 设置保存、更新下载 |
+| 托盘协议 | tray_host → tray → tray_bar / tray_popup | 对应注册/更新/删除/回调与宿主形态 | Run、安装器及全主题矩阵 |
+| 配置/恢复事务 | settings_store / shell_recovery → 原子写入与读回 → 调用入口 | 数据保留、失败恢复、并发修改；一个实际入口 | 未使用该事务的模块 |
+| Tskmgr（规划） | 平台采样 → 身份/指标模型 → 视图/动作 → Winmgr 定位 | 真实数据、自有目标、身份复用、响应/退出、工具交付 | Winmgr 历史 UI 全套 |
+| Tskmgr 提权（规划） | 原用户/会话 → 授权 → 管理员工具 → 操作结果 | 实际批准/取消、跨账户边界、结束授权生命周期 | 未改的普通操作全套 |
+
+测试选择可写成：“文件名规则改变 → helper 交接/启动/登录引用受影响 → 路径单元 + 公开旧 helper 的成功/冲突/回滚 + 一次公开更新；不重测 Run”。不通过复制整个版本清单建立影响面。
+
+## 本轮版本的选择
+
+- **.15**：准确 .15 的真实公开 .14 helper 交接、新文件名/版本/就绪、目标冲突和不就绪回滚、权限与恢复、附件及真实公开更新。此前额外运行的 UI/资源结果保留，不再作为门槛；不补跑重复旧 helper 专项。实际用户登录 Shell 写入没有测试则明确记录，不以不变检查冒充正向迁移。
+- **.16**：新工具首发，覆盖进程归属/身份/指标、自己的测试目标动作、TCP/UDP、独立启动、窗口定位、异步响应及多文件交付；不重复 Winmgr 全量历史 UI。
+- **.17**：重点覆盖原用户/凭据账户/会话、授权与取消、管理员工具退出，以及实际选择的网络能力；沿用未改的 .16 普通路径证据。
+
+## 工具速查
+
+| 命令/工具 | 选择条件 |
 |---|---|
-| `python scripts/test.py` | `check`：格式、cargo check；日常快速反馈 |
-| `python scripts/test.py --layer unit --filter config::tests` | 指定 Rust 模块或测试名；只跑相关测试 |
-| `python scripts/test.py --layer unit` | 全部单元测试；跨模块调整时使用 |
-| `python scripts/unit_matrix.py` | 中英 × 默认并发/串行完整普通单元，临时配置和用户目录隔离；加 `--release` 验证优化构建 |
-| `python scripts/test.py --layer quality` | 格式、严格 Clippy；提交前与 CI 静态检查 |
-| `python scripts/test.py --layer layout --restore-exe <normal-running-exe>` | 构建 debug；默认英文/中英切换与持久化、双语明暗截图、标签与选项同行、窄宽恢复、页脚可达；只改设置布局时使用 |
-| `python scripts/test.py --layer appearance --restore-exe <normal-running-exe>` | 构建 debug；明暗 × 四边原生窗口、工作区、保存读回、环境只读与切换资源专项 |
-| `python scripts/test.py --layer taskmgr --restore-exe <normal-running-exe>` | 当前会话既有任务管理器的普通权限恢复/激活/最小化循环；无窗口则记录跳过，不自动启动或提权 |
-| `python scripts/test.py --layer interaction --restore-exe <normal-running-exe>` | 冷启动按需初始化、Run 双语候选采用与窗口复用、四边任务栏焦点返回、设置重启提示；0.1.8 专项 |
-| `python scripts/test.py --layer update --restore-exe <normal-running-exe>` | 本地 HTTP 故障、双语按钮、禁止启动联网、校验失败、暂存篡改、保存阻止重启、两版本真实交接、文件占用和启动失败回滚；独立目录，不替换用户安装 |
-| `python scripts/test.py --layer settings --restore-exe <normal-running-exe>` | 构建 debug；设置原生交互、来源、保存故障、UIA 与窗口复用；省略完整 Run 历史/引号/中文参数回归 |
-| `python scripts/test.py --layer resource-gate --release-binary <candidate> --baseline <baseline> --campaign <local-summary> ...` | 只读核对三轮对照和先 2h 后 8h 原始证据；不等于完整验收 |
-| `python scripts/test.py --layer release --release-binary <candidate> --restore-exe <normal-running-exe> --legacy-exe <official-v0.1.4-exe> --baseline <baseline>` | 格式、严格 Clippy、release 全部单元、组件资源/更新内存、诊断 fixture 及实际候选的侧栏/更新/交互/设置/Run/布局/主题/换边/回收站回归 |
+| `python scripts/test.py` | 格式与编译快速反馈 |
+| `python scripts/test.py --layer unit --filter <module-or-test>` | 相关规则的定向单元 |
+| `python scripts/test.py --layer quality` | 格式、严格 Clippy、工具校验；不代替功能证据 |
+| `python scripts/unit_matrix.py --quick` | 一个配置隔离的英文/默认并发普通单元环境 |
+| `python scripts/unit_matrix.py --release --quick` | 准确候选构建阶段的一次优化普通单元 |
+| `python scripts/unit_matrix.py [--release]` | 明确需要中英 × 并发/串行完整矩阵时 |
+| `test.py --layer layout / appearance / interaction / settings / taskmgr` | 对应 UI 依赖发生变化时选一层；已有 Task Manager 不存在则记跳过 |
+| `test.py --layer update` | 更新广泛变化；当前回移 fixture 与真实公开基线分别标明，不混称 |
+| `legacy_update_path_probe.py` | 旧 helper 改名协议的额外失败点尚无证据时 |
+| `public_update_probe.py` | 真实公开基线经 GitHub Latest 下载/校验/重启，核对新文件名与恢复 |
+| `run_uac_probe.py` | 仅权限路径变化的实际批准/取消；需要用户参与 |
+| `test.py --layer resources / update-memory / diagnostics / fault` | 对应资源、诊断、故障处理有变化或未解释问题 |
+| `test.py --layer release` | 已说明理由的完整自动化回归；并非默认发布门槛 |
+| `scenario_probe.py`、`instance_switch_probe.py`、`isolated_tray_probe.py` | 明确的资源/交接/私有桌面故障路径；测试文件证据不冒充正式产品入口 |
 
-会替换实例的桌面层均要求显式 `--restore-exe`，指向当前实际运行文件，并由隔离上下文先核对同用户/会话、文件路径和摘要；依赖当前可用的 Windows 输入桌面、Python Pillow（截图）和 PowerShell 7（UIA）。开发层默认构建到 `target/desktop-validation`，只在忽略目录内的副本上运行，正常退出后从原路径恢复并核对工作区及 Shell。常规层不会主动申请 UAC、接管 Shell 或结束其他会话进程。不要同时启动两个桌面层，也不要在测试操作键盘时输入其他内容。
+具体 CLI 参数用 `--help` 查阅，不重复扩写在版本计划。桌面层必须指定 `--restore-exe <实际运行文件>`；已有构建可加 `--candidate-exe`，完整 release 层用 `--release-binary`。先构建再进入桌面隔离，不同时启动两个桌面层。实际候选来自成功的 candidate artifact，本地重建仅供组件实验。
 
-例外是显式交互验收 `scripts/run_uac_probe.py --candidate <准确候选> --restore-exe <实际原程序> --interactive-uac`：完整范围需要管理员入口批准、目标批准和目标取消，不能无人值守运行。`--approve-only` / `--cancel-only` 分别只覆盖目标批准或取消，不能把单段报告写成全范围通过。自有目标探针名标明 CLICK YES/NO，让授权要求出现在系统提示中；不要仅在聊天里交代交替顺序。系统选择必须由用户操作，不改变安全桌面策略；普通键盘遍历由 `run_admin_probe.py` 独立回归。失败轮次、退出异常与恢复情况必须保留，不能靠反复弹窗凑出完整通过。
+## 证据复用与停止条件
 
-更新改名兼容专项：`scripts/legacy_update_path_probe.py --candidate <新程序> --legacy-exe <真实公开旧版> --restore-exe <实际原程序>`。在自有目录运行公开旧 helper，验证改名交接、碰撞保护和子进程启动被 Job 限制拒绝后的回滚。需要现有 pywin32 环境，不请求 UAC；该专项不取代真实公开下载或自建外部启动入口的验证。隔离配置及输出目录必须使用绝对路径。
+记录产品文件摘要/源码、场景、直接结果与限制。相同输入、依赖契约及环境前提未变时，复用结果；更改测试脚本不自动使产品候选失效。产品输入变化则新建候选，只补受影响证据。
 
-`release` 表示当前自动化全套，不代表所有物理环境已覆盖。混合 DPI、多屏热插拔、高对比度实屏、屏幕阅读器语音、特殊管理员令牌以及小时级常驻观察仍需独立环境验收。CI 没有当前交互桌面，执行 `quality` 与一次隔离普通单元；fault 的普通单元选择器已被完整普通 suite 覆盖，不在 CI 重复运行，candidate workflow 默认执行一次优化普通单元，语言/并发改动时显式选择完整矩阵；release workflow 复核成功候选与指纹并晋升附件，不再次编译或重跑单元。发布前在可用桌面运行选定风险场景并审阅报告；`release` 仅用于确需全套回归的改动。仅构建优化二进制不会自动声称完成发布验收。
+通过即停；新失败先定位，不全套重开。报告按“风险 → 证据 → 结论”汇总，不以通过项数量为质量指标，不反复读取整份日志或向用户罗列例行检查。原始报告留忽略目录，最终记录一次。
 
-发布层构建目录为 `target/release-validation`，避免旧会话直接运行 `target/release` 时锁住 Cargo 硬链接产物。实际候选来自显式指定的 `--release-binary`（如已下载的草稿资产），不会用重建结果替换它。桌面探针的 live 路径隔离在忽略目录，结束恢复显式指定的原运行路径、摘要、工作区与 Shell 登记，不覆盖原外壳文件，也不结束其他会话。
+准确候选、普通单元、桌面操作、真实授权和公开更新是不同证据，不能互相冒充。缺失、跳过、未覆盖和失败保留其真实状态。物理 DPI/多屏、无障碍、实际 SMB、硬件覆盖、小时级资源结论仍须相应环境和时长；普通补丁不默认安排这些认证。
 
-更新层会将当前源码回移到上一补丁的隔离测试构建（0.1.10 候选对应 0.1.9 fixture），以验证当前实际候选的两版本交接；该 fixture 不是历史公开版。服务仅监听 loopback，验收报告明确记录两份二进制 SHA-256。后台助手只允许本用户/本会话，并等旧进程退出后才修改本测试安装。成功后清理本轮自建用例目录，保留事务事实与截图。
+## 环境与人工操作
 
-## 公开证据检查
+桌面隔离核对同用户/会话、文件路径和摘要，正常关闭后恢复原路径、工作区及 Shell。不替换用户安装、不结束其他会话；操作对象使用自有测试进程。构建放 `target/release-validation`，避免锁住其他会话产物。截图需要的 Pillow、UIA 及私有桌面/Job 所需环境按所选工具准备。
 
-提交及发布前运行 `python scripts/check_public_docs.py`，CI 同样检查 Git 暂存区内容，拒绝原始验收 JSON 和工作站路径。可先运行 `python scripts/check_public_docs.py --self-test` 验证检查器。不要将原始报告复制到 docs；公开结果写入人工审阅的 Markdown，截图只使用无个人路径的隔离演示。该检查不能识别图片中的文字，图片必须目视检查。
+UAC 每次只说明当前操作；使用 `--approve-only` / `--cancel-only` 等单段范围，不能让用户在安全桌面后记忆交替 Yes/No。由用户选择，不自动点击、不修改系统策略。普通 UI 输入与真实授权分别记录，拒绝或超时不凑作通过。
 
-0.1.10 开发层已增加：
+## CI 与公开证据检查
 
-| 命令 | 行为 |
-|---|---|
-| `python scripts/test.py --layer memory --pid <test-pid> --duration 60` | 只读观察现有测试实例，记录数值；有 matplotlib 时生成本地曲线，不重启、不修改配置；默认 5 秒采样 |
-| `python scripts/test.py --layer soak --pid <test-pid> --duration 28800` | 显式 8 小时观察；提前退出记为不完整，不自动判定没有泄漏 |
-| `python scripts/test.py --layer resources` | 创建本测试的隐藏窗口并停滞源消息线程，验证 DWM 100 次注册/释放和 owned 图标寿命；图标 worker 在三个全新进程各验证 32 个隐藏窗口、1000 次请求及通知合并；另用 6 个全新子进程对照两种日志队列容量，不替换正常外壳 |
+文档-only 更改只运行轻量公开边界 workflow。产品/工具改动的 main CI 执行 quality 和一次普通单元；candidate 默认优化单元一次，只有需要时设置 `full_matrix=true`。release 检查成功生产 run、源码指纹、版本和摘要后原样晋升，不重建、不重复候选测试。
 
-原始数据写入每次唯一的 observation 目录，不覆盖上次实验。曲线依赖 matplotlib；采样本身只使用 Python 标准库。独立工具 `scripts/memory_probe.py` 也要求显式 PID 与时长。Private Working Set 只在确认支持的系统尝试，缺失值保持为空。当前层通过只代表工具和执行完整，不等于 0.1.10 的长期门槛已通过。
+提交及发布前运行 `python scripts/check_public_docs.py`，检查暂存内容，拒绝原始验收 JSON 和工作站路径。自检在修改检查器或相关边界时运行，不每次重复。公开截图仍需目视审阅。
 
-`python scripts/test.py --layer fault` 当前覆盖 pin 文件超长/损坏/替换失败/外部修改/占用、交接清单读取边界、流式暂存故障保护，以及 loopback HTTP 大小/截断/状态码/预算与增量哈希验证。它不代表完整网络超时、跨进程交接或长跑矩阵；跨进程交接继续使用 update 层。扩展资源认证另用 resource-gate 的真实证据；校验器自身使用合成数据测试，不能代替长跑。
-
-`python scripts/test.py --layer side-resize` 构建 debug，使用隔离偏好操作本会话任务栏内边缘，检查左右拖宽、取消、提交与重启持久化；finally 恢复原 live 二进制与环境。该层使用真实鼠标输入，不能与其他桌面层或长跑同时执行。
-
-`python scripts/memory_probe.py --export-summary --output <local-observation-directory>` 只把白名单数值、场景代号和二进制摘要写成本地 Markdown 草稿，未知字段不导出，字段中出现路径字符串会拒绝；经人工检查后才提交公开摘要。
-
-无 matplotlib 的环境可先完成采样，再用带该模块的 Python 执行 `--plot-only`。采样报告明确记录是否已生成曲线，不把缺失曲线隐藏为已生成。
-
-`python scripts/test.py --layer update-memory` 独立比较 32 MiB 文件的旧双缓冲模式与实际流式暂存；每种模式各三个全新进程，不操作正常外壳，不联网。`python scripts/update_memory_probe.py --release` 在隔离优化构建目录重复同一实验。局部私有提交差值不当作整个应用峰值，采样未观察到增量也不代表零分配。原始日志和数值报告只留在 target。
-
-0.1.10 的 update 层会根据 Cargo 当前版本构造上一补丁的回移 fixture，替换/回滚仍在自建 case 目录；finally 恢复测试开始时备份的原 live 二进制，并检查其摘要，避免把开发候选误留为正常运行版本。错误报告显式按 UTF-8 读取。
-
-`python scripts/test.py --layer diagnostics` 运行有界数据/导出测试，再从真实“关于”入口打开独立原生诊断窗口，覆盖中英 × 明暗主题、默认不采样、停止/关闭/重开、新记录确认、原生保存取消和实际导出，以及窄宽布局。不替换 live、不使用全局输入，也不修改 Shell；依赖当前可用桌面和 Pillow。`python scripts/diagnostics_probe.py --case zh-dark` 可仅复查一个组合。该专项也纳入 release 入口；原生 fixture 当前使用 debug 测试构建，不能冒充优化版全应用内存验收。真实长跑和整应用资源对照独立跟踪，不阻塞普通修复发布。
-
-`quality` 层另跑 `logging::tests`，用 AST 约束无插值的静态日志文案，并在独立子进程验证文件、stderr、span 及 panic 的文本保护；不需要桌面输入，不跑完整桌面套件。`unit --filter logging::tests` 可单独运行。原生数值与布尔值保留，文本、Debug/Display 和错误链在格式化前屏蔽，即使设置 trace 也不输出；显式 CLI 查询结果和用户错误对话框不属于后台日志。该组测试使用系统临时目录，不修改正常会话日志。
-
-`fault` 另覆盖 WinHTTP 原生异步请求在静默/慢速响应头、停滞/慢速正文和断流时的取消、context/读取缓冲寿命及成功重试，以及更新 worker panic 与进度队列满后的状态恢复。仅使用 loopback 和本测试文件，不替换正常外壳；公网 DNS、代理/TLS 故障及跨进程交接另行验证。完整交接仍使用 update 层，不能因组件测试通过而省略。
-
-整应用场景入口：
-
-```powershell
-python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario idle
-python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario settings
-python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario windows
-python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario soak --subject candidate --observe 7200 --repetitions 1
-python scripts/scenario_probe.py --candidate <candidate-exe> --restore-exe <normal-running-exe> --scenario soak --subject candidate --observe 28800 --repetitions 1
-```
-
-默认基线为原正常 exe，也可显式指定 `--baseline`；须自行确认两份产物的构建配置，工具记录二进制摘要，不从文件名推断优化级别。默认三次新进程对照，交替先后顺序；5 分钟预热、15 分钟空闲操作期、10 分钟恢复。设置默认 200 个完整循环，窗口默认 300 次、最多同时 8 个本工具窗口；这些动作期间可有不等距采样，使用实际时间，不伪造每 5 秒都有样本。`--warmup 0 --observe 1 --recovery 0 --repetitions 1` 用于驱动短测，不满足资源验收前提；settings/windows 还应指定很小的 --iterations。soak 最少两小时，先完成 2h 再独立进行 8h；指定 `--subject candidate` 避免重复基线长跑，结束不自动等于通过。
-
-该入口会暂时正常关闭当前桌面的 winmgr，并在 finally 从原路径恢复，要求输入桌面可访问及普通用户权限，不使用全局鼠标/键盘，不修改注册或覆盖原二进制。真实短测恢复、四边最大化及中英文回收站打开已验证；正式资源对照与长观察仍待完成。不能与其他桌面测试并发。控制器被强制结束时须参考本轮忽略目录内的恢复记录人工启动原实例。原始报告仅在 target；其中恢复记录有本地路径，禁止复制到公共文档。
-
-`python scripts/test_scenario_probe.py` 的 10 项模拟生命周期检查不需要桌面，也纳入 quality 和 release。模拟通过只证明驱动控制流，不能证明 native 恢复成功或应用资源稳定。曲线可用现有 memory_probe 的 `--plot-only` 从每个 run 目录生成；缺少 matplotlib 时保留数据后再生成。
-
-fault 层现运行整个 update 状态机模块，覆盖进度合并后隐藏 UI 的终态交付、退出取消、幂等 shutdown 与拒绝新 worker；HTTP 覆盖取消中的原生回调寿命，安装模块逐个检查 7 个取消边界。它们不依赖输入桌面，不关闭正常会话。每次操作的取消由应用退出触发；隐藏设置继续既有下载。完整交接、桌面和长跑仍需各自的验收。
-
-
-跨版本手动启动交接另有显式桌面探针（不得与其他桌面探针并行）：
-
-```powershell
-python scripts/instance_switch_probe.py --candidate <candidate-exe> --legacy <official-v0.1.4-exe> --restore <normal-running-exe> --language en
-python scripts/instance_switch_probe.py --candidate <candidate-exe> --legacy <official-v0.1.9-exe> --restore <normal-running-exe> --language zh
-```
-
-只使用忽略目录内的副本，测试默认取消、Esc、明确确认、原进程正常退出、新进程就绪、相同构建重复启动。外层恢复原程序并核对工作区与 Shell。历史版本无需支持新就绪消息；只在候选上检查该消息。它不覆盖进程异常终止时的恢复或拒绝退出故障注入。
-
-
-发布候选由 `gh workflow run candidate.yml --ref main` 显式构建，成功后下载 `windows-x64-candidate` artifact。正式场景及 full release 使用其中原样 exe。全部验证与审阅后，将 BUILDINFO.toml 的五个公开字段保存为相应版本的 `.artifact.toml` 发布清单，提交文档再打 tag；release 工作流从成功的生产 run 下载并逐项复核，原样晋升这份文件。不可用本机或后续 CI 重建文件替代已测候选。`quality` 同时运行 10 项晋升门槛测试；它们是受控校验器测试，不是实际文件发布证据。
-
-全发布桌面层另包含 `native_feature_probe.main()`：实际程序“关于 → 诊断”中英/明暗四组，以及实际 DWM hover、源窗口最小化/销毁。回收站场景覆盖中英/明暗、原生 Tab、Enter/Space 八组组合。开发时可通过 `desktop_session.isolated` 独立运行，不能与其他桌面动作并发。
-
-
-0.1.10 完整更新验证区分两组：默认 `update_probe.main()` 的当前代码回移 fixture，以及发布层 `previous_artifact=--baseline` 的真正历史公开文件。前者便于验证当前故障处理，后者验证旧更新器与新文件的实际协议兼容。报告分别位于 `target/update-acceptance/current-backport` 和 `historical-public`，摘要记录两份准确文件 SHA；两组证据对应不同风险；按本版变化选择，不要求每版重复两组。选择后不可把回移 fixture 写成公开旧版兼容。资源任务执行期间不得并行运行这些桌面动作。
-
-
-发布层显式以 `release=True` 执行资源所有权/停滞源实验、流式更新准备内存对照和诊断 fixture，记录对应 profile；开发层继续默认 debug，可单独选优化构建。诊断 fixture 只说明专项窗口行为，实际候选入口仍由 native_feature_probe 另验。全发布已有优化 Rust 单元，诊断专项不再次重复跑同一组普通单元。
-
-
-开发桌面层可加 `--candidate-exe <existing-exe>` 跳过构建，直接测试已有文件；记录实际摘要，不推断预构建文件一定来自当前源码。示例：
-
-```powershell
-python scripts/test.py --layer settings --restore-exe <normal-running-exe> --candidate-exe <debug-or-candidate-exe>
-```
-
-各旧桌面探针脚本的直接 CLI 已改为指向此受保护入口；模块函数仍供隔离上下文调用，interaction 的独立测试窗口子进程入口保留。缺少恢复路径或非法参数时，在构建和窗口操作前退出。6 项无桌面模拟检查验证缺少/无效恢复参数、独立构建目录、预构建跳过编译、测试异常后的恢复与报告，以及禁止预构建参数绕过发布资源门槛；它们不是实际桌面验收。
-
-
-发布功能层与扩展资源认证分离：`release` 不要求等待小时级 campaign，但仍要求准确候选、公开基线（用于真实历史更新）、官方 0.1.4 及原实例恢复路径，选用该工具时会跑全部自动化功能项；当前发布规则不要求每版选用该工具。不传 `--campaign` 时报告明确记录 `long_observation_completed=false`；不等于长期资源认证。若提供 campaign 则仍调用原严格资源门槛，缺失/不完整证据照常拒绝。`resource-gate` 的三轮、2h/8h、原始 CSV 核对标准未降低。公开内存结论只引用实际完成的场景与时长。
-
-Run 的既有 22 项桌面回归现由 `scripts/run_probe.py`、`run_probe_input.py` 和版本化 Rust 小程序 fixture 提供，所有输出进入忽略的 target；选用完整发布层时会调用，不因本机忽略目录缺脚本而静默跳过；普通补丁不默认重跑。它验证 Unicode 参数，不等同于真实 IME 组合输入矩阵。路径候选按有限超时等候异步就绪，不以固定短睡眠代替条件检查。
-
-
-0.1.12 原生故障专项由 `scripts/isolated_tray_probe.py --test-exe <cargo 输出的测试 exe> --test <场景>` 执行；先用 `cargo test --bin minicon-winmgr --no-run`（可加 `--release --target-dir target/release-validation`）取得对应测试程序。场景为 `tray`、`startup`、`takeover`、`collision`、`companion-collision`。它们创建从不激活的私有桌面；接管故障只在测试进程重映射的临时 HKCU 键上执行，保留已有热键所有者，不关闭真实外壳。该证明属于测试二进制，不能替代正式候选的真实桌面回归。普通单元中的 ignored 专项须按对应资源/诊断/私有桌面层单独记录，不因普通 suite 绿色就全部记为通过。
+晋升所需五字段 BUILDINFO 保存到版本 `.artifact.toml`，源码/附件不符必须拒绝。附件晋升、公开状态和真实更新仍需直接核实；CI 绿色不等于产品已发布。

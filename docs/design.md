@@ -12,4 +12,4 @@
 - 时钟：0.1.11 工作树采用 `Www yyyy-mm-dd HH:MM`，英文三字母星期与 24 小时时间，横向预留宽度与命中区域一致。
 - 稳定性：耗时网络、下载、校验和替换在 worker/助手；窗口归消息线程。普通启动不申请 UAC，自身已提升时按同用户同会话降权规则处理。
 
-颜色数值以 `src/config.rs` 的调色板为实现依据，几何与绘制见 `settings_panel`、`run_dialog`、`dock`、`taskbar`。新设计修改前先更新对应版本计划；开发按[测试层](testing.md)选择，发布前执行完整 release 层。
+颜色数值以 `src/config.rs` 的调色板为实现依据，几何与绘制见 `settings_panel`、`run_dialog`、`dock`、`taskbar`。新设计修改前先更新对应版本计划；开发与发布按[依赖影响面和阶段](testing.md)选择验证，局部改动先冒烟，完整 release 层仅在影响面需要时执行。

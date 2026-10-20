@@ -90,6 +90,6 @@ Alt+反引号聚焦任务栏，方向键选择、Home/End 到首尾、Enter/Spac
 - [后续能力清单](docs/prd_5_1.md)：未排期需求及实施前提。
 - [历史归档](docs/archive/README.md)：旧版本计划、旧路线图和整理前 README。
 
-开发期使用 `python scripts/test.py` 快速检查；`--layer unit --filter config::tests` 只跑指定模块，`--layer appearance --restore-exe <normal-running-exe>` / `settings --restore-exe <normal-running-exe>` 在隔离副本中运行对应桌面专项；可加 `--candidate-exe <existing-exe>` 复用已有构建。准备发布时用 `--layer release` 跑全部自动化，并测试 release 产物。分层内容与环境要求见[测试说明](docs/testing.md)。Windows CI 执行 `quality`、中英/并发完整隔离单元矩阵与有界 `fault` 检查；手动触发 candidate workflow 跑优化矩阵并构建待验收文件。打 tag 时复核构建身份，把同一份已测文件晋升为草稿；证据和截图审阅后再公开，代码签名尚未纳入。构建工具链如在自定义位置，设置对应 `RUSTUP_HOME` / `CARGO_HOME` 并把 Cargo bin 加入 PATH。
+开发期使用 `python scripts/test.py` 快速检查；`--layer unit --filter config::tests` 只跑指定模块，`--layer appearance --restore-exe <normal-running-exe>` / `settings --restore-exe <normal-running-exe>` 在隔离副本中运行对应桌面专项；可加 `--candidate-exe <existing-exe>` 复用已有构建。按改动依赖选择定向测试与冒烟；仅影响面需要时用 `--layer release` 跑全套，发布验收使用准确 CI 候选。分层内容与环境要求见[测试说明](docs/testing.md)。文档改动只做轻量边界检查。Windows CI 执行 `quality` 与一次隔离普通单元；candidate 默认跑一次优化普通单元，语言/并发变化才选择完整矩阵。打 tag 时复核构建身份，把同一份已测文件晋升为草稿；证据和截图审阅后再公开，代码签名尚未纳入。构建工具链如在自定义位置，设置对应 `RUSTUP_HOME` / `CARGO_HOME` 并把 Cargo bin 加入 PATH。
 
 发布验收见 [完整发布记录](docs/validation.md)，本版详见 [0.1.13 验收](docs/validation_0_1_13.md)；0.1.6 的历史自动化与桌面证据见 [版本计划](docs/archive/plan_0_1_6.md) 和 [验收数据](docs/validation.md)。物理混合 DPI、多屏热插拔、屏幕阅读器语音、高对比度和小时级长跑未覆盖。
