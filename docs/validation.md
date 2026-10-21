@@ -1,6 +1,18 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.15](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.15)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.18](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.18)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.18
+
+已合 main 并公开为 Latest；准确候选的任务树、人工/agent 笔记与标识、离线双 exe 实际入口通过。四个附件原样晋升，真实 .17 → .18 更新核实新文件名、摘要和普通权限，公开工具下载通过，原桌面恢复。范围及限制见[本版验收](validation_0_1_18.md)。
+
+## 0.1.17
+
+已公开普通/管理员双入口、身份隔离及端点筛选，真实 UAC 与公开更新证据见[本版验收](validation_0_1_17.md)。
+
+## 0.1.16
+
+已公开普通权限独立 Tskmgr、网络端点及 Winmgr 定位入口，双产物与真实更新证据见[本版验收](validation_0_1_16.md)。
 
 ## 0.1.15
 

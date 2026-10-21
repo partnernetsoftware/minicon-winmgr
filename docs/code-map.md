@@ -1,6 +1,6 @@
 # 代码与文档地图
 
-> 2026-10-20 · 当前公开版 0.1.17；实际范围见[实施计划](plan_0_1_17.md)，证据与限制见[验收记录](validation_0_1_17.md)。[本轮梳理](review_0_1_12.md)保留开发前发现。
+> 2026-10-21 · 当前公开版 0.1.18；实际范围见[实施计划](plan_0_1_18.md)，证据与限制见[验收记录](validation_0_1_18.md)。[本轮梳理](review_0_1_12.md)保留开发前发现。
 
 | 用户路径 | 主要实现 | 规格/证据 |
 |---|---|---|
@@ -39,7 +39,7 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 - `src/i18n.rs`：English/中文界面目录、默认语言和自有窗口标题/控件本地化；不转换命令或用户输入。
 
-文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](archive/plan_0_1_9.md)；历史：[0.1.10 资源与稳健性](archive/plan_0_1_10.md)、[0.1.11](archive/plan_0_1_11.md)；当前公开版：[0.1.12](archive/plan_0_1_12.md)。
+文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](archive/plan_0_1_9.md)；历史：[0.1.10 资源与稳健性](archive/plan_0_1_10.md)、[0.1.11](archive/plan_0_1_11.md)；当前公开版：[0.1.18](plan_0_1_18.md)。
 
 0.1.8：Run 快捷键路由在 `window`，窗口与 worker 在首次 `run_dialog::show` 创建；`run_history` 提供有界本地应用发现与路径/环境变量建议。主题化原生候选行保留完整 LB 字符串。`win_util::force_foreground` 处理跨权限 restore，`taskbar` 按点击坐标命中任务；专项脚本 `interaction_probe.py` / `taskmgr_probe.py` 纳入发布层。
 
@@ -61,3 +61,5 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 0.1.16：`tool_manager` 负责同版工具校验、显式后台下载和版本缓存；主程序更新协议保持单 exe，发布清单和校验表同时绑定两份 exe。`task_service` 提供 PID/创建时间身份、指标与端点；`task_ui` 使用有界 worker，结束进程默认取消。外壳退出在销毁消息窗口前结束当前线程的原生菜单，避免菜单仍等待输入。相关测试按[影响路径](testing.md)选择。
 
 0.1.17：`task_access` 绑定原用户/执行账户/会话与范围，`task_launch` 实现一次真实授权和有限启动交接；`task_ui` 的管理员视图与普通实例隔离，元数据受限行不生成可操作身份。无常驻特权服务。
+
+0.1.18：`task_ui/view` 默认树与上下文筛选；`task_notes` 提供运行/应用身份、追加历史、锁与版本校验，`task_notes_ui` 原生人工编辑，`task_notes_cli` 提供同契约普通权限 JSON 接口。`tool_manager` 校验官方内置工具摘要，`scripts/build_candidate.py` 先构建工具再绑定主程序；准确候选及发布来源见[本版验收](validation_0_1_18.md)。
