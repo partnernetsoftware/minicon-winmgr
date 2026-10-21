@@ -1,6 +1,10 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.19](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.19)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.20](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.20)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.20
+
+已合 main 并公开为 Latest；任务栏全屏让位在隔离桌面实际路径（让位、命中测试、恢复、最大化不误判）与准确候选上通过，四个附件原样晋升并与候选逐字节一致。真实 .19 → .20 更新核实新文件名、摘要和普通权限，公开工具下载通过，原桌面恢复。范围及限制见[本版验收](validation_0_1_20.md)。
 
 ## 0.1.19
 
