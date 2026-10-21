@@ -15,9 +15,9 @@
 产品原则：**用不上的可选功能，默认不加载。** 0.1.8 中，旧菜单默认不初始化，缩略预览默认不创建窗口，Run 的窗口和工作线程首次使用时才创建；通知宿主按外壳身份和显式配置决定初始化。详见 [0.1.8 设计与验收](docs/archive/plan_0_1_8.md)。
 
 
-当前公开版 **[0.1.18](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.18)**。版本事实见[发布说明](docs/releases/v0.1.18.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.18 计划](docs/plan_0_1_18.md)。
+当前公开版 **[0.1.19](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.19)**。版本事实见[发布说明](docs/releases/v0.1.19.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.19 计划](docs/plan_0_1_19.md)。
 
-0.1.18 已公开：默认任务树、人工与 agent 的持续分析笔记和异常标识，以及同目录双 exe 离线识别修复。真实 .17 → .18 更新与公开工具下载通过；见[计划](docs/plan_0_1_18.md)与[任务分析用法](docs/task_analysis.md)。
+0.1.19 已公开：设置窗口默认宽度采用双列布局，日常设置无需滚动；窄工作区回退单列，窗口尺寸与 DPI 变化后焦点保持可见。真实 .18 → .19 更新与公开工具下载通过。0.1.18 的任务树、人工/agent 笔记与异常标识继续可用；见[计划](docs/archive/plan_0_1_18.md)与[任务分析用法](docs/task_analysis.md)。
 
 0.1.17 增加主动授权的“所有用户与系统任务”入口。Winmgr 保持普通权限，UAC 取消保留当前状态，独立管理员工具关闭即退出；增加所属用户/会话展示和端点筛选。完整进程网络速率、协作笔记与异常管理尚未交付。详见[本版验收](docs/validation_0_1_17.md)。
 

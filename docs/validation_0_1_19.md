@@ -1,6 +1,6 @@
 # 0.1.19 验证与公开交付记录
 
-状态：准确候选验收通过，待合 main、打 tag 与公开发布。范围见[计划](plan_0_1_19.md)：仅设置布局改动，不涉及任务管理、工具获取、更新与授权逻辑。
+状态：已合 main 并公开为 Latest；准确候选、附件核对、真实公开 .18 → .19 更新与同版工具下载通过。范围见[计划](plan_0_1_19.md)：仅设置布局改动，不涉及任务管理、工具获取、更新与授权逻辑。
 
 ## 1. 风险与证据
 
@@ -30,6 +30,14 @@
 
 接受记录保存在 [v0.1.19.artifact.toml](releases/v0.1.19.artifact.toml)，发布须原样晋升，禁止重新构建或替换已验收文件。
 
-## 3. 公开交付
+## 3. 公开交付（2026-10-21）
 
-待完成：合 main、tag `v0.1.19`、发布工作流原样晋升、公开为 Latest、真实 .18 → .19 公开更新与同版工具下载。完成后在本节补齐证据。
+代码及接受记录已合入 main，发布标签 `v0.1.19` 指向 `52014ca8`。[main CI 39544108616](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39544108616) 与 [发布 39544113609](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39544113609) 成功。发布工作流按接受清单原样晋升四个文件，未重新构建；完整下载草稿后，两份 exe、BUILDINFO、SHA256SUMS 与候选逐字节相同。
+
+[公开 v0.1.19](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.19) 于 **2026-10-21T04:36:14Z** 发布，非草稿、非预发布，并设为 Latest。匿名 GitHub Latest API 核实版本、公开状态及四个附件。
+
+`public_update_probe.py` 使用正式 .18 更新器连接真实 GitHub Latest，检查、下载校验、重启至 .19 的 11 项检查全部通过；实际运行文件为新的 .19 官方版本化名称，内容为上述准确候选，旧名移除、旧版备份及设置保留，令牌仍为原用户/会话普通权限。结束后原桌面恢复，未替换用户安装文件。
+
+`tool_entry_probe.py --public-download` 从 .19 实际 My tasks 入口确认下载同 tag 的公开 Tskmgr；核对摘要与准确候选一致（Winmgr `3dc8cfaa…`、Tskmgr `8ed2227e…`），工具正常打开退出，原桌面恢复。
+
+物理混合 DPI、高对比度与屏幕阅读器覆盖仍需专门环境。已替代的 .18 计划归档，旧标签及公开附件不改写。
