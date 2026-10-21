@@ -8,11 +8,11 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DESKTOP_LAYERS={'side-resize','layout','appearance','interaction','taskmgr','update','settings','release'}
+DESKTOP_LAYERS={'side-resize','fullscreen','layout','appearance','interaction','taskmgr','update','settings','release'}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'memory', 'soak', 'resources', 'resource-gate', 'update-memory', 'diagnostics', 'fault', 'side-resize', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
+    parser.add_argument('--layer', choices=['check', 'unit', 'quality', 'memory', 'soak', 'resources', 'resource-gate', 'update-memory', 'diagnostics', 'fault', 'side-resize', 'fullscreen', 'layout', 'appearance', 'interaction', 'taskmgr', 'update', 'settings', 'release'], default='check')
     parser.add_argument('--filter', help='Rust test name/module filter; only with --layer unit')
     parser.add_argument('--pid', type=int, help='Existing test process; only memory/soak')
     parser.add_argument('--duration', type=float, help='Observation seconds; required for soak')
@@ -158,6 +158,9 @@ def main():
                 if args.layer in ['side-resize','release']:
                     import side_resize_probe
                     step('side taskbar drag resize and persistence',side_resize_probe.main)
+                if args.layer in ['fullscreen','release']:
+                    import fullscreen_yield_probe
+                    step('fullscreen app yield and topmost restoration',fullscreen_yield_probe.main)
                 if args.layer in ['update','release']:
                     import update_probe
                     step('manual update and rollback handoff',lambda:update_probe.main(release=args.layer=='release'))

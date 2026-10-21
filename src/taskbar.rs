@@ -27,10 +27,12 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DT_CENTER,
     DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_TOP, DT_VCENTER, DrawTextW,
-    EndPaint, FillRect, FrameRect, HBRUSH, HDC, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    EndPaint, FillRect, FrameRect, GetMonitorInfoW, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, RegisterHotKey, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     UnregisterHotKey, VIRTUAL_KEY, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_DOWN,
@@ -38,17 +40,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{
     ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
-    ABN_POSCHANGED, APPBARDATA, SHAppBarMessage,
+    ABN_FULLSCREENAPP, ABN_POSCHANGED, APPBARDATA, SHAppBarMessage,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyWindow, DrawIconEx,
-    GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW, HICON,
-    HWND_TOPMOST, IsIconic, IsWindow, KillTimer, PostMessageW, RegisterClassW, SM_CXSCREEN,
-    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SetTimer, SetWindowPos,
-    ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GetClassNameW, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, HICON, HWND_BOTTOM, HWND_TOPMOST, IsIconic, IsWindow,
+    IsWindowVisible, KillTimer, PostMessageW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetTimer,
+    SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -630,6 +633,117 @@ pub fn recover_workarea() {
     clear_workarea_state();
 }
 
+// --- fullscreen yield ------------------------------------------------------
+//
+// The stock taskbar drops out of the topmost band while a fullscreen app
+// (mstsc fullscreen, videos, games) is active on its monitor, and comes back
+// when the app leaves fullscreen. Without this, the bar covers one edge of
+// every fullscreen surface. Decisions are pure functions; the evaluation runs
+// on the message thread from the debounced refresh, the clock tick (backstop,
+// so a missed event heals within one tick) and `ABN_FULLSCREENAPP`.
+
+/// Whether `window` fully covers `monitor` (a fullscreen surface, not a
+/// maximized window: those stop at the work area and never cover the bar).
+fn covers_monitor(window: RECT, monitor: RECT) -> bool {
+    window.left <= monitor.left
+        && window.top <= monitor.top
+        && window.right >= monitor.right
+        && window.bottom >= monitor.bottom
+}
+
+/// Desktop hosts legitimately span the whole monitor and must not hide bars.
+fn is_desktop_host_class(class: &str) -> bool {
+    matches!(class, "Progman" | "WorkerW")
+}
+
+/// The monitor owned by a fullscreen foreground app, if any.
+fn fullscreen_monitor() -> Option<isize> {
+    // SAFETY: read-only queries on the foreground window; a stale handle makes
+    // the calls fail and the function return None.
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid == GetCurrentProcessId() {
+            return None;
+        }
+        let mut class = [0u16; 64];
+        let len = GetClassNameW(fg, &mut class);
+        if is_desktop_host_class(&String::from_utf16_lossy(&class[..len.max(0) as usize])) {
+            return None;
+        }
+        let monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let mut rect = RECT::default();
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() || GetWindowRect(fg, &mut rect).is_err() {
+            return None;
+        }
+        covers_monitor(rect, info.rcMonitor).then_some(monitor.0 as isize)
+    }
+}
+
+/// Where (re)docking must place a bar in the z-order: bottom while yielded.
+fn bar_insert_after(key: isize) -> HWND {
+    let yielded = lock_or_recover(bars())
+        .iter()
+        .any(|b| b.hwnd == key && b.yielded);
+    if yielded { HWND_BOTTOM } else { HWND_TOPMOST }
+}
+
+/// Re-evaluates which bars must yield to a fullscreen app and applies only
+/// the transitions. Message thread only (it touches `bars()`).
+fn update_fullscreen_yield() {
+    let fullscreen = fullscreen_monitor();
+    // Monitor lookups happen outside the bars() lock (project invariant: no
+    // slow or reentrant calls while a taskbar lock is held).
+    let handles: Vec<isize> = lock_or_recover(bars()).iter().map(|b| b.hwnd).collect();
+    let monitors: Vec<(isize, isize)> = handles
+        .into_iter()
+        .map(|key| {
+            // SAFETY: cheap same-process query; a dead HWND yields a null
+            // monitor, which simply never matches the fullscreen monitor.
+            let monitor =
+                unsafe { MonitorFromWindow(hwnd_from(key), MONITOR_DEFAULTTONEAREST).0 as isize };
+            (key, monitor)
+        })
+        .collect();
+    let changes: Vec<(isize, bool)> = {
+        let mut bars = lock_or_recover(bars());
+        monitors
+            .into_iter()
+            .filter_map(|(key, monitor)| {
+                let bar = bars.iter_mut().find(|b| b.hwnd == key)?;
+                let yield_now = fullscreen == Some(monitor);
+                (bar.yielded != yield_now).then(|| {
+                    bar.yielded = yield_now;
+                    (key, yield_now)
+                })
+            })
+            .collect()
+    };
+    for (key, yielded) in changes {
+        tracing::info!(hwnd = key, yielded, "taskbar fullscreen yield transition");
+        // SAFETY: z-order-only change on our own bar window.
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd_from(key),
+                Some(if yielded { HWND_BOTTOM } else { HWND_TOPMOST }),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
 fn hbrush(dc: HDC, v: isize) -> HBRUSH {
     unsafe {
         windows::Win32::Graphics::Gdi::SetDCBrushColor(dc, COLORREF(v as u32));
@@ -696,6 +810,9 @@ struct BarEntry {
     selected: Option<usize>,
     /// Foreground window before keyboard navigation; cleared when focus leaves.
     keyboard_return: isize,
+    /// A fullscreen app owns this bar's monitor: the bar has dropped out of
+    /// the topmost band until the app leaves fullscreen or the focus moves.
+    yielded: bool,
 }
 
 fn bars() -> &'static Mutex<Vec<BarEntry>> {
@@ -1302,7 +1419,7 @@ fn set_appbar_pos(hwnd: HWND, area: (i32, i32, i32, i32)) {
         }
         let _ = SetWindowPos(
             hwnd,
-            Some(HWND_TOPMOST),
+            Some(bar_insert_after(hwnd.0 as isize)),
             abd.rc.left,
             abd.rc.top,
             abd.rc.right - abd.rc.left,
@@ -1587,7 +1704,7 @@ fn reposition() {
             unsafe {
                 let _ = SetWindowPos(
                     hwnd_from(key),
-                    Some(HWND_TOPMOST),
+                    Some(bar_insert_after(key)),
                     r.left,
                     r.top,
                     r.right - r.left,
@@ -1659,6 +1776,9 @@ pub fn refresh() {
             break;
         }
     }
+    // After layout settles: foreground/show/hide events funnel into refresh,
+    // so this is where fullscreen transitions are noticed promptly.
+    update_fullscreen_yield();
 }
 fn refresh_inner() {
     reposition();
@@ -2136,6 +2256,9 @@ unsafe extern "system" fn wndproc_inner(
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == CLOCK_TIMER_ID => {
+            // Backstop for fullscreen transitions that fire no hooked window
+            // event (e.g. a programmatic resize); cheap read-only queries.
+            update_fullscreen_yield();
             // Layout is cached; a full-bar repaint is cheap and only redraws.
             let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             LRESULT(0)
@@ -2568,6 +2691,11 @@ unsafe extern "system" fn wndproc_inner(
                 if let Some(area) = area {
                     set_appbar_pos(hwnd, area);
                 }
+            }
+            // The broker's fullscreen signal; the shared evaluation decides
+            // per monitor, so both notification directions converge here.
+            if wparam.0 as u32 == ABN_FULLSCREENAPP {
+                update_fullscreen_yield();
             }
             LRESULT(0)
         }
@@ -3471,10 +3599,55 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Density, GroupAction, after_settings_for, budget, choose_anchor, density_for, digit_index,
-        fold_needed, group_label, group_menu_action, hide_pins, layout, overflows, stable_order,
-        step_index,
+        Density, GroupAction, after_settings_for, budget, choose_anchor, covers_monitor,
+        density_for, digit_index, fold_needed, group_label, group_menu_action, hide_pins,
+        is_desktop_host_class, layout, overflows, stable_order, step_index,
     };
+    use windows::Win32::Foundation::RECT;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn fullscreen_window_covers_its_monitor() {
+        let monitor = rect(0, 0, 1920, 1080);
+        // Exact fullscreen (mstsc fullscreen, exclusive fullscreen games).
+        assert!(covers_monitor(rect(0, 0, 1920, 1080), monitor));
+        // Borderless windows that overhang the monitor still count.
+        assert!(covers_monitor(rect(-8, -8, 1928, 1088), monitor));
+        // On a secondary monitor with non-zero origin.
+        let second = rect(1920, 0, 3840, 1080);
+        assert!(covers_monitor(rect(1920, 0, 3840, 1080), second));
+    }
+
+    #[test]
+    fn maximized_and_partial_windows_do_not_yield() {
+        let monitor = rect(0, 0, 1920, 1080);
+        // A maximized window stops at the work area above a bottom bar.
+        assert!(!covers_monitor(rect(0, 0, 1920, 1044), monitor));
+        // Same with a top/left/right bar reservation.
+        assert!(!covers_monitor(rect(0, 36, 1920, 1080), monitor));
+        assert!(!covers_monitor(rect(72, 0, 1920, 1080), monitor));
+        // An ordinary window never triggers the yield.
+        assert!(!covers_monitor(rect(100, 100, 900, 700), monitor));
+        // Fullscreen on monitor A does not cover monitor B.
+        let second = rect(1920, 0, 3840, 1080);
+        assert!(!covers_monitor(rect(0, 0, 1920, 1080), second));
+    }
+
+    #[test]
+    fn desktop_hosts_are_not_fullscreen_apps() {
+        assert!(is_desktop_host_class("Progman"));
+        assert!(is_desktop_host_class("WorkerW"));
+        assert!(!is_desktop_host_class("TscShellContainerClass")); // mstsc
+        assert!(!is_desktop_host_class(""));
+    }
 
     #[test]
     #[ignore = "private-desktop show-desktop fixture; use isolated_tray_probe.py --test show-desktop"]
