@@ -1,0 +1,6 @@
+version = "0.1.18"
+run_id = 39527504396
+source_commit = "2789fc733dc19ee67d1c7dc5abd66515c259f5d5"
+source_sha256 = "695e03f2ef3de8ae0ef823ff69c7e910151b3dea5dee74b73d0e3fc18bc2db9c"
+exe_sha256 = "d4d61f5d67ab3aad84cacd9e19a02712276d32a724ccedb7e8a943442bff05ef"
+tskmgr_sha256 = "761817028875df2845c7b0e3d8dc6f49dcefa1266e03b139beffb0b3b8e19e82"
