@@ -260,9 +260,11 @@ def main(*, include_run_regression=True, build=True):
         sequence = []
         for _ in range(10):
             key('TAB'); time.sleep(.035); sequence.append(u.GetDlgCtrlID(focus()))
-        check('native_tab_sequence_skips_disabled_radio_basis', sequence == [6102, 6103, 6108, 6401, 6120, 6205, 6114, 6132, 6141, 6101], sequence)
+        # Two-column order: left column (show/tray/merge/preview), then right column
+        # (task tools, update, configuration/advanced), then the fixed footer close.
+        check('native_tab_sequence_skips_disabled_radio_basis', sequence == [6102, 6103, 6108, 6410, 6411, 6413, 6401, 6120, 6205, 6114], sequence)
         key('SHIFT+TAB'); time.sleep(.05)
-        check('reverse_tab', u.GetDlgCtrlID(focus()) == 6141)
+        check('reverse_tab', u.GetDlgCtrlID(focus()) == 6205)
         focus_id(6120); key('ENTER')
         info = wait(lambda: window('minicon_winmgr_settings_info'))
         wait(lambda: u.IsWindowVisible(info))
