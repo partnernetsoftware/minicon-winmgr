@@ -137,7 +137,7 @@ fn scale_at(n: i32, dpi: u32) -> i32 {
     n * dpi as i32 / 96
 }
 fn is_heading(id: u16) -> bool {
-    matches!(id, 6200 | 6201 | 6210)
+    matches!(id, 6200 | 6201 | 6210 | 6214)
 }
 fn high_contrast() -> bool {
     let mut value = HIGHCONTRASTW {
@@ -157,7 +157,7 @@ fn high_contrast() -> bool {
 fn in_card(id: u16) -> bool {
     matches!(
         id,
-        UPDATE_STATUS..=RESTART_UPDATE | SHOW | TRAY
+        UPDATE_STATUS..=RESTART_UPDATE | MY_TASKS..=ALL_TASKS | SHOW | TRAY
             | NEVER
             | FULL
             | ALWAYS
@@ -628,6 +628,7 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
             check | WS_GROUP,
         ),
         (6305, "", 22, note),
+        (6214, crate::i18n::text("工具与更新"), 26, note),
         (
             MY_TASKS,
             crate::i18n::text("我的任务…"),
@@ -1279,8 +1280,8 @@ fn fit(center: bool) {
         })
     }
     .max(96);
-    let width = (640 * dpi as i32 / 96).min(work.right - work.left).max(1);
-    let height = (634 * dpi as i32 / 96).min(work.bottom - work.top).max(1);
+    let width = (1000 * dpi as i32 / 96).min(work.right - work.left).max(1);
+    let height = (680 * dpi as i32 / 96).min(work.bottom - work.top).max(1);
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -1408,9 +1409,27 @@ fn layout() {
         let mut top = scale(16);
         let mut positions = Vec::new();
         let mut row_top = top;
-        let horizontal = g.width >= scale(420);
-        let compact = g.width >= scale(520);
+        let columns = g.width >= scale(880);
+        let column_width = if columns {
+            (g.width - scale(24)) / 2
+        } else {
+            g.width
+        };
+        let mut column_x = 0;
+        let mut columns_top = top;
+        let mut left_bottom = 0;
+        let horizontal = column_width >= scale(420);
+        let compact = column_width >= scale(520);
         for c in controls.iter().filter(|c| !c.footer) {
+            if c.id == 6210 {
+                columns_top = top;
+            }
+            if columns && c.id == 6214 {
+                left_bottom = top;
+                top = columns_top;
+                row_top = top;
+                column_x = column_width + scale(24);
+            }
             if matches!(c.id, 6201 | 6191) {
                 let _ = ShowWindow(c.hwnd, SW_HIDE);
                 continue;
@@ -1490,7 +1509,7 @@ fn layout() {
                 top += scale(if c.id == 6200 { 18 } else { 8 });
             }
             let inset = if in_card(c.id) { scale(14) } else { 0 };
-            let available = (g.width - inset * 2).max(1);
+            let available = (column_width - inset * 2).max(1);
             let inline_label = compact && matches!(c.id, 6211 | 6212 | 6213 | 6220 | 6202);
             let inline_options = compact
                 && matches!(
@@ -1565,13 +1584,13 @@ fn layout() {
             } else {
                 scale(c.height).max(measured.bottom + scale(4))
             };
-            positions.push((c.id, x, top, width, height));
+            positions.push((c.id, column_x + x, top, width, height));
             top += height;
             if c.id == 6305 {
                 top += scale(6);
             }
         }
-        top += scale(12);
+        top = top.max(left_bottom) + scale(12);
         SelectObject(dc, old);
         let _ = ReleaseDC(Some(hwnd), dc);
         let scroll = with(|p| {
@@ -1585,6 +1604,7 @@ fn layout() {
             (6213, RIGHT),
             (SHOW, PREVIEW),
             (UPDATE_STATUS, RESTART_UPDATE),
+            (MY_TASKS, TOOL_STATUS),
         ]
         .into_iter()
         .filter_map(|(start, end)| {
@@ -1593,9 +1613,9 @@ fn layout() {
                 c.0 == end || (end == PREVIEW && c.0 == 6305) || (end == RIGHT && c.0 == 6311)
             })?;
             Some(RECT {
-                left: 0,
+                left: a.1 - scale(14),
                 top: a.2 - scale(10) - scroll,
-                right: g.width,
+                right: a.1 - scale(14) + column_width,
                 bottom: b.2 + b.4 + scale(10) - scroll,
             })
         })
@@ -1886,6 +1906,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_SIZE => {
                 layout();
+                let _ = unsafe { PostMessageW(Some(hwnd), ENSURE_FOCUS, WPARAM(0), LPARAM(0)) };
                 LRESULT(0)
             }
             WM_DPICHANGED => {
@@ -1902,6 +1923,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     );
                 }
                 layout();
+                let _ = unsafe { PostMessageW(Some(hwnd), ENSURE_FOCUS, WPARAM(0), LPARAM(0)) };
                 LRESULT(0)
             }
             WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_THEMECHANGED => {

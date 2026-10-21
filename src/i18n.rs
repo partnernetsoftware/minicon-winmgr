@@ -216,6 +216,7 @@ const CATALOG: &[(&str, &str)] = &[
     ("外观与位置", "Appearance"),
     ("外观与日常行为", "Appearance and everyday behavior"),
     ("任务与窗口", "Tasks & windows"),
+    ("工具与更新", "Tools & updates"),
     ("语言", "Language"),
     ("颜色主题", "Theme"),
     ("任务栏位置", "Position"),
