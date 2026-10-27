@@ -15,7 +15,9 @@ A lightweight Windows desktop shell built with Rust and Win32, designed as a rep
 Product principle: **Optional features you do not need should not load by default.** In 0.1.8, the legacy menu is not initialized by default, previews do not create a window until enabled, and Run creates its window and workers on first use. The notification host initializes according to shell identity and explicit configuration. See the [0.1.8 design and acceptance](docs/archive/plan_0_1_8.md).
 
 
-Current release: **[0.1.20](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.20)**. See the [release notes](docs/releases/v0.1.20.md), [product requirements](docs/prd.md), and [implementation plan](docs/plan_0_1_20.md). Linked specifications are currently primarily in Chinese.
+Current release: **[0.1.21](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.21)**. See the [release notes](docs/releases/v0.1.21.md), [product requirements](docs/prd.md), and [implementation plan](docs/archive/plan_0_1_20.md). Linked specifications are currently primarily in Chinese.
+
+Version 0.1.21 is public: the clock panel gains Desktop settings. In companion mode it opens the system background page; in replacement mode it can draw a solid colour desktop from Minicon with one window and one brush. The real .20 to .21 update and public tool download passed. See the [validation](docs/validation_0_1_21.md).
 
 Version 0.1.20 is public: the taskbar now yields to fullscreen apps — when a fullscreen foreground window (mstsc fullscreen, videos, games) owns a monitor, that monitor's bar drops out of the topmost band and restores itself when the app leaves fullscreen. The real .19 to .20 update and matching public tool download passed. Task trees, persistent human/agent notes and flags from 0.1.18 remain; see the [plan](docs/archive/plan_0_1_18.md) and [analysis contract](docs/task_analysis.md).
 

@@ -15,7 +15,9 @@
 产品原则：**用不上的可选功能，默认不加载。** 0.1.8 中，旧菜单默认不初始化，缩略预览默认不创建窗口，Run 的窗口和工作线程首次使用时才创建；通知宿主按外壳身份和显式配置决定初始化。详见 [0.1.8 设计与验收](docs/archive/plan_0_1_8.md)。
 
 
-当前公开版 **[0.1.20](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.20)**。版本事实见[发布说明](docs/releases/v0.1.20.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.20 计划](docs/plan_0_1_20.md)。
+当前公开版 **[0.1.21](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.21)**。版本事实见[发布说明](docs/releases/v0.1.21.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.21 计划](docs/archive/plan_0_1_20.md)。
+
+0.1.21 已公开：时钟通知面板新增“桌面设置”。伴随模式（Explorer 仍是外壳）下打开系统个性化背景页；替换模式下可选纯色桌面，由 Minicon 绘制，只用一个窗口和一把画刷。真实 .20 → .21 更新与公开工具下载通过。版本事实见[0.1.21 验收](docs/validation_0_1_21.md)。
 
 0.1.20 已公开：任务栏向全屏应用让位——mstsc 全屏、全屏视频等占据某显示器时，该显示器任务栏自动退出置顶，退出全屏后恢复，不再遮挡全屏画面。真实 .19 → .20 更新与公开工具下载通过。0.1.18 的任务树、人工/agent 笔记与异常标识继续可用；见[计划](docs/archive/plan_0_1_18.md)与[任务分析用法](docs/task_analysis.md)。
 

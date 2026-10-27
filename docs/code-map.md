@@ -1,6 +1,6 @@
 # 代码与文档地图
 
-> 2026-10-21 · 当前公开版 0.1.20；实际范围见[实施计划](plan_0_1_20.md)，证据与限制见[验收记录](validation_0_1_20.md)。[本轮梳理](review_0_1_12.md)保留开发前发现。
+> 2026-10-27 · 当前公开版 0.1.21；实际范围见[实施计划](plan_0_1_21.md)，证据与限制见[验收记录](validation_0_1_21.md)。[本轮梳理](review_0_1_12.md)保留开发前发现。
 
 | 用户路径 | 主要实现 | 规格/证据 |
 |---|---|---|
@@ -39,7 +39,7 @@ CI 与 release workflow 分别负责质量检查和产物发布。历史测试�
 
 - `src/i18n.rs`：English/中文界面目录、默认语言和自有窗口标题/控件本地化；不转换命令或用户输入。
 
-文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](archive/plan_0_1_9.md)；历史：[0.1.10 资源与稳健性](archive/plan_0_1_10.md)、[0.1.11](archive/plan_0_1_11.md)；当前公开版：[0.1.20](plan_0_1_20.md)。
+文档入口：[语言索引](../readme.md)、[English](../readme.en.md)、[简体中文](../readme.zh.md)。历史：[0.1.8 设计与交付](archive/plan_0_1_8.md)；历史：[0.1.9 设置更新](archive/plan_0_1_9.md)；历史：[0.1.10 资源与稳健性](archive/plan_0_1_10.md)、[0.1.11](archive/plan_0_1_11.md)；当前公开版：[0.1.20](archive/plan_0_1_20.md)。
 
 0.1.8：Run 快捷键路由在 `window`，窗口与 worker 在首次 `run_dialog::show` 创建；`run_history` 提供有界本地应用发现与路径/环境变量建议。主题化原生候选行保留完整 LB 字符串。`win_util::force_foreground` 处理跨权限 restore，`taskbar` 按点击坐标命中任务；专项脚本 `interaction_probe.py` / `taskmgr_probe.py` 纳入发布层。
 
