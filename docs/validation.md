@@ -1,6 +1,10 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.23](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.23)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.24](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.24)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.24
+
+已合 main 并公开为 Latest。发布包新增 zip，客户端优先用 Rust 解压库解出 exe；准确候选的 zip 与 exe 逐字节一致，更新层与全屏层通过；真实 .21 → .24 更新（走裸 exe）与公开工具下载通过，原外壳恢复。下载来源未改善，范围与限制见[本版验收](validation_0_1_24.md)。
 
 ## 0.1.23
 

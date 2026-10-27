@@ -15,7 +15,9 @@ A lightweight Windows desktop shell built with Rust and Win32, designed as a rep
 Product principle: **Optional features you do not need should not load by default.** In 0.1.8, the legacy menu is not initialized by default, previews do not create a window until enabled, and Run creates its window and workers on first use. The notification host initializes according to shell identity and explicit configuration. See the [0.1.8 design and acceptance](docs/archive/plan_0_1_8.md).
 
 
-Current release: **[0.1.23](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.23)**. See the [release notes](docs/releases/v0.1.23.md), [product requirements](docs/prd.md), and [implementation plan](docs/archive/plan_0_1_20.md). Linked specifications are currently primarily in Chinese.
+Current release: **[0.1.24](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.24)**. See the [release notes](docs/releases/v0.1.24.md), [product requirements](docs/prd.md), and [implementation plan](docs/archive/plan_0_1_20.md). Linked specifications are currently primarily in Chinese.
+
+Version 0.1.24 is public: manual updates prefer the release zip, unpacked by a Rust zip crate rather than system tools; the bare executable stays published. The download source is unchanged, so slow mainland downloads remain open until a mirror with signed checksums exists. See the [validation](docs/validation_0_1_24.md).
 
 Version 0.1.23 is public: in replacement mode the desktop can use a photo as its background (choose Yes in Desktop settings). The photo is decoded band by band, so no full-screen bitmap stays resident. See the [validation](docs/validation_0_1_23.md).
 
