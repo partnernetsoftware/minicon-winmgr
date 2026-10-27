@@ -135,23 +135,27 @@ fn finish(state: &mut State, key: &'static str, generation: u64, result: Result<
     }
 }
 
+/// Keys the settings UI may persist. Anything else is a programming error.
+fn is_ui_key(key: &str) -> bool {
+    [
+        crate::config::keys::TASKBAR_SHOW,
+        crate::config::keys::TASKBAR_TRAY,
+        crate::config::keys::TASKBAR_GROUP,
+        crate::config::keys::TASKBAR_GROUP_BY,
+        crate::config::keys::HOVER_PREVIEW,
+        crate::config::keys::LANGUAGE,
+        crate::config::keys::THEME_MODE,
+        crate::config::keys::SIDE_WIDTH,
+        crate::config::keys::TASKBAR_POSITION,
+        crate::config::keys::DESKTOP_COLOR,
+    ]
+    .contains(&key)
+}
+
 pub(crate) fn enqueue(key: &'static str, value: &str) {
     // Callers can only submit the supported UI-owned keys: memory stays bounded even
     // while IO is blocked or the user repeatedly changes the same setting.
-    assert!(
-        [
-            crate::config::keys::TASKBAR_SHOW,
-            crate::config::keys::TASKBAR_TRAY,
-            crate::config::keys::TASKBAR_GROUP,
-            crate::config::keys::TASKBAR_GROUP_BY,
-            crate::config::keys::HOVER_PREVIEW,
-            crate::config::keys::LANGUAGE,
-            crate::config::keys::THEME_MODE,
-            crate::config::keys::SIDE_WIDTH,
-            crate::config::keys::TASKBAR_POSITION
-        ]
-        .contains(&key)
-    );
+    assert!(is_ui_key(key));
     let writer = writer();
     let mut state = crate::win_util::lock_or_recover(&writer.state.0);
     state.generation += 1;
@@ -554,5 +558,16 @@ mod tests {
         assert_eq!(state.entries["key"].error.as_deref(), Some("new failure"));
         finish(&mut state, "key", 2, Ok(()));
         assert!(state.entries.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_colour_is_a_ui_key() {
+        // enqueue asserts this; a missing entry panics inside the colour chooser and drops the change.
+        assert!(is_ui_key(crate::config::keys::DESKTOP_COLOR));
     }
 }
