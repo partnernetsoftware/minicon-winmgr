@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tomllib
+import zipfile
 
 ROOT=Path(__file__).resolve().parents[1]
 REPO='partnernetsoftware/minicon-winmgr'
@@ -15,6 +16,9 @@ ARTIFACT='windows-x64-candidate'
 INPUTS=['src','Cargo.toml','Cargo.lock','build.rs','app.manifest','tskmgr.manifest','.cargo','scripts/build_candidate.py']
 FIELDS={'version','run_id','source_commit','source_sha256','exe_sha256'}
 TOOL_FIELD='tskmgr_sha256'
+ZIP_FIELD='zip_sha256'
+ZIP_SINCE=(0,1,24)
+ZIP_DATE=(1980,1,1,0,0,0)
 
 
 def command(*args):
@@ -36,7 +40,7 @@ def digest(path):
 
 
 def validate(info):
-    if set(info) not in (FIELDS,FIELDS|{TOOL_FIELD}):raise ValueError('Unexpected provenance fields')
+    if not FIELDS<=set(info)<=FIELDS|{TOOL_FIELD,ZIP_FIELD}:raise ValueError('Unexpected provenance fields')
     if not re.fullmatch(r'0\.[0-9]+\.[0-9]+',info['version']):raise ValueError('Invalid version')
     if type(info['run_id']) is not int or info['run_id']<=0:raise ValueError('Invalid producer run')
     for key,length in [('source_commit',40),('source_sha256',64),('exe_sha256',64)]:
@@ -45,8 +49,13 @@ def validate(info):
     if TOOL_FIELD in info and (not isinstance(info[TOOL_FIELD],str)
             or not re.fullmatch('[0-9a-f]{64}',info[TOOL_FIELD])):
         raise ValueError('Invalid tool digest')
+    if ZIP_FIELD in info and (not isinstance(info[ZIP_FIELD],str)
+            or not re.fullmatch('[0-9a-f]{64}',info[ZIP_FIELD])):
+        raise ValueError('Invalid zip digest')
     if tuple(map(int,info['version'].split('.'))) >= (0,1,16) and TOOL_FIELD not in info:
         raise ValueError('This release requires the task tool')
+    if tuple(map(int,info['version'].split('.'))) >= ZIP_SINCE and ZIP_FIELD not in info:
+        raise ValueError('This release requires the zip package')
     return info
 
 
@@ -72,8 +81,22 @@ def filename(value):return f'minicon-winmgr-v{value}-x86_64-windows.exe'
 def tool_filename(value):return f'minicon-tskmgr-v{value}-x86_64-windows.exe'
 
 
+def zip_filename(value):return f'minicon-winmgr-v{value}-x86_64-windows.zip'
+
+
+def build_zip(exe,path,value):
+    # One stored-name entry with fixed metadata so identical exe bytes give an
+    # identical archive (for the same zlib). No directories and no file-type
+    # bits; zipfile itself replaces a zero external_attr with 0o600<<16.
+    entry=zipfile.ZipInfo(filename(value),date_time=ZIP_DATE)
+    entry.compress_type=zipfile.ZIP_DEFLATED;entry.create_system=0;entry.external_attr=0
+    with zipfile.ZipFile(path,'x') as archive:
+        archive.writestr(entry,exe.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+
+
 def payloads(info):
     result=[(filename(info['version']),info['exe_sha256'])]
+    if ZIP_FIELD in info:result.append((zip_filename(info['version']),info[ZIP_FIELD]))
     if TOOL_FIELD in info:result.append((tool_filename(info['version']),info[TOOL_FIELD]))
     return result
 
@@ -85,13 +108,18 @@ def prepare(exe,output,tool=None):
     info=dict(version=version(),run_id=int(os.environ['GITHUB_RUN_ID']),
         source_commit=command('git','rev-parse','HEAD'),source_sha256=source_digest(),exe_sha256=digest(exe))
     if tool is not None:info[TOOL_FIELD]=digest(tool)
-    validate(info)
+    packaged=tuple(map(int,info['version'].split('.'))) >= ZIP_SINCE
+    # The zip digest exists only after the archive is built; check everything else first.
+    validate(dict(info,**{ZIP_FIELD:'0'*64}) if packaged else info)
     if tuple(map(int,info['version'].split('.'))) >= (0,1,18):
         if os.environ.get('MINICON_TSKMGR_SHA256') != info.get(TOOL_FIELD):
             raise ValueError('Official build must bind the exact companion digest; use build_candidate.py')
     output.mkdir(parents=True,exist_ok=False)
     shutil.copyfile(exe,output/filename(info['version']))
     if tool is not None:shutil.copyfile(tool,output/tool_filename(info['version']))
+    if packaged:
+        build_zip(output/filename(info['version']),output/zip_filename(info['version']),info['version'])
+        info[ZIP_FIELD]=digest(output/zip_filename(info['version']))
     write(output/'BUILDINFO.toml',info)
     (output/'SHA256SUMS.txt').write_text(checksums(info),encoding='ascii')
 
@@ -112,7 +140,7 @@ def promote(manifest,download,output,tag):
         '--dir',str(download)],cwd=ROOT,check=True)
     if load(download/'BUILDINFO.toml')!=info:raise ValueError('Downloaded provenance differs from reviewed manifest')
     for name,expected in payloads(info):
-        if digest(download/name)!=expected:raise ValueError('Downloaded executable digest differs from the tested artifact')
+        if digest(download/name)!=expected:raise ValueError('Downloaded payload digest differs from the tested artifact')
     if (download/'SHA256SUMS.txt').read_text(encoding='ascii')!=checksums(info):raise ValueError('Checksum file differs')
     output.mkdir(parents=True,exist_ok=False)
     for name in [*(name for name,_ in payloads(info)),'SHA256SUMS.txt','BUILDINFO.toml']:

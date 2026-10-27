@@ -1,5 +1,5 @@
 //! Manual update state machine. No startup I/O, networking, or resident worker.
-use crate::{update_http as http, update_install as install};
+use crate::{update_http as http, update_install as install, update_stream, update_zip};
 use std::{
     cell::RefCell,
     path::PathBuf,
@@ -44,6 +44,9 @@ pub(crate) struct Release {
     pub url: String,
     pub sums: String,
     pub name: String,
+    /// Release archive `(name, url)`, preferred when published. The bare executable
+    /// stays published for clients that predate the archive.
+    pub zip: Option<(String, String)>,
 }
 pub(crate) fn parse_release(bytes: &[u8], local: bool) -> Result<Release, String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
@@ -57,11 +60,14 @@ pub(crate) fn parse_release(bytes: &[u8], local: bool) -> Result<Release, String
     }
     let name = format!("minicon-winmgr-{tag}-x86_64-windows.exe");
     let assets = value["assets"].as_array().ok_or("missing assets")?;
-    let find = |wanted: &str| -> Result<String, String> {
+    let find = |wanted: &str| -> Result<Option<String>, String> {
         let matched: Vec<_> = assets
             .iter()
             .filter(|v| v["name"].as_str() == Some(wanted))
             .collect();
+        if matched.is_empty() {
+            return Ok(None);
+        }
         if matched.len() != 1 {
             return Err(format!("missing or ambiguous asset {wanted}"));
         }
@@ -75,13 +81,18 @@ pub(crate) fn parse_release(bytes: &[u8], local: bool) -> Result<Release, String
             return Err("asset URL is outside this repository".into());
         }
         http::Url::parse(url)?;
-        Ok(url.into())
+        Ok(Some(url.into()))
     };
+    let required =
+        |wanted: &str| find(wanted)?.ok_or_else(|| format!("missing or ambiguous asset {wanted}"));
+    let zip_name = format!("minicon-winmgr-{tag}-x86_64-windows.zip");
+    let zip = find(&zip_name)?.map(|url| (zip_name.clone(), url));
     Ok(Release {
         version: tag.trim_start_matches('v').into(),
-        url: find(&name)?,
-        sums: find("SHA256SUMS.txt")?,
+        url: required(&name)?,
+        sums: required("SHA256SUMS.txt")?,
         name,
+        zip,
     })
 }
 pub(crate) fn checksum(table: &[u8], name: &str) -> Result<String, String> {
@@ -102,6 +113,43 @@ pub(crate) fn checksum(table: &[u8], name: &str) -> Result<String, String> {
     }
     result.ok_or_else(|| "asset checksum missing".into())
 }
+/// Archive staged beside the running executable. The file is removed when dropped, so
+/// success, failure and cancellation all clean up.
+struct StagedArchive {
+    path: PathBuf,
+}
+
+impl StagedArchive {
+    fn create() -> Result<Self, String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let parent = exe.parent().ok_or("no executable directory")?;
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        Ok(Self {
+            path: parent.join(format!(
+                ".winmgr-update-zip-{}-{id}.zip",
+                std::process::id()
+            )),
+        })
+    }
+
+    fn create_file(&self) -> Result<std::fs::File, String> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl Drop for StagedArchive {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn verify(bytes: &[u8], expected: &str) -> Result<(), String> {
     crate::update_stream::verify_reader(std::io::Cursor::new(bytes), expected)
@@ -270,22 +318,56 @@ pub(crate) fn download() {
             &cancel,
         )?;
         let hash = checksum(&sums, &release.name)?;
+        let archive = match &release.zip {
+            Some((name, url)) => Some((checksum(&sums, name)?, url.clone())),
+            None => None,
+        };
         Ok(Event::Staged(install::prepare_cancellable(
             &hash,
             &release.version,
             |file| {
                 use std::io::Write;
-                http::get_into_cancellable(
-                    &release.url,
-                    MAX_EXE,
-                    Duration::from_secs(300),
-                    |count| {
-                        progress.store(count, Ordering::Relaxed);
-                    },
-                    |chunk| file.write_all(chunk).map_err(|e| e.to_string()),
-                    &cancel,
-                )?;
-                Ok(())
+                match &archive {
+                    Some((zip_hash, url)) => {
+                        let staged = StagedArchive::create()?;
+                        {
+                            let mut writer = staged.create_file()?;
+                            http::get_into_cancellable(
+                                url,
+                                update_zip::MAX_EXE as usize,
+                                Duration::from_secs(300),
+                                |count| {
+                                    progress.store(count, Ordering::Relaxed);
+                                },
+                                |chunk| writer.write_all(chunk).map_err(|e| e.to_string()),
+                                &cancel,
+                            )?;
+                            writer.sync_all().map_err(|e| e.to_string())?;
+                        }
+                        if update_stream::hash_file(&staged.path)? != *zip_hash {
+                            return Err("release archive SHA-256 mismatch".into());
+                        }
+                        let mut reader =
+                            std::fs::File::open(&staged.path).map_err(|e| e.to_string())?;
+                        update_zip::extract_exe(&mut reader, &release.name, file, || {
+                            cancel.check()
+                        })?;
+                        Ok(())
+                    }
+                    None => {
+                        http::get_into_cancellable(
+                            &release.url,
+                            MAX_EXE,
+                            Duration::from_secs(300),
+                            |count| {
+                                progress.store(count, Ordering::Relaxed);
+                            },
+                            |chunk| file.write_all(chunk).map_err(|e| e.to_string()),
+                            &cancel,
+                        )?;
+                        Ok(())
+                    }
+                }
             },
             || cancel.check(),
         )?))
@@ -520,6 +602,7 @@ mod tests {
                 url: String::new(),
                 sums: String::new(),
                 name: String::new(),
+                zip: None,
             }))
         });
         let deadline = std::time::Instant::now();
@@ -562,6 +645,25 @@ mod tests {
         value["prerelease"] = false.into();
         value["assets"][0]["browser_download_url"] = "https://example.com/app.exe".into();
         assert!(parse_release(&serde_json::to_vec(&value).unwrap(), false).is_err());
+    }
+    #[test]
+    fn release_prefers_an_archive_only_from_this_repository() {
+        let tag = "v0.1.24";
+        let exe = format!("minicon-winmgr-{tag}-x86_64-windows.exe");
+        let zip = format!("minicon-winmgr-{tag}-x86_64-windows.zip");
+        let base =
+            format!("https://github.com/partnernetsoftware/minicon-winmgr/releases/download/{tag}");
+        let mut value = serde_json::json!({"tag_name":tag,"draft":false,"prerelease":false,"assets":[
+            {"name":exe,"browser_download_url":format!("{base}/{exe}")},
+            {"name":"SHA256SUMS.txt","browser_download_url":format!("{base}/SHA256SUMS.txt")},
+            {"name":zip,"browser_download_url":format!("{base}/{zip}")}]});
+        let release = parse_release(&serde_json::to_vec(&value).unwrap(), false).unwrap();
+        assert_eq!(release.zip, Some((zip.clone(), format!("{base}/{zip}"))));
+        value["assets"][2]["browser_download_url"] = "https://example.com/a.zip".into();
+        assert!(parse_release(&serde_json::to_vec(&value).unwrap(), false).is_err());
+        value["assets"].as_array_mut().unwrap().pop();
+        let release = parse_release(&serde_json::to_vec(&value).unwrap(), false).unwrap();
+        assert_eq!(release.zip, None);
     }
     #[test]
     fn rejects_hash_corruption_and_wrong_machine() {

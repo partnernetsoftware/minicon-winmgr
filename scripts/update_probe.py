@@ -25,15 +25,15 @@ def build_fixture(release=False):
     fixture=p.ROOT/'target/update-fixture-source';fixture.mkdir(parents=True,exist_ok=True)
     shutil.copytree(p.ROOT/'src',fixture/'src',dirs_exist_ok=True)
     manifest=(p.ROOT/'Cargo.toml').read_text(encoding='utf-8').replace('name = "minicon-winmgr"','name = "minicon-winmgr-update-fixture"',1).replace(f'version = "{CURRENT}"',f'version = "{PREVIOUS}"',1)
-    manifest=manifest.replace('edition = "2024"','edition = "2024"\nautobins = false',1)+'\n[[bin]]\nname = "winmgr-update-fixture"\npath = "src/main.rs"\n'
+    manifest=manifest.replace('edition = "2024"','edition = "2024"\nautobins = false',1).replace('default-run = "minicon-winmgr"','default-run = "winmgr-update-fixture"',1)+'\n[lib]\nname = "minicon_winmgr"\npath = "src/lib.rs"\n\n[[bin]]\nname = "winmgr-update-fixture"\npath = "src/main.rs"\n'
     (fixture/'Cargo.toml').write_bytes(manifest.encode())
     shutil.copy2(p.ROOT/'Cargo.lock',fixture/'Cargo.lock')
     target=p.ROOT/('target/release-validation' if release else 'target')
     subprocess.run(['cargo','build','--manifest-path',str(fixture/'Cargo.toml'),'--target-dir',str(target),*(['--release'] if release else [])],cwd=p.ROOT,check=True)
     return target/('release' if release else 'debug')/'winmgr-update-fixture.exe'
 
-def main(*,release=False,previous_artifact=None):
-    output=OUT/('historical-public' if previous_artifact is not None else 'current-backport')
+def main(*,release=False,previous_artifact=None,archive=False):
+    output=OUT/(('historical-public' if previous_artifact is not None else 'current-backport')+('-archive' if archive else ''))
     output.mkdir(parents=True,exist_ok=True)
     fixture=Path(previous_artifact).resolve(strict=True) if previous_artifact is not None else build_fixture(release)
     candidate=p.SOURCE.read_bytes();old_bytes=fixture.read_bytes()
@@ -47,17 +47,31 @@ def main(*,release=False,previous_artifact=None):
     report['fixture_kind']='historical-public' if previous_artifact is not None else 'current-backport'
     shell=p.shell_settings()
     mode={'value':'good','payload':candidate};requests=[];created=[]
+    def zip_bytes():
+        # Single-entry archive holding the exact payload, shaped like the release archive.
+        import io,zipfile
+        buffer=io.BytesIO()
+        with zipfile.ZipFile(buffer,'w',zipfile.ZIP_DEFLATED) as archive_file:
+            info=zipfile.ZipInfo(f'minicon-winmgr-v{CURRENT}-x86_64-windows.exe',(1980,1,1,0,0,0))
+            info.external_attr=0
+            archive_file.writestr(info,mode['payload'])
+        return buffer.getvalue()
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self,*args):pass
         def do_GET(self):
             requests.append(self.path)
             if mode['value']=='rate':self.send_error(429);return
             if self.path=='/latest':
-                body=json.dumps({'tag_name':f'v{CURRENT}','draft':False,'prerelease':False,'assets':[{'name':f'minicon-winmgr-v{CURRENT}-x86_64-windows.exe','browser_download_url':base+'/app.exe'},{'name':'SHA256SUMS.txt','browser_download_url':base+'/sums'}]}).encode()
+                assets=[{'name':f'minicon-winmgr-v{CURRENT}-x86_64-windows.exe','browser_download_url':base+'/app.exe'},{'name':'SHA256SUMS.txt','browser_download_url':base+'/sums'}]
+                if archive:assets.append({'name':f'minicon-winmgr-v{CURRENT}-x86_64-windows.zip','browser_download_url':base+'/app.zip'})
+                body=json.dumps({'tag_name':f'v{CURRENT}','draft':False,'prerelease':False,'assets':assets}).encode()
             elif self.path=='/sums':
                 digest='0'*64 if mode['value']=='bad_hash' else hashlib.sha256(mode['payload']).hexdigest()
-                body=(digest+f'  minicon-winmgr-v{CURRENT}-x86_64-windows.exe\n').encode()
+                text=digest+f'  minicon-winmgr-v{CURRENT}-x86_64-windows.exe\n'
+                if archive:text+=hashlib.sha256(zip_bytes()).hexdigest()+f'  minicon-winmgr-v{CURRENT}-x86_64-windows.zip\n'
+                body=text.encode()
             elif self.path=='/app.exe':body=mode['payload']
+            elif archive and self.path=='/app.zip':body=zip_bytes()
             else:self.send_error(404);return
             self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
     server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
@@ -149,7 +163,8 @@ def main(*,release=False,previous_artifact=None):
         p.click(RESTART)
         p.wait(lambda:(stage/'error.txt').exists() and (stage/'failed.exe').exists() and p.message() and p.pid(p.message())!=before and p.panel() and 'restored' in status().lower(),timeout=40)
         check('unacknowledged_candidate_rolls_back_and_restarts',exe.read_bytes()==old_bytes and not (stage/'started').exists())
-        check('all_network_requests_stay_on_local_fixture',all(path in ['/latest','/sums','/app.exe'] for path in requests),len(requests))
+        check('all_network_requests_stay_on_local_fixture',all(path in ['/latest','/sums','/app.exe','/app.zip'] for path in requests),len(requests))
+        check('archive_is_preferred_over_bare_executable',not archive or ('/app.zip' in requests and '/app.exe' not in requests),len(requests))
         report['passed']=True
     except Exception as error:
         report['passed']=False;report['error']=repr(error)

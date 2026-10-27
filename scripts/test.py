@@ -164,6 +164,7 @@ def main():
                 if args.layer in ['update','release']:
                     import update_probe
                     step('manual update and rollback handoff',lambda:update_probe.main(release=args.layer=='release'))
+                    step('manual update from a zip release archive',lambda:update_probe.main(archive=True))
                     if args.layer=='release':
                         step('published baseline updater to exact candidate and rollback',lambda:update_probe.main(release=True,previous_artifact=args.baseline))
                 if args.layer in ['taskmgr','release']:
