@@ -6,6 +6,7 @@
 mod appearance;
 mod bar_tip;
 mod config;
+mod desktop_dialog;
 mod desktop_surface;
 mod diagnostic_export;
 mod diagnostic_ui;

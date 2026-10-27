@@ -14,12 +14,8 @@ use windows::Win32::Graphics::Gdi::{
     BLACK_BRUSH, BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetStockObject,
     HBRUSH, InvalidateRect, PAINTSTRUCT,
 };
-use windows::Win32::UI::Controls::Dialogs::{
-    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, GetOpenFileNameW, OFN_FILEMUSTEXIST,
-    OFN_HIDEREADONLY, OFN_PATHMUSTEXIST, OPENFILENAMEW,
-};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::PCWSTR;
 
 const CLASS: &str = "minicon_winmgr_desktop";
 
@@ -40,6 +36,7 @@ fn colorref((r, g, b): Rgb) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
 
+#[cfg(test)]
 fn rgb_of(value: COLORREF) -> Rgb {
     (
         (value.0 & 0xff) as u8,
@@ -210,72 +207,27 @@ pub(crate) fn shutdown() {
     SURFACE.with(|s| *s.borrow_mut() = None);
 }
 
-/// Asks whether to choose a photo or a colour, then runs that chooser. Used only in
-/// replacement mode, where the system personalisation page could not show the change.
+/// Opens the desktop settings dialog and applies the result. Used only in replacement
+/// mode, where the system personalisation page could not show the change.
 pub(crate) fn choose_background() {
-    let question = crate::i18n::text("是：选择图片    否：选择纯色\n取消：不更改");
-    let answer = unsafe {
-        MessageBoxW(
-            None,
-            PCWSTR(wide(question).as_ptr()),
-            PCWSTR(wide(crate::i18n::text("桌面设置")).as_ptr()),
-            MB_YESNOCANCEL | MB_ICONQUESTION,
-        )
+    let Some(instance) = SURFACE.with(|s| s.borrow().as_ref().map(|s| s.instance)) else {
+        return;
     };
-    if answer == IDYES {
-        choose_picture();
-    } else if answer == IDNO {
-        choose_colour();
-    }
-}
-
-/// Opens the system colour chooser and applies the result.
-fn choose_colour() {
     let config = crate::config::current();
-    let current = config.desktop_color.unwrap_or((0, 0, 0));
-    let mut custom = [COLORREF(0); 16];
-    let mut chooser = CHOOSECOLORW {
-        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
-        rgbResult: colorref(current),
-        lpCustColors: custom.as_mut_ptr(),
-        Flags: CC_RGBINIT | CC_FULLOPEN,
-        ..Default::default()
+    let initial = crate::desktop_dialog::Choice {
+        color: config.desktop_color,
+        wallpaper: config.desktop_wallpaper,
     };
-    if !unsafe { ChooseColorW(&mut chooser) }.as_bool() {
+    let Some(choice) = crate::desktop_dialog::run(instance, initial.clone(), HWND::default())
+    else {
         return;
-    }
-    let color = rgb_of(chooser.rgbResult);
-    crate::config::set_desktop_color(Some(color));
-    apply(Some(color), config.desktop_wallpaper);
-}
-
-/// Opens the system file chooser for a photo and applies it over the current colour.
-fn choose_picture() {
-    let filter: Vec<u16> = "Images (*.jpg;*.jpeg;*.png;*.bmp)\0*.jpg;*.jpeg;*.png;*.bmp\0\0"
-        .encode_utf16()
-        .collect();
-    let mut file = vec![0u16; 1024];
-    let title = wide(crate::i18n::text("选择桌面图片"));
-    let mut dialog = OPENFILENAMEW {
-        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-        lpstrFilter: PCWSTR(filter.as_ptr()),
-        lpstrFile: PWSTR(file.as_mut_ptr()),
-        nMaxFile: file.len() as u32,
-        lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY,
-        ..Default::default()
     };
-    if !unsafe { GetOpenFileNameW(&mut dialog) }.as_bool() {
+    if choice == initial {
         return;
     }
-    let end = file.iter().position(|&c| c == 0).unwrap_or(file.len());
-    let path = String::from_utf16_lossy(&file[..end]);
-    if path.trim().is_empty() {
-        return;
-    }
-    crate::config::set_desktop_wallpaper(Some(&path));
-    let config = crate::config::current();
-    apply(config.desktop_color, config.desktop_wallpaper);
+    crate::config::set_desktop_color(choice.color);
+    crate::config::set_desktop_wallpaper(choice.wallpaper.as_deref());
+    apply(choice.color, choice.wallpaper);
 }
 
 /// Paints the background: colour (or black when only a photo is set), then the photo

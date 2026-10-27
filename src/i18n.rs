@@ -335,6 +335,13 @@ const CATALOG: &[(&str, &str)] = &[
 Cancel: no change",
     ),
     ("选择桌面图片", "Choose a desktop photo"),
+    ("确定", "OK"),
+    ("颜色", "Colour"),
+    ("背景图片", "Background photo"),
+    ("选择颜色…", "Choose colour…"),
+    ("浏览…", "Browse…"),
+    ("无图片", "No photo"),
+    ("未设置", "Not set"),
     ("回收站", "Recycle Bin"),
     ("无法打开此入口", "Unable to open shortcut"),
     (
