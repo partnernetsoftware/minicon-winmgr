@@ -267,6 +267,20 @@ mod tests {
         assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
         let instance = HINSTANCE(unsafe { GetModuleHandleW(None) }.unwrap().0);
         install(instance).unwrap();
+        // The chooser path persists first; the surface must follow from the saved value.
+        assert!(crate::config::set_desktop_color(Some((0x1e, 0x3a, 0x5f))));
+        let settings = crate::config::settings_path().unwrap();
+        let saved = (0..60).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::fs::read_to_string(&settings)
+                .map(|text| text.contains("desktop.color") && text.contains("#1E3A5F"))
+                .unwrap_or(false)
+        });
+        assert!(
+            saved,
+            "desktop.color was not persisted to {}",
+            settings.display()
+        );
         let hwnd = || SURFACE.with(|s| s.borrow().as_ref().unwrap().hwnd);
         let pump = || unsafe {
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
