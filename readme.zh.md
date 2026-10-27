@@ -15,7 +15,9 @@
 产品原则：**用不上的可选功能，默认不加载。** 0.1.8 中，旧菜单默认不初始化，缩略预览默认不创建窗口，Run 的窗口和工作线程首次使用时才创建；通知宿主按外壳身份和显式配置决定初始化。详见 [0.1.8 设计与验收](docs/archive/plan_0_1_8.md)。
 
 
-当前公开版 **[0.1.24](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.24)**。版本事实见[发布说明](docs/releases/v0.1.24.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.24 计划](docs/archive/plan_0_1_20.md)。
+当前公开版 **[0.1.25](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.25)**。版本事实见[发布说明](docs/releases/v0.1.25.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.25 计划](docs/archive/plan_0_1_20.md)。
+
+0.1.25 已公开：替换模式的“桌面设置”改为一个对话框，颜色与背景图片在同一处设置；背景可选系统自带壁纸或自己选的图片。版本事实见[0.1.25 验收](docs/validation_0_1_25.md)。
 
 0.1.24 已公开：手动更新优先使用发布包 zip，由 Rust 解压库解出 exe，不调用系统工具；裸 exe 附件保留。下载来源未变，国内下载速度问题仍待镜像与签名方案。版本事实见[0.1.24 验收](docs/validation_0_1_24.md)。
 
