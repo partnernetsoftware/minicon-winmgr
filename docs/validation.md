@@ -1,6 +1,10 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.22](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.22)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.23](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.23)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.23
+
+已合 main 并公开为 Latest。替换模式桌面支持照片背景，逐段解码绘制；准确候选的私有桌面与候选层回归通过，四个附件原样晋升并与候选一致；真实 .21 → .23 更新与公开工具下载通过，原外壳恢复。范围与限制见[本版验收](validation_0_1_23.md)。
 
 ## 0.1.22
 
