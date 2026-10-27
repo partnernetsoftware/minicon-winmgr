@@ -184,6 +184,7 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 | `appearance.mode` | `light` \| `dark` \| `auto` | `auto`；环境 `MINICON_THEME_MODE` |
 | `taskbar.side_width` | `160`–`480` DIP；有效像素宽度还受所在屏幕三分之一限制 | `180`；左右共用，通过内侧边缘拖动保存（0.1.10） |
 | `taskbar.position` | `bottom` \| `top` \| `left` \| `right` | `bottom`；环境 `MINICON_TASKBAR_POSITION` |
+| `desktop.color` | `#RRGGBB`（空值清除） | 未设置；仅替换模式下 Minicon 绘制纯色桌面（0.1.21），设置入口见 [N6](prd_1_1_2.md) |
 | `show_taskbar`（别名 `taskbar.show`） | `true` \| `false` | `true` |
 | `taskbar.tray` | `true` \| `false` | `true`（通知区域条；两形态下图标与可点性不同，见 [`prd_1_1.md`](prd_1_1.md)「通知区 / 托盘」） |
 | `taskbar.group` | `never` \| `when_full` \| `always` | `never` |

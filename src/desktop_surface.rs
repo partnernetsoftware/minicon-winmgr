@@ -1,0 +1,260 @@
+//! Solid-colour desktop surface, drawn only when we are the shell (replacement mode).
+//!
+//! Replacement mode closes Explorer's desktop host, so nothing paints the
+//! background. One borderless, non-activating window spans the virtual screen
+//! at the bottom of the z-order and fills itself with a single brush. It owns no
+//! bitmaps and no thread, so its cost is one window and one brush. Companion mode
+//! leaves the desktop to Explorer and never creates this window.
+use crate::win_util::{guard_abi, wide};
+use std::cell::RefCell;
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, HBRUSH, InvalidateRect,
+    PAINTSTRUCT,
+};
+use windows::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::PCWSTR;
+
+const CLASS: &str = "minicon_winmgr_desktop";
+
+/// An `(r, g, b)` triple as stored in `desktop.color`.
+pub type Rgb = (u8, u8, u8);
+
+struct Surface {
+    instance: HINSTANCE,
+    hwnd: HWND,
+    brush: HBRUSH,
+    color: Option<Rgb>,
+}
+
+thread_local! { static SURFACE: RefCell<Option<Surface>> = const { RefCell::new(None) }; }
+
+fn colorref((r, g, b): Rgb) -> COLORREF {
+    COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
+}
+
+fn rgb_of(value: COLORREF) -> Rgb {
+    (
+        (value.0 & 0xff) as u8,
+        (value.0 >> 8 & 0xff) as u8,
+        (value.0 >> 16 & 0xff) as u8,
+    )
+}
+
+/// Registers the window class and remembers the instance. Creates nothing visible.
+pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Error>> {
+    let name = wide(CLASS);
+    let class = WNDCLASSW {
+        lpfnWndProc: Some(proc),
+        hInstance: instance,
+        lpszClassName: PCWSTR(name.as_ptr()),
+        ..Default::default()
+    };
+    unsafe {
+        RegisterClassW(&class);
+    }
+    SURFACE.with(|s| {
+        *s.borrow_mut() = Some(Surface {
+            instance,
+            hwnd: HWND::default(),
+            brush: HBRUSH::default(),
+            color: None,
+        })
+    });
+    Ok(())
+}
+
+/// Shows the surface when we are the shell and a colour is configured.
+pub(crate) fn start() {
+    if !crate::shell_registry::is_self_shell() {
+        return;
+    }
+    if let Some(color) = crate::config::current().desktop_color {
+        apply(Some(color));
+    }
+}
+
+/// Applies a colour, or hides the surface when `None`.
+pub(crate) fn apply(color: Option<Rgb>) {
+    let Some(instance) = SURFACE.with(|s| s.borrow().as_ref().map(|s| s.instance)) else {
+        return;
+    };
+    let Some(color) = color else {
+        hide();
+        return;
+    };
+    let hwnd = ensure_window(instance);
+    if hwnd.is_invalid() {
+        return;
+    }
+    SURFACE.with(|s| {
+        let mut guard = s.borrow_mut();
+        let Some(surface) = guard.as_mut() else {
+            return;
+        };
+        if surface.color != Some(color) {
+            unsafe {
+                if !surface.brush.is_invalid() {
+                    let _ = DeleteObject(surface.brush.into());
+                }
+                surface.brush = CreateSolidBrush(colorref(color));
+            }
+            surface.color = Some(color);
+        }
+    });
+    fit_and_show(hwnd);
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, true);
+    }
+}
+
+fn ensure_window(instance: HINSTANCE) -> HWND {
+    let existing = SURFACE.with(|s| s.borrow().as_ref().map(|s| s.hwnd).unwrap_or_default());
+    if !existing.is_invalid() {
+        return existing;
+    }
+    let name = wide(CLASS);
+    let created = unsafe {
+        CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            PCWSTR(name.as_ptr()),
+            PCWSTR::null(),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(instance),
+            None,
+        )
+    };
+    let hwnd = match created {
+        Ok(hwnd) => hwnd,
+        Err(error) => {
+            tracing::error!(%error, "desktop surface window failed; continuing without it");
+            return HWND::default();
+        }
+    };
+    SURFACE.with(|s| {
+        if let Some(surface) = s.borrow_mut().as_mut() {
+            surface.hwnd = hwnd;
+        }
+    });
+    hwnd
+}
+
+fn fit_and_show(hwnd: HWND) {
+    unsafe {
+        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let width = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
+        let height = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_BOTTOM),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+/// Hides the surface and releases its brush; the window is kept for reuse.
+fn hide() {
+    let hwnd = SURFACE.with(|s| s.borrow().as_ref().map(|s| s.hwnd).unwrap_or_default());
+    if hwnd.is_invalid() {
+        return;
+    }
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+    SURFACE.with(|s| {
+        if let Some(surface) = s.borrow_mut().as_mut() {
+            if !surface.brush.is_invalid() {
+                unsafe {
+                    let _ = DeleteObject(surface.brush.into());
+                }
+            }
+            surface.brush = HBRUSH::default();
+            surface.color = None;
+        }
+    });
+}
+
+pub(crate) fn shutdown() {
+    hide();
+    let hwnd = SURFACE.with(|s| s.borrow().as_ref().map(|s| s.hwnd).unwrap_or_default());
+    if !hwnd.is_invalid() {
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+    SURFACE.with(|s| *s.borrow_mut() = None);
+}
+
+/// Opens the system colour chooser and applies the result. Used only in replacement
+/// mode, where the system personalisation page could not show the change.
+pub(crate) fn choose_colour() {
+    let current = crate::config::current().desktop_color.unwrap_or((0, 0, 0));
+    let mut custom = [COLORREF(0); 16];
+    let mut chooser = CHOOSECOLORW {
+        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+        rgbResult: colorref(current),
+        lpCustColors: custom.as_mut_ptr(),
+        Flags: CC_RGBINIT | CC_FULLOPEN,
+        ..Default::default()
+    };
+    if !unsafe { ChooseColorW(&mut chooser) }.as_bool() {
+        return;
+    }
+    let color = rgb_of(chooser.rgbResult);
+    crate::config::set_desktop_color(Some(color));
+    apply(Some(color));
+}
+
+unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    guard_abi(
+        "desktop_surface::proc",
+        || unsafe {
+            match msg {
+                WM_ERASEBKGND => return LRESULT(1),
+                WM_PAINT => {
+                    let mut paint = PAINTSTRUCT::default();
+                    let hdc = BeginPaint(hwnd, &mut paint);
+                    let brush =
+                        SURFACE.with(|s| s.borrow().as_ref().map(|s| s.brush).unwrap_or_default());
+                    if !brush.is_invalid() {
+                        let _ = FillRect(hdc, &paint.rcPaint, brush);
+                    }
+                    let _ = EndPaint(hwnd, &paint);
+                    return LRESULT(0);
+                }
+                WM_DISPLAYCHANGE => {
+                    fit_and_show(hwnd);
+                    return LRESULT(0);
+                }
+                _ => {}
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        },
+        || unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colour_order_round_trips_through_colorref() {
+        let color = (0x12, 0x34, 0x56);
+        assert_eq!(colorref(color), COLORREF(0x0056_3412));
+        assert_eq!(rgb_of(colorref(color)), color);
+        assert_eq!(rgb_of(COLORREF(0x00ff_ffff)), (255, 255, 255));
+    }
+}

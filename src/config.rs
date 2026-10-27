@@ -32,6 +32,7 @@ pub mod keys {
     pub const THEME_MODE: &str = "appearance.mode";
     pub const TASKBAR_POSITION: &str = "taskbar.position";
     pub const SIDE_WIDTH: &str = "taskbar.side_width";
+    pub const DESKTOP_COLOR: &str = "desktop.color";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -191,6 +192,16 @@ impl GroupBy {
 pub(crate) const SIDE_WIDTH_MIN: i32 = 160;
 pub(crate) const SIDE_WIDTH_MAX: i32 = 480;
 
+/// Accepts `#RRGGBB` or `RRGGBB`; anything else is rejected and leaves the default in place.
+fn parse_hex_color(value: &str) -> Option<(u8, u8, u8)> {
+    let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
+    Some((channel(0..2)?, channel(2..4)?, channel(4..6)?))
+}
+
 fn parse_side_width(value: &str) -> Option<i32> {
     value
         .trim()
@@ -239,6 +250,9 @@ pub struct Config {
     /// Pinned folders rendered as start-menu rows (`folders = a;b`); each row
     /// expands to its children on click. Empty by default.
     pub folders: Vec<String>,
+    /// Solid desktop colour (`desktop.color`, `#RRGGBB`), drawn only in replacement
+    /// mode. `None` keeps the default: no Minicon desktop surface.
+    pub desktop_color: Option<(u8, u8, u8)>,
 }
 
 impl Default for Config {
@@ -258,6 +272,7 @@ impl Default for Config {
             hover_preview: false,
             start_menu: false,
             folders: Vec::new(),
+            desktop_color: None,
         }
     }
 }
@@ -341,6 +356,13 @@ fn apply(cfg: &mut Config, key: &str, value: &str) {
         keys::SIDE_WIDTH => {
             if let Some(width) = parse_side_width(value) {
                 cfg.side_width = width;
+            }
+        }
+        keys::DESKTOP_COLOR => {
+            if value.trim().is_empty() {
+                cfg.desktop_color = None;
+            } else if let Some(color) = parse_hex_color(value) {
+                cfg.desktop_color = Some(color);
             }
         }
         keys::TASKBAR_POSITION => {
@@ -818,6 +840,11 @@ pub fn set_language(language: crate::i18n::Language) -> bool {
 }
 pub fn set_theme_mode(mode: ThemeMode) -> bool {
     update(|c| c.theme_mode = mode, keys::THEME_MODE, mode.as_key())
+}
+/// `None` clears the colour; the empty value it persists reads back as `None`.
+pub fn set_desktop_color(color: Option<(u8, u8, u8)>) -> bool {
+    let value = color.map_or_else(String::new, |(r, g, b)| format!("#{r:02X}{g:02X}{b:02X}"));
+    update(|c| c.desktop_color = color, keys::DESKTOP_COLOR, &value)
 }
 pub fn set_side_width(width: i32) -> bool {
     let width = width.clamp(SIDE_WIDTH_MIN, SIDE_WIDTH_MAX);
@@ -1391,6 +1418,24 @@ theme.surface = #2C2626
                 180
             );
         }
+        round_trip(keys::DESKTOP_COLOR, "#1E3A5F", |c| {
+            c.desktop_color == Some((0x1e, 0x3a, 0x5f))
+        });
+        for invalid in ["#12345", "#GG0000", "blue", "#1234567"] {
+            assert_eq!(
+                parse(&format!("{} = {invalid}", keys::DESKTOP_COLOR)).desktop_color,
+                None
+            );
+        }
+        assert_eq!(
+            parse(&format!(
+                "{} = #1E3A5F\n{} =",
+                keys::DESKTOP_COLOR,
+                keys::DESKTOP_COLOR
+            ))
+            .desktop_color,
+            None
+        );
         round_trip(keys::TASKBAR_SHOW, "false", |c| !c.show_taskbar);
         round_trip(keys::TASKBAR_TRAY, "false", |c| !c.show_tray);
         round_trip(keys::HOVER_PREVIEW, "true", |c| c.hover_preview);

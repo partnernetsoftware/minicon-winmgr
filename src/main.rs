@@ -6,6 +6,7 @@
 mod appearance;
 mod bar_tip;
 mod config;
+mod desktop_surface;
 mod diagnostic_export;
 mod diagnostic_ui;
 mod diagnostics;
@@ -308,6 +309,7 @@ fn run_companion(show_settings: bool) {
     crate::diagnostic_export::shutdown();
     crate::run_dialog::shutdown();
     crate::tray_popup::shutdown();
+    crate::desktop_surface::shutdown();
     crate::tray_host::shutdown();
     // The message loop only closes the message-only window, so the taskbar
     // windows never see WM_DESTROY and would not restore the reserved work

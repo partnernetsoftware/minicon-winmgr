@@ -314,6 +314,10 @@ pub fn run(
         if let Err(err) = crate::tray_popup::install(hinstance) {
             tracing::error!(%err, "notification panel install failed");
         }
+        match crate::desktop_surface::install(hinstance) {
+            Ok(()) => crate::desktop_surface::start(),
+            Err(err) => tracing::error!(%err, "desktop surface init failed; continuing without it"),
+        }
 
         // Window-management hotkeys (Win+Left/Right/Up).
         if let Err(err) = crate::hotkeys::install(hinstance) {

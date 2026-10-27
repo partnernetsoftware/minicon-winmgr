@@ -831,6 +831,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                     let id = wp.0 & 0xffff;
                     match id {
+                        8 if crate::shell_registry::is_self_shell() => {
+                            hide();
+                            crate::desktop_surface::choose_colour();
+                        }
                         1 | 2 | 6..=8 => {
                             open_system(id);
                         }

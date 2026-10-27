@@ -653,7 +653,7 @@ fn covers_monitor(window: RECT, monitor: RECT) -> bool {
 
 /// Desktop hosts legitimately span the whole monitor and must not hide bars.
 fn is_desktop_host_class(class: &str) -> bool {
-    matches!(class, "Progman" | "WorkerW")
+    matches!(class, "Progman" | "WorkerW" | "minicon_winmgr_desktop")
 }
 
 /// The monitor owned by a fullscreen foreground app, if any.
@@ -3645,6 +3645,7 @@ mod tests {
     fn desktop_hosts_are_not_fullscreen_apps() {
         assert!(is_desktop_host_class("Progman"));
         assert!(is_desktop_host_class("WorkerW"));
+        assert!(is_desktop_host_class("minicon_winmgr_desktop"));
         assert!(!is_desktop_host_class("TscShellContainerClass")); // mstsc
         assert!(!is_desktop_host_class(""));
     }
