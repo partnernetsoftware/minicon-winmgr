@@ -833,7 +833,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     match id {
                         8 if crate::shell_registry::is_self_shell() => {
                             hide();
-                            crate::desktop_surface::choose_colour();
+                            crate::desktop_surface::choose_background();
                         }
                         1 | 2 | 6..=8 => {
                             open_system(id);

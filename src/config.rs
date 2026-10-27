@@ -33,6 +33,7 @@ pub mod keys {
     pub const TASKBAR_POSITION: &str = "taskbar.position";
     pub const SIDE_WIDTH: &str = "taskbar.side_width";
     pub const DESKTOP_COLOR: &str = "desktop.color";
+    pub const DESKTOP_WALLPAPER: &str = "desktop.wallpaper";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -253,6 +254,8 @@ pub struct Config {
     /// Solid desktop colour (`desktop.color`, `#RRGGBB`), drawn only in replacement
     /// mode. `None` keeps the default: no Minicon desktop surface.
     pub desktop_color: Option<(u8, u8, u8)>,
+    /// Absolute path of a photo drawn over the colour (`desktop.wallpaper`), replacement mode only.
+    pub desktop_wallpaper: Option<String>,
 }
 
 impl Default for Config {
@@ -273,6 +276,7 @@ impl Default for Config {
             start_menu: false,
             folders: Vec::new(),
             desktop_color: None,
+            desktop_wallpaper: None,
         }
     }
 }
@@ -357,6 +361,10 @@ fn apply(cfg: &mut Config, key: &str, value: &str) {
             if let Some(width) = parse_side_width(value) {
                 cfg.side_width = width;
             }
+        }
+        keys::DESKTOP_WALLPAPER => {
+            let path = value.trim();
+            cfg.desktop_wallpaper = (!path.is_empty()).then(|| path.to_string());
         }
         keys::DESKTOP_COLOR => {
             if value.trim().is_empty() {
@@ -842,6 +850,16 @@ pub fn set_theme_mode(mode: ThemeMode) -> bool {
     update(|c| c.theme_mode = mode, keys::THEME_MODE, mode.as_key())
 }
 /// `None` clears the colour; the empty value it persists reads back as `None`.
+/// `None` clears the wallpaper path; the empty value persisted reads back as `None`.
+pub fn set_desktop_wallpaper(path: Option<&str>) -> bool {
+    let value = path.unwrap_or("").trim().to_string();
+    let stored = (!value.is_empty()).then(|| value.clone());
+    update(
+        |c| c.desktop_wallpaper = stored,
+        keys::DESKTOP_WALLPAPER,
+        &value,
+    )
+}
 pub fn set_desktop_color(color: Option<(u8, u8, u8)>) -> bool {
     let value = color.map_or_else(String::new, |(r, g, b)| format!("#{r:02X}{g:02X}{b:02X}"));
     update(|c| c.desktop_color = color, keys::DESKTOP_COLOR, &value)
@@ -1418,6 +1436,9 @@ theme.surface = #2C2626
                 180
             );
         }
+        round_trip(keys::DESKTOP_WALLPAPER, r"C:\Pictures\desk top.jpg", |c| {
+            c.desktop_wallpaper.as_deref() == Some(r"C:\Pictures\desk top.jpg")
+        });
         round_trip(keys::DESKTOP_COLOR, "#1E3A5F", |c| {
             c.desktop_color == Some((0x1e, 0x3a, 0x5f))
         });

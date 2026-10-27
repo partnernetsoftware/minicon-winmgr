@@ -55,6 +55,7 @@ mod update_http;
 mod update_install;
 mod update_paths;
 mod update_stream;
+mod wallpaper_image;
 mod win_util;
 mod window;
 mod window_events;

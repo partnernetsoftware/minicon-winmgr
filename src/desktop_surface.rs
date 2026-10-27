@@ -1,20 +1,25 @@
-//! Solid-colour desktop surface, drawn only when we are the shell (replacement mode).
+//! Replacement-mode desktop surface: a solid colour, optionally with a photo over it.
 //!
 //! Replacement mode closes Explorer's desktop host, so nothing paints the
 //! background. One borderless, non-activating window spans the virtual screen
-//! at the bottom of the z-order and fills itself with a single brush. It owns no
-//! bitmaps and no thread, so its cost is one window and one brush. Companion mode
-//! leaves the desktop to Explorer and never creates this window.
+//! at the bottom of the z-order. It owns no bitmaps: the colour is one brush, and
+//! a photo is decoded band by band during painting (see `wallpaper_image`), so
+//! nothing stays resident between paints. Companion mode leaves the desktop to
+//! Explorer and never creates this window.
 use crate::win_util::{guard_abi, wide};
 use std::cell::RefCell;
+use std::path::Path;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, HBRUSH, InvalidateRect,
-    PAINTSTRUCT,
+    BLACK_BRUSH, BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetStockObject,
+    HBRUSH, InvalidateRect, PAINTSTRUCT,
 };
-use windows::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
+use windows::Win32::UI::Controls::Dialogs::{
+    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, GetOpenFileNameW, OFN_FILEMUSTEXIST,
+    OFN_HIDEREADONLY, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, PWSTR};
 
 const CLASS: &str = "minicon_winmgr_desktop";
 
@@ -26,6 +31,7 @@ struct Surface {
     hwnd: HWND,
     brush: HBRUSH,
     color: Option<Rgb>,
+    wallpaper: Option<String>,
 }
 
 thread_local! { static SURFACE: RefCell<Option<Surface>> = const { RefCell::new(None) }; }
@@ -60,30 +66,32 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
             hwnd: HWND::default(),
             brush: HBRUSH::default(),
             color: None,
+            wallpaper: None,
         })
     });
     Ok(())
 }
 
-/// Shows the surface when we are the shell and a colour is configured.
+/// Shows the surface when we are the shell and a background is configured.
 pub(crate) fn start() {
     if !crate::shell_registry::is_self_shell() {
         return;
     }
-    if let Some(color) = crate::config::current().desktop_color {
-        apply(Some(color));
+    let config = crate::config::current();
+    if config.desktop_color.is_some() || config.desktop_wallpaper.is_some() {
+        apply(config.desktop_color, config.desktop_wallpaper);
     }
 }
 
-/// Applies a colour, or hides the surface when `None`.
-pub(crate) fn apply(color: Option<Rgb>) {
+/// Applies a colour and an optional photo path, or hides the surface when both are absent.
+pub(crate) fn apply(color: Option<Rgb>, wallpaper: Option<String>) {
     let Some(instance) = SURFACE.with(|s| s.borrow().as_ref().map(|s| s.instance)) else {
         return;
     };
-    let Some(color) = color else {
+    if color.is_none() && wallpaper.is_none() {
         hide();
         return;
-    };
+    }
     let hwnd = ensure_window(instance);
     if hwnd.is_invalid() {
         return;
@@ -93,15 +101,19 @@ pub(crate) fn apply(color: Option<Rgb>) {
         let Some(surface) = guard.as_mut() else {
             return;
         };
-        if surface.color != Some(color) {
+        if surface.color != color {
             unsafe {
                 if !surface.brush.is_invalid() {
                     let _ = DeleteObject(surface.brush.into());
                 }
-                surface.brush = CreateSolidBrush(colorref(color));
+                surface.brush = match color {
+                    Some(color) => CreateSolidBrush(colorref(color)),
+                    None => HBRUSH::default(),
+                };
             }
-            surface.color = Some(color);
+            surface.color = color;
         }
+        surface.wallpaper = wallpaper;
     });
     fit_and_show(hwnd);
     unsafe {
@@ -182,6 +194,7 @@ fn hide() {
             }
             surface.brush = HBRUSH::default();
             surface.color = None;
+            surface.wallpaper = None;
         }
     });
 }
@@ -197,10 +210,29 @@ pub(crate) fn shutdown() {
     SURFACE.with(|s| *s.borrow_mut() = None);
 }
 
-/// Opens the system colour chooser and applies the result. Used only in replacement
-/// mode, where the system personalisation page could not show the change.
-pub(crate) fn choose_colour() {
-    let current = crate::config::current().desktop_color.unwrap_or((0, 0, 0));
+/// Asks whether to choose a photo or a colour, then runs that chooser. Used only in
+/// replacement mode, where the system personalisation page could not show the change.
+pub(crate) fn choose_background() {
+    let question = crate::i18n::text("是：选择图片    否：选择纯色\n取消：不更改");
+    let answer = unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(wide(question).as_ptr()),
+            PCWSTR(wide(crate::i18n::text("桌面设置")).as_ptr()),
+            MB_YESNOCANCEL | MB_ICONQUESTION,
+        )
+    };
+    if answer == IDYES {
+        choose_picture();
+    } else if answer == IDNO {
+        choose_colour();
+    }
+}
+
+/// Opens the system colour chooser and applies the result.
+fn choose_colour() {
+    let config = crate::config::current();
+    let current = config.desktop_color.unwrap_or((0, 0, 0));
     let mut custom = [COLORREF(0); 16];
     let mut chooser = CHOOSECOLORW {
         lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
@@ -214,7 +246,71 @@ pub(crate) fn choose_colour() {
     }
     let color = rgb_of(chooser.rgbResult);
     crate::config::set_desktop_color(Some(color));
-    apply(Some(color));
+    apply(Some(color), config.desktop_wallpaper);
+}
+
+/// Opens the system file chooser for a photo and applies it over the current colour.
+fn choose_picture() {
+    let filter: Vec<u16> = "Images (*.jpg;*.jpeg;*.png;*.bmp)\0*.jpg;*.jpeg;*.png;*.bmp\0\0"
+        .encode_utf16()
+        .collect();
+    let mut file = vec![0u16; 1024];
+    let title = wide(crate::i18n::text("选择桌面图片"));
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(file.as_mut_ptr()),
+        nMaxFile: file.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY,
+        ..Default::default()
+    };
+    if !unsafe { GetOpenFileNameW(&mut dialog) }.as_bool() {
+        return;
+    }
+    let end = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+    let path = String::from_utf16_lossy(&file[..end]);
+    if path.trim().is_empty() {
+        return;
+    }
+    crate::config::set_desktop_wallpaper(Some(&path));
+    let config = crate::config::current();
+    apply(config.desktop_color, config.desktop_wallpaper);
+}
+
+/// Paints the background: colour (or black when only a photo is set), then the photo
+/// band by band. A photo that cannot be drawn is logged and the colour remains.
+fn paint(
+    hwnd: HWND,
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    area: &windows::Win32::Foundation::RECT,
+) {
+    let (brush, wallpaper) = SURFACE.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|s| (s.brush, s.wallpaper.clone()))
+            .unwrap_or_default()
+    });
+    unsafe {
+        let fill = if brush.is_invalid() {
+            HBRUSH(GetStockObject(BLACK_BRUSH).0)
+        } else {
+            brush
+        };
+        let _ = FillRect(hdc, area, fill);
+    }
+    let Some(path) = wallpaper else {
+        return;
+    };
+    let mut client = windows::Win32::Foundation::RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    let width = client.right - client.left;
+    let height = client.bottom - client.top;
+    if let Err(error) = crate::wallpaper_image::paint(hdc, width, height, Path::new(&path)) {
+        tracing::warn!(%error, "desktop photo could not be drawn; keeping the colour background");
+    }
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -224,14 +320,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             match msg {
                 WM_ERASEBKGND => return LRESULT(1),
                 WM_PAINT => {
-                    let mut paint = PAINTSTRUCT::default();
-                    let hdc = BeginPaint(hwnd, &mut paint);
-                    let brush =
-                        SURFACE.with(|s| s.borrow().as_ref().map(|s| s.brush).unwrap_or_default());
-                    if !brush.is_invalid() {
-                        let _ = FillRect(hdc, &paint.rcPaint, brush);
-                    }
-                    let _ = EndPaint(hwnd, &paint);
+                    let mut paint_struct = PAINTSTRUCT::default();
+                    let hdc = BeginPaint(hwnd, &mut paint_struct);
+                    paint(hwnd, hdc, &paint_struct.rcPaint);
+                    let _ = EndPaint(hwnd, &paint_struct);
                     return LRESULT(0);
                 }
                 WM_DISPLAYCHANGE => {
@@ -307,7 +399,7 @@ mod tests {
             )
         };
 
-        apply(Some((0x1e, 0x3a, 0x5f)));
+        apply(Some((0x1e, 0x3a, 0x5f)), None);
         let shown = hwnd();
         assert!(unsafe { IsWindowVisible(shown) }.as_bool());
         let mut rect = RECT::default();
@@ -325,12 +417,23 @@ mod tests {
         assert_eq!(value, colorref((0x1e, 0x3a, 0x5f)));
         assert_eq!(hit, shown);
 
-        apply(Some((0xf0, 0xe0, 0x20)));
+        apply(Some((0xf0, 0xe0, 0x20)), None);
         pump();
         let (value, _) = pixel_at_centre(shown);
         assert_eq!(value, colorref((0xf0, 0xe0, 0x20)));
 
-        apply(None);
+        // A photo over the colour must replace the centre pixel; the built-in
+        // wallpaper is present on every supported Windows install.
+        let photo = std::path::Path::new(r"C:\Windows\Web\Wallpaper\Windows\img0.jpg");
+        if photo.is_file() {
+            apply(Some((0xf0, 0xe0, 0x20)), Some(photo.display().to_string()));
+            pump();
+            let (value, _) = pixel_at_centre(shown);
+            assert_ne!(value, colorref((0xf0, 0xe0, 0x20)));
+            assert_ne!(value, COLORREF(u32::MAX));
+        }
+
+        apply(None, None);
         assert!(!unsafe { IsWindowVisible(shown) }.as_bool());
         shutdown();
     }

@@ -328,6 +328,13 @@ const CATALOG: &[(&str, &str)] = &[
     ),
     ("时间设置", "Date & time"),
     ("桌面设置", "Desktop settings"),
+    (
+        "是：选择图片    否：选择纯色
+取消：不更改",
+        "Yes: choose a photo    No: choose a colour
+Cancel: no change",
+    ),
+    ("选择桌面图片", "Choose a desktop photo"),
     ("回收站", "Recycle Bin"),
     ("无法打开此入口", "Unable to open shortcut"),
     (

@@ -148,6 +148,7 @@ fn is_ui_key(key: &str) -> bool {
         crate::config::keys::SIDE_WIDTH,
         crate::config::keys::TASKBAR_POSITION,
         crate::config::keys::DESKTOP_COLOR,
+        crate::config::keys::DESKTOP_WALLPAPER,
     ]
     .contains(&key)
 }
@@ -569,5 +570,6 @@ mod allowlist_tests {
     fn desktop_colour_is_a_ui_key() {
         // enqueue asserts this; a missing entry panics inside the colour chooser and drops the change.
         assert!(is_ui_key(crate::config::keys::DESKTOP_COLOR));
+        assert!(is_ui_key(crate::config::keys::DESKTOP_WALLPAPER));
     }
 }
