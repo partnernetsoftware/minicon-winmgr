@@ -257,4 +257,67 @@ mod tests {
         assert_eq!(rgb_of(colorref(color)), color);
         assert_eq!(rgb_of(COLORREF(0x00ff_ffff)), (255, 255, 255));
     }
+
+    #[test]
+    #[ignore = "private desktop; use isolated_tray_probe.py --test surface"]
+    fn native_private_desktop_surface() {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        let instance = HINSTANCE(unsafe { GetModuleHandleW(None) }.unwrap().0);
+        install(instance).unwrap();
+        let hwnd = || SURFACE.with(|s| s.borrow().as_ref().unwrap().hwnd);
+        let pump = || unsafe {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            let mut msg = MSG::default();
+            while std::time::Instant::now() < deadline {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let pixel_at_centre = |hwnd: HWND| unsafe {
+            let mut rect = RECT::default();
+            GetWindowRect(hwnd, &mut rect).unwrap();
+            let (x, y) = ((rect.right - rect.left) / 2, (rect.bottom - rect.top) / 2);
+            let window = GetDC(Some(hwnd));
+            let value = GetPixel(window, x, y);
+            ReleaseDC(Some(hwnd), window);
+            let (cx, cy) = (rect.left + x, rect.top + y);
+            (
+                value,
+                WindowFromPoint(windows::Win32::Foundation::POINT { x: cx, y: cy }),
+            )
+        };
+
+        apply(Some((0x1e, 0x3a, 0x5f)));
+        let shown = hwnd();
+        assert!(unsafe { IsWindowVisible(shown) }.as_bool());
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(shown, &mut rect) }.unwrap();
+        assert_eq!((rect.left, rect.top, rect.right, rect.bottom), unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        });
+        pump();
+        let (value, hit) = pixel_at_centre(shown);
+        assert_eq!(value, colorref((0x1e, 0x3a, 0x5f)));
+        assert_eq!(hit, shown);
+
+        apply(Some((0xf0, 0xe0, 0x20)));
+        pump();
+        let (value, _) = pixel_at_centre(shown);
+        assert_eq!(value, colorref((0xf0, 0xe0, 0x20)));
+
+        apply(None);
+        assert!(!unsafe { IsWindowVisible(shown) }.as_bool());
+        shutdown();
+    }
 }

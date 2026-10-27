@@ -14,6 +14,7 @@ TESTS = {'menu-close': 'window::readiness_tests::native_close_ends_active_popup'
          'tray': 'tray_host::tests::native_public_host_lifecycle',
          'startup': 'window::readiness_tests::native_startup_and_worker_host_transition',
          'takeover': 'shell_swap::tests::native_private_desktop_takeover',
+         'surface': 'desktop_surface::tests::native_private_desktop_surface',
          'collision': 'window::readiness_tests::native_rejects_all_launch_hotkeys_taken',
          'companion-collision': 'window::readiness_tests::native_rejects_all_launch_hotkeys_taken'}
 
@@ -36,7 +37,7 @@ def main():
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('--test-exe', type=Path)
     source.add_argument('--test-dir', type=Path, help='Discover exactly one matching Rust fixture in this build directory')
-    parser.add_argument('--test', choices=['tray', 'startup', 'takeover', 'collision', 'companion-collision', 'show-desktop', 'menu-close'], default='tray')
+    parser.add_argument('--test', choices=['tray', 'startup', 'takeover', 'surface', 'collision', 'companion-collision', 'show-desktop', 'menu-close'], default='tray')
     args = parser.parse_args()
     test = TESTS[args.test]
     if args.test_dir:
