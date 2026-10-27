@@ -241,9 +241,9 @@ impl Geometry {
         let scale = |n: i32| n * dpi.max(96) as i32 / 96;
         let width = scale(216).min((work.right - work.left).max(1));
         let columns = ((width - scale(16) - 2 + scale(4)) / scale(36)).clamp(1, 4) as usize;
-        let mut rows = ((work.bottom - work.top - scale(102)) / scale(36)).clamp(1, 8) as usize;
+        let mut rows = ((work.bottom - work.top - scale(132)) / scale(36)).clamp(1, 8) as usize;
         if count > rows * columns {
-            rows = ((work.bottom - work.top - scale(132)) / scale(36)).clamp(1, 8) as usize;
+            rows = ((work.bottom - work.top - scale(162)) / scale(36)).clamp(1, 8) as usize;
         }
         let capacity = rows * columns;
         let page = page.min(count.saturating_sub(1) / capacity);
@@ -252,7 +252,7 @@ impl Geometry {
             .min(capacity)
             .div_ceil(columns)
             .max(1);
-        let footer = if count > capacity { 108 } else { 78 };
+        let footer = if count > capacity { 138 } else { 108 };
         let height = scale(visible_rows as i32 * 36 + footer).min((work.bottom - work.top).max(1));
         Self {
             width,
@@ -269,7 +269,7 @@ impl Geometry {
         let base = scale(12 + self.visible_rows as i32 * 36);
         // Preserve all actions on short, high-DPI work areas as well.
         scale(30)
-            .min((self.height - base - scale(6) - 2) / if paging { 3 } else { 2 })
+            .min((self.height - base - scale(6) - 2) / if paging { 4 } else { 3 })
             .max(1)
     }
 }
@@ -433,12 +433,19 @@ fn rebuild() {
                 base + step,
                 bw,
             ),
-            (3, crate::i18n::text("上页"), scale(8), base + step * 2, bw),
+            (
+                8,
+                crate::i18n::text("桌面设置"),
+                scale(8),
+                base + step * 2,
+                bw,
+            ),
+            (3, crate::i18n::text("上页"), scale(8), base + step * 3, bw),
             (
                 4,
                 crate::i18n::text("下页"),
                 scale(16) + bw,
-                base + step * 2,
+                base + step * 3,
                 bw,
             ),
         ] {
@@ -479,7 +486,7 @@ fn rebuild() {
         }
         with(|s| s.buttons = buttons);
         if IsWindowVisible(hwnd).as_bool() {
-            if matches!(focused_id, 1..=4 | 6 | 7) {
+            if matches!(focused_id, 1..=4 | 6..=8) {
                 let target = GetDlgItem(Some(hwnd), focused_id).unwrap_or_default();
                 if IsWindowEnabled(target).as_bool() {
                     let _ = SetFocus(Some(target));
@@ -619,6 +626,13 @@ fn system_requests(
             Some(request("control.exe", "ncpa.cpl")),
         ),
         6 => (request("control.exe", "timedate.cpl"), None),
+        8 => (
+            request("ms-settings:personalization-background", ""),
+            Some(request(
+                "control.exe",
+                "/name Microsoft.Personalization /page pageWallpaper",
+            )),
+        ),
         // An explicit folder argument keeps Explorer in browser mode when we own the shell.
         7 => (
             request("explorer.exe", "::{645FF040-5081-101B-9F08-00AA002F954E}"),
@@ -817,7 +831,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                     let id = wp.0 & 0xffff;
                     match id {
-                        1 | 2 | 6 | 7 => {
+                        1 | 2 | 6..=8 => {
                             open_system(id);
                         }
                         3 | 4 => {
@@ -944,13 +958,20 @@ mod tests {
                         let paging = count > g.capacity;
                         let step = g.footer_step(dpi, paging);
                         let footer_bottom = scale(12 + g.visible_rows as i32 * 36)
-                            + step * if paging { 2 } else { 1 }
+                            + step * if paging { 3 } else { 2 }
                             + (step - scale(4)).max(1);
                         assert!(footer_bottom < g.height, "{g:?}, dpi={dpi}");
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn desktop_settings_opens_personalization_background_with_fallback() {
+        let (primary, fallback) = system_requests(8).unwrap();
+        assert_eq!(primary.file, "ms-settings:personalization-background");
+        assert_eq!(fallback.unwrap().file, "control.exe");
     }
 
     #[test]
