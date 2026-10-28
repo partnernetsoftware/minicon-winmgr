@@ -149,6 +149,7 @@ fn is_ui_key(key: &str) -> bool {
         crate::config::keys::TASKBAR_POSITION,
         crate::config::keys::DESKTOP_COLOR,
         crate::config::keys::DESKTOP_WALLPAPER,
+        crate::config::keys::THEME_ACCENT,
     ]
     .contains(&key)
 }

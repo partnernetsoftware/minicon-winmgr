@@ -34,6 +34,7 @@ pub mod keys {
     pub const SIDE_WIDTH: &str = "taskbar.side_width";
     pub const DESKTOP_COLOR: &str = "desktop.color";
     pub const DESKTOP_WALLPAPER: &str = "desktop.wallpaper";
+    pub const THEME_ACCENT: &str = "theme.accent";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -330,7 +331,9 @@ fn apply(cfg: &mut Config, key: &str, value: &str) {
             }
         }
         "theme.accent" => {
-            if let Some(c) = parse_color(value) {
+            if value.trim().is_empty() {
+                cfg.theme_overrides &= !8;
+            } else if let Some(c) = parse_color(value) {
                 cfg.theme.accent = c;
                 cfg.theme_overrides |= 8;
             }
@@ -802,6 +805,33 @@ pub(crate) fn system_light() -> bool {
     }
     light != 0
 }
+/// The custom accent as stored (`0x00BBGGRR`), if one is set.
+pub fn accent_override() -> Option<u32> {
+    let cfg = current();
+    (cfg.theme_overrides & 8 != 0).then_some(cfg.theme.accent)
+}
+/// Sets or clears the accent override. Clearing restores the mode's default accent.
+pub fn set_theme_accent(color: Option<u32>) -> bool {
+    let value = color.map_or_else(String::new, |c| {
+        format!(
+            "#{:02X}{:02X}{:02X}",
+            c & 0xff,
+            (c >> 8) & 0xff,
+            (c >> 16) & 0xff
+        )
+    });
+    update(
+        |c| match color {
+            Some(color) => {
+                c.theme.accent = color;
+                c.theme_overrides |= 8;
+            }
+            None => c.theme_overrides &= !8,
+        },
+        keys::THEME_ACCENT,
+        &value,
+    )
+}
 fn resolve_theme(cfg: &Config, system_light: bool) -> Theme {
     let light =
         cfg.theme_mode == ThemeMode::Light || (cfg.theme_mode == ThemeMode::Auto && system_light);
@@ -829,11 +859,20 @@ fn resolve_theme(cfg: &Config, system_light: bool) -> Theme {
             values[index]
         }
     };
+    // A custom accent that cannot be read on this mode's background or surface falls back
+    // to the mode default. The stored value is kept, so it returns when the mode allows it.
+    let accent = if cfg.theme_overrides & 8 != 0
+        && !minicon_winmgr::palette::accent_allowed(custom[3], color(0), color(1))
+    {
+        values[3]
+    } else {
+        color(3)
+    };
     Theme {
         bg: color(0),
         surface: color(1),
         hover: color(2),
-        accent: color(3),
+        accent,
         text: color(4),
         muted: color(5),
     }
@@ -1400,6 +1439,39 @@ theme.surface = #2C2626
         let once = upsert("", "taskbar.group", "always");
         let twice = upsert(&once, "taskbar.group", "always");
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn accent_override_is_resolved_per_mode_and_clears_to_default() {
+        let mut cfg = Config::default();
+        cfg.theme.accent = 0x0000_0000; // black is unreadable on the dark surfaces
+        cfg.theme_overrides |= 8;
+        assert_eq!(
+            resolve_theme(&cfg, false).accent,
+            minicon_winmgr::palette::base(false).accent
+        );
+        // White reads on dark surfaces but not on the light ones: the same stored value
+        // falls back only in light mode.
+        cfg.theme.accent = 0x00FF_FFFF;
+        cfg.theme_mode = ThemeMode::Dark;
+        assert_eq!(resolve_theme(&cfg, false).accent, 0x00FF_FFFF);
+        cfg.theme_mode = ThemeMode::Light;
+        assert_eq!(
+            resolve_theme(&cfg, false).accent,
+            minicon_winmgr::palette::base(true).accent
+        );
+        cfg.theme.accent = 0x004C_8BF5; // #F58B4C, readable on both
+        cfg.theme_mode = ThemeMode::Dark;
+        assert_eq!(resolve_theme(&cfg, false).accent, 0x004C_8BF5);
+    }
+
+    #[test]
+    fn accent_text_round_trips_and_empty_value_clears() {
+        let text = upsert("", keys::THEME_ACCENT, "#F58B4C");
+        assert_eq!(parse(&text).theme.accent, 0x004C_8BF5);
+        assert_eq!(parse(&text).theme_overrides & 8, 8);
+        let cleared = upsert(&text, keys::THEME_ACCENT, "");
+        assert_eq!(parse(&cleared).theme_overrides & 8, 0);
     }
 
     #[test]

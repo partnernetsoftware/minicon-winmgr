@@ -191,6 +191,7 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 | `taskbar.group_by` | `exe` \| `pid` | `exe` |
 | `behavior.hover_preview` | `true` \| `false` | `false` |
 | `theme.bg` / `surface` / `hover` / `accent` / `text` / `muted` | `#RRGGBB` 或 `0xRRGGBB`（默认值见 [`prd_4_1.md`](prd_4_1.md) §2） | — |
+| `theme.accent` 的界面写入（0.1.26） | 设置面板“选择强调色…”写入 `#RRGGBB`；“恢复默认”写空值清除。按模式对比度校验：强调色与该模式背景、面板色的 WCAG 对比度须 ≥ 3:1，不足时该模式回退默认强调色，配置值保留 | 未设置（默认强调色随明暗模式） |
 | `hotkey` | 热键串，如 `alt+`` | `alt+`` |
 
 - **文件**：手写配置 `<exe 旁>/minicon.conf`（`MINICON_CONFIG` 可覆盖）；0.1.10 起 UI 写 `~/winmgr.cnf`（`%USERPROFILE%\winmgr.cnf`），与可执行文件位置无关（`MINICON_SETTINGS` 可覆盖）。
@@ -230,7 +231,9 @@ fn digit_index(vk: u16, visible: usize) -> Option<usize>;
 |----|------|
 | **一期** ✅ | ① 修组标签漂移；② 设置面板真控件：合并窗口（三态单选）+ 合并依据；③ 配置 schema + 独立设置文件 + 优先级 + 写回保真；④ 密度 D0/D1 + 迟滞 + 保底 1 个可见按钮 + 边界用例；⑤ 文案与 tooltip |
 | **二期** ✅ | ① D2 icon-only + hover 标题气泡（`bar_tip`）+ `never` 局部折叠；② `»` 弹层 `>24` 分列；③ 导航中 `1..9` 直跳；④ 通知条开关（`taskbar.tray`）；⑤ 窄栏折叠 pins（`hide_pins`）；⑥ 分组右键批量菜单 |
-| **明确不做** | 折叠最久未用（破坏位置稳定）；从组中分离；多列溢出网格；pin 拖拽重排；主题拾色器；每屏窗口过滤 |
+| **明确不做** | 折叠最久未用（破坏位置稳定）；从组中分离；多列溢出网格；pin 拖拽重排；每屏窗口过滤 |
+
+> 0.1.26 已推翻原“主题拾色器不做”：设置面板提供强调色（`theme.accent`）选择，与桌面设置共用同一拾色对话框；背景与表面色仍不开放界面。
 
 > 本表原有的"**通知点击转发**"已从"不做"移出——0.1.3 改为**替换模式下交付**（宿主路径转发四个鼠标事件，
   伴随模式仍不转发）。规格见 [`prd_1_1.md`](prd_1_1.md)「通知区 / 托盘」与 [`plan_0_1_3.md`](archive/plan_0_1_3.md) §2.2。

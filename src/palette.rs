@@ -36,3 +36,57 @@ pub fn base(light: bool) -> Theme {
         muted: rgb(colors[5]),
     }
 }
+
+/// Smallest contrast ratio a custom accent must reach against the background and surface
+/// of the mode it applies to (WCAG non-text contrast).
+pub const ACCENT_MIN_CONTRAST: f64 = 3.0;
+
+/// WCAG relative luminance of a colour stored as `0x00BBGGRR`.
+pub fn luminance(value: u32) -> f64 {
+    let linear = |c: u32| {
+        let c = c as f64 / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let r = linear(value & 0xff);
+    let g = linear((value >> 8) & 0xff);
+    let b = linear((value >> 16) & 0xff);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/// WCAG contrast ratio between two colours stored as `0x00BBGGRR`, from 1.0 to 21.0.
+pub fn contrast_ratio(a: u32, b: u32) -> f64 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Whether a custom accent is legible on the background and surface it will sit on.
+pub fn accent_allowed(accent: u32, bg: u32, surface: u32) -> bool {
+    contrast_ratio(accent, bg) >= ACCENT_MIN_CONTRAST
+        && contrast_ratio(accent, surface) >= ACCENT_MIN_CONTRAST
+}
+
+#[cfg(test)]
+mod contrast_tests {
+    use super::*;
+
+    #[test]
+    fn black_and_white_reach_the_full_ratio_and_equal_colours_reach_one() {
+        assert!((contrast_ratio(0x0000_0000, 0x00FF_FFFF) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(0x0012_3456, 0x0012_3456) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn accent_gate_checks_both_background_and_surface() {
+        let dark_bg = 0x0000_0000;
+        let dark_surface = 0x0010_1010;
+        assert!(accent_allowed(0x00F5_8B4C, dark_bg, dark_surface));
+        assert!(!accent_allowed(0x0020_2020, dark_bg, dark_surface));
+        // Legible on black but not on a light surface.
+        assert!(!accent_allowed(0x00E0_E0E0, 0x00FF_FFFF, 0x00F0_F0F0));
+    }
+}

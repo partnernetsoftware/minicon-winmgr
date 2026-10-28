@@ -8,11 +8,10 @@ use crate::desktop_surface::Rgb;
 use crate::win_util::{guard_abi, wide};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{DEFAULT_GUI_FONT, GetStockObject, HFONT};
 use windows::Win32::UI::Controls::Dialogs::{
-    CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, GetOpenFileNameW, OFN_FILEMUSTEXIST,
-    OFN_HIDEREADONLY, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
@@ -293,6 +292,7 @@ fn create(instance: HINSTANCE, parent: HWND, selected: usize) -> HWND {
     });
     populate(combo, selected);
     refresh_colour_text();
+    crate::appearance::install(hwnd);
     unsafe {
         let _ = SetFocus(Some(GetDlgItem(Some(hwnd), IDOK.0).unwrap_or_default()));
         let _ = crate::win_util::force_foreground(hwnd);
@@ -357,19 +357,10 @@ fn refresh_colour_text() {
 
 fn choose_colour(hwnd: HWND) {
     let current = with(|s| s.colour).flatten().unwrap_or((0, 0, 0));
-    let mut custom = [COLORREF(0); 16];
-    let mut chooser = CHOOSECOLORW {
-        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
-        hwndOwner: hwnd,
-        rgbResult: COLORREF(current.0 as u32 | (current.1 as u32) << 8 | (current.2 as u32) << 16),
-        lpCustColors: custom.as_mut_ptr(),
-        Flags: CC_RGBINIT | CC_FULLOPEN,
-        ..Default::default()
-    };
-    if !unsafe { ChooseColorW(&mut chooser) }.as_bool() {
+    let initial = u32::from(current.0) | u32::from(current.1) << 8 | u32::from(current.2) << 16;
+    let Some(value) = crate::colour_picker::pick(hwnd, initial) else {
         return;
-    }
-    let value = chooser.rgbResult.0;
+    };
     let picked = (
         (value & 0xff) as u8,
         (value >> 8 & 0xff) as u8,

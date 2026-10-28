@@ -43,6 +43,10 @@ const STATUS: u16 = 6112;
 const RETRY: u16 = 6113;
 const CLOSE: u16 = 6114;
 const DETAIL: u16 = 6115;
+const ACCENT_PICK: u16 = 6315;
+const ACCENT_RESET: u16 = 6316;
+const ACCENT_NOTE: u16 = 6317;
+const ACCENT_HEADING: u16 = 6318;
 const CONFIG_INFO: u16 = 6120;
 const ADVANCED: u16 = 6205;
 const ENGLISH: u16 = 6150;
@@ -137,7 +141,7 @@ fn scale_at(n: i32, dpi: u32) -> i32 {
     n * dpi as i32 / 96
 }
 fn is_heading(id: u16) -> bool {
-    matches!(id, 6200 | 6201 | 6210 | 6214)
+    matches!(id, 6200 | 6201 | 6210 | 6214 | ACCENT_HEADING)
 }
 fn high_contrast() -> bool {
     let mut value = HIGHCONTRASTW {
@@ -172,6 +176,7 @@ fn in_card(id: u16) -> bool {
             | 6220
             | 6301
             ..=6305 | LIGHT | DARK | AUTO | TOP | BOTTOM | LEFT | RIGHT | 6211 | 6212 | 6310 | 6311
+            | ACCENT_HEADING | ACCENT_PICK | ACCENT_RESET | ACCENT_NOTE
     )
 }
 fn control_color(wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -579,6 +584,10 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
         ),
         (DARK, crate::i18n::text("黑夜"), 30, radio),
         (AUTO, crate::i18n::text("自动"), 30, radio),
+        (ACCENT_HEADING, crate::i18n::text("强调色"), 24, note),
+        (ACCENT_PICK, crate::i18n::text("选择强调色…"), 30, push),
+        (ACCENT_RESET, crate::i18n::text("恢复默认"), 30, push),
+        (ACCENT_NOTE, "", 34, note),
         (6310, "", 22, note),
         (6212, crate::i18n::text("任务栏位置"), 24, note),
         (
@@ -761,6 +770,32 @@ fn enabled(id: u16, on: bool) {
         }
     }
 }
+/// Shows the accent state, and says so when a custom accent is not readable in this mode.
+fn refresh_accent() {
+    let theme = config::theme();
+    let text = match config::accent_override() {
+        None => crate::i18n::text("默认").to_string(),
+        Some(custom) => {
+            let hex = format!(
+                "#{:02X}{:02X}{:02X}",
+                custom & 0xff,
+                (custom >> 8) & 0xff,
+                (custom >> 16) & 0xff
+            );
+            if minicon_winmgr::palette::accent_allowed(custom, theme.bg, theme.surface) {
+                hex
+            } else {
+                format!(
+                    "{hex} · {}",
+                    crate::i18n::text("此模式对比度不足，使用默认强调色")
+                )
+            }
+        }
+    };
+    label(control(ACCENT_NOTE), &text);
+    enabled(ACCENT_RESET, config::accent_override().is_some());
+}
+
 fn source_note(key: &'static str, reason: Option<&str>) -> String {
     match (config::env_source(key), reason) {
         (Some(_), Some(reason)) => {
@@ -774,6 +809,7 @@ fn source_note(key: &'static str, reason: Option<&str>) -> String {
 fn refresh() {
     crate::settings_ui::complete_shell_operation();
     crate::update::poll();
+    refresh_accent();
     label(
         handle(),
         &crate::ui_format!(
@@ -1021,6 +1057,19 @@ fn apply(id: u16) {
         CHECK_UPDATE => crate::update::check(),
         DOWNLOAD_UPDATE => crate::update::download(),
         RESTART_UPDATE => crate::update::restart(),
+        ACCENT_PICK => {
+            if let Some(color) = crate::colour_picker::pick(handle(), config::theme().accent) {
+                config::set_theme_accent(Some(color));
+                crate::appearance::refresh();
+            }
+            unsafe {
+                let _ = SetFocus(Some(control(ACCENT_PICK)));
+            }
+        }
+        ACCENT_RESET => {
+            config::set_theme_accent(None);
+            crate::appearance::refresh();
+        }
         ENGLISH | CHINESE => {
             config::set_language(if id == ENGLISH {
                 crate::i18n::Language::En
