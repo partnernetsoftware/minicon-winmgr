@@ -1,6 +1,10 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.26](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.26)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.27](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.27)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.27
+
+已合 main 并公开为 Latest。桌面设置对话框按主题显示，修正底部按钮被截掉的问题；设置面板与对话框的中英文、浅色与深色截图已审阅。四个附件与候选逐字节一致；真实 .25 更新与公开工具下载通过。150% 缩放未验证，见[本版验收](validation_0_1_27.md)。
 
 ## 0.1.26
 

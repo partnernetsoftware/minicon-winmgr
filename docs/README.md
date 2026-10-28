@@ -2,7 +2,7 @@
 
 产品方向（2026-10-19）：Winmgr 保持轻量外壳；Tskmgr（进程与网络）和 Sysmgr（整机内存/磁盘/硬件）作为独立工具，通过统一入口集成并共享基础代码，暂不建设插件系统。普通 Tskmgr 与外壳集成已在 .16 公开，.17 管理员入口也已公开，后续安排见[路线](roadmap_0_1.md)与[工具 PRD](prd_7_1.md)。旧候选不自动实施。长期预留 macOS/Linux 扩展与 computer-use / mind-use 服务能力，近期不启动完整移植，见[跨平台原则](prd_7_2.md)。0.1.12 的[产品设计讨论稿](design_0_1_12.md)保留失败/恢复边界，实际实施范围从必要修复中选定。
 
-当前公开版：[v0.1.26](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.26)。使用入口：[English](../readme.en.md) / [中文](../readme.zh.md)。
+当前公开版：[v0.1.27](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.27)。使用入口：[English](../readme.en.md) / [中文](../readme.zh.md)。
 
 [0.1.20 计划](archive/plan_0_1_20.md)：任务栏全屏让位（mstsc 等全屏应用不再被任务栏遮挡）已公开，详见[验收记录](validation_0_1_20.md)。.18 的任务树、协作笔记与离线识别证据见[验收记录](validation_0_1_18.md)和[用法](task_analysis.md)。
 
@@ -32,6 +32,7 @@
 | [0.1.21](archive/plan_0_1_21.md) | 已公开：时钟通知面板的桌面设置；颜色保存缺陷由 0.1.22 修复 |
 | [0.1.23](archive/plan_0_1_23.md) | 已公开：替换模式照片桌面背景（分段解码，内存实测见计划） |
 | [0.1.26](plan_0_1_26.md) | 已公开：设置强调色与紧凑布局 |
+| [0.1.27](validation_0_1_27.md) | 已公开：桌面设置对话框主题化与按钮截断修正 |
 | [后续候选](roadmap_0_1.md) | 任务聚合及 Sysmgr 分别拆分 |
 
 | 需要了解 | 当前文档 |
