@@ -24,6 +24,7 @@ const ID_COLOUR: usize = 3;
 const ID_COMBO: usize = 4;
 const ID_BROWSE: usize = 5;
 const ID_COLOUR_TEXT: usize = 6;
+const ID_CLEAR: usize = 7;
 /// Largest number of system wallpapers listed.
 const MAX_SYSTEM: usize = 300;
 const MAX_DEPTH: usize = 2;
@@ -220,9 +221,19 @@ fn create(instance: HINSTANCE, parent: HWND, selected: usize) -> HWND {
         WINDOW_STYLE::default(),
         162,
         40,
-        200,
+        120,
         18,
         ID_COLOUR_TEXT,
+    );
+    child(
+        "BUTTON",
+        crate::i18n::text("清除"),
+        WINDOW_STYLE(BS_PUSHBUTTON as u32) | tab,
+        290,
+        34,
+        72,
+        26,
+        ID_CLEAR,
     );
     child(
         "STATIC",
@@ -493,6 +504,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     if notify == BN_CLICKED as usize {
                         match id {
                             ID_COLOUR => choose_colour(hwnd),
+                            ID_CLEAR => {
+                                with(|s| s.colour = None);
+                                refresh_colour_text();
+                            }
                             ID_BROWSE => browse(hwnd),
                             x if x == IDOK.0 as usize => finish(true),
                             x if x == IDCANCEL.0 as usize => finish(false),
@@ -602,6 +617,52 @@ mod tests {
         let cancelled = run(instance, initial, HWND::default());
         handle.join().unwrap();
         assert_eq!(cancelled, None);
+        // Clear, then OK: the colour is unset, which is how the surface is hidden.
+        let desktop = unsafe { thread_desktop(GetCurrentThreadId()) };
+        let clearing = std::thread::spawn(move || {
+            let _ = unsafe { set_thread_desktop(desktop) };
+            let class = wide(CLASS);
+            let hwnd = {
+                let mut found = HWND::default();
+                for _ in 0..50 {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    found = unsafe { FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) }
+                        .unwrap_or_default();
+                    if !found.is_invalid() {
+                        break;
+                    }
+                }
+                found
+            };
+            assert!(!hwnd.is_invalid(), "dialog window not found");
+            for id in [ID_CLEAR, IDOK.0 as usize] {
+                let _ = unsafe {
+                    PostMessageW(
+                        Some(hwnd),
+                        WM_COMMAND,
+                        WPARAM(id | ((BN_CLICKED as usize) << 16)),
+                        LPARAM(0),
+                    )
+                };
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        });
+        let cleared = run(
+            instance,
+            Choice {
+                color: Some((0x1e, 0x3a, 0x5f)),
+                wallpaper: None,
+            },
+            HWND::default(),
+        );
+        clearing.join().unwrap();
+        assert_eq!(
+            cleared,
+            Some(Choice {
+                color: None,
+                wallpaper: None
+            })
+        );
     }
 
     #[test]
