@@ -46,6 +46,8 @@ Sysmgr 建议先做只读概览：内存压力与提交、CPU/硬件信息、卷
 
 ## 5. 跨平台与基础服务的并行演进
 
+macOS/Linux 版本的策划讨论稿见 [plan_port_macos_linux.md](plan_port_macos_linux.md)（未排期，待用户确认是否开始阶段 A）。
+
 用户已确认这些产品应为 macOS/Linux 和未来 computer-use / mind-use（AI/SI、harness、agent、model、modelArgs 等）保留扩展能力，唯一原则见[基础服务 PRD](prd_7_2.md)。这修正了此前只讨论 Windows、未明确长期适配方向的表述；不启动当前 macOS/Linux 移植。
 
 - .15：保持更新修复范围，不为长期架构扩大补丁。

@@ -57,6 +57,7 @@ PRD 树（编号 = 子文档文件名里的索引）
 7 工具产品与集成
   7.1 产品分工 · 独立进程 · 按需权限        → prd_7_1.md
   7.2 跨平台适配 · computer-use / mind-use   → prd_7_2.md
+  macOS/Linux 版策划（讨论稿）                    → plan_port_macos_linux.md
 ```
 
 | 索引 | 子文档 | 内容 | 何时读 |
