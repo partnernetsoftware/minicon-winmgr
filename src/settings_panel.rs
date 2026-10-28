@@ -770,11 +770,12 @@ fn enabled(id: u16, on: bool) {
         }
     }
 }
-/// Shows the accent state, and says so when a custom accent is not readable in this mode.
+/// The accent value sits in the heading. The note is shown only when a custom accent
+/// is not readable in this mode, so the default state takes one line.
 fn refresh_accent() {
     let theme = config::theme();
-    let text = match config::accent_override() {
-        None => crate::i18n::text("默认").to_string(),
+    let (value, note) = match config::accent_override() {
+        None => (crate::i18n::text("默认").to_string(), String::new()),
         Some(custom) => {
             let hex = format!(
                 "#{:02X}{:02X}{:02X}",
@@ -782,14 +783,19 @@ fn refresh_accent() {
                 (custom >> 8) & 0xff,
                 (custom >> 16) & 0xff
             );
-            if minicon_winmgr::palette::accent_allowed(custom, theme.bg, theme.surface) {
-                hex
+            let note = if minicon_winmgr::palette::accent_allowed(custom, theme.bg, theme.surface) {
+                String::new()
             } else {
-                format!("{hex} · {}", crate::i18n::text("对比度不足，已用默认色"))
-            }
+                crate::i18n::text("对比度不足，已用默认色").to_string()
+            };
+            (hex, note)
         }
     };
-    label(control(ACCENT_NOTE), &text);
+    label(
+        control(ACCENT_HEADING),
+        &format!("{} · {value}", crate::i18n::text("强调色")),
+    );
+    label(control(ACCENT_NOTE), &note);
     enabled(ACCENT_RESET, config::accent_override().is_some());
 }
 
@@ -1488,7 +1494,7 @@ fn layout() {
                     continue;
                 }
             }
-            if (6301..=6305).contains(&c.id) || matches!(c.id, 6310..=6312) {
+            if (6301..=6305).contains(&c.id) || matches!(c.id, 6310..=6312 | ACCENT_NOTE) {
                 let visible = !text(c.hwnd).is_empty();
                 let _ = ShowWindow(c.hwnd, if visible { SW_SHOW } else { SW_HIDE });
                 if !visible {
