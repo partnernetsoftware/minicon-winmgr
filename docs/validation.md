@@ -1,6 +1,10 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.27](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.27)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.28](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.28)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.28
+
+已合 main 并公开为 Latest。桌面设置对话框随 DPI 变化重新布局（WM_DPICHANGED），150% 的重排经私有桌面测试模拟验证；四个附件与候选逐字节一致；真实 .25 更新与公开工具下载通过。真实 150% 显示器的目视确认尚待用户完成，见[本版验收](validation_0_1_28.md)。
 
 ## 0.1.27
 
