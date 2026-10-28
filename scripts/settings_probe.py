@@ -121,7 +121,8 @@ def activate():
     u.GetGUIThreadInfo(u.GetWindowThreadProcessId(panel(), None), c.byref(g))
     if g.flags & 4: key('ALT')  # Foreground activation can enter native menu mode.
 def focus_id(ident):
-    for _ in range(20):
+    # The appearance group now carries the accent controls, so the walk is longer.
+    for _ in range(30):
         if u.GetForegroundWindow() != panel(): activate()
         if u.GetDlgCtrlID(focus()) == ident: return
         key('TAB'); time.sleep(.035)
