@@ -263,6 +263,8 @@ def main(*, include_run_regression=True, build=True):
             key('TAB'); time.sleep(.035); sequence.append(u.GetDlgCtrlID(focus()))
         # Two-column order: left column (show/tray/merge/preview), then right column
         # (task tools, update, configuration/advanced), then the fixed footer close.
+        accent = text(ctrl(6318))
+        check('accent_heading_shows_the_default_value', accent.startswith(('强调色', 'Accent colour')) and accent.endswith(('默认', 'Default')), accent)
         check('native_tab_sequence_skips_disabled_radio_basis', sequence == [6102, 6103, 6108, 6410, 6411, 6413, 6401, 6120, 6205, 6114], sequence)
         key('SHIFT+TAB'); time.sleep(.05)
         check('reverse_tab', u.GetDlgCtrlID(focus()) == 6205)
