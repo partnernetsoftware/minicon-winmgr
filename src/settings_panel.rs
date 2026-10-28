@@ -2021,8 +2021,17 @@ mod tests {
             ..Default::default()
         }));
         assert_ne!(unsafe { GetFocus() }, focused);
+        // Address Escape to a panel control explicitly: where focus lands after Tab depends
+        // on which window the desktop activates, which a test cannot control.
+        if !unsafe { IsWindowVisible(handle()) }.as_bool() {
+            // Moving focus to another window hides the panel on deactivation. That is a
+            // property of the desktop, not of the save path under test, so reopen it.
+            show();
+        }
+        let child = unsafe { GetWindow(handle(), GW_CHILD) }.unwrap_or_default();
+        assert!(!child.is_invalid());
         assert!(filter(&MSG {
-            hwnd: unsafe { GetFocus() },
+            hwnd: child,
             message: WM_KEYDOWN,
             wParam: WPARAM(VK_ESCAPE.0 as usize),
             ..Default::default()
