@@ -587,7 +587,7 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
         (ACCENT_HEADING, crate::i18n::text("强调色"), 24, note),
         (ACCENT_PICK, crate::i18n::text("选择强调色…"), 30, push),
         (ACCENT_RESET, crate::i18n::text("恢复默认"), 30, push),
-        (ACCENT_NOTE, "", 34, note),
+        (ACCENT_NOTE, "", 24, note),
         (6310, "", 22, note),
         (6212, crate::i18n::text("任务栏位置"), 24, note),
         (
@@ -785,10 +785,7 @@ fn refresh_accent() {
             if minicon_winmgr::palette::accent_allowed(custom, theme.bg, theme.surface) {
                 hex
             } else {
-                format!(
-                    "{hex} · {}",
-                    crate::i18n::text("此模式对比度不足，使用默认强调色")
-                )
+                format!("{hex} · {}", crate::i18n::text("对比度不足，已用默认色"))
             }
         }
     };
@@ -1534,6 +1531,9 @@ fn layout() {
                         .unwrap(),
                     3,
                 )),
+                ACCENT_PICK | ACCENT_RESET if horizontal => {
+                    Some((ACCENT_PICK, usize::from(c.id == ACCENT_RESET), 2))
+                }
                 CONFIG_INFO | ADVANCED if horizontal => {
                     Some((CONFIG_INFO, usize::from(c.id == ADVANCED), 2))
                 }
