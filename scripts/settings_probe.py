@@ -260,6 +260,7 @@ def main(*, include_run_regression=True, build=True):
         activate(); focus_id(6101)
         sequence = []
         for _ in range(10):
+            if u.GetForegroundWindow() != panel(): activate()
             key('TAB'); time.sleep(.035); sequence.append(u.GetDlgCtrlID(focus()))
         # Two-column order: left column (show/tray/merge/preview), then right column
         # (task tools, update, configuration/advanced), then the fixed footer close.
