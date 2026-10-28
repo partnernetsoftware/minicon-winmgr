@@ -49,6 +49,7 @@ pub(crate) fn install(hwnd: HWND) {
             | "minicon_winmgr_bar_tip"
             | "minicon_winmgr_hover_preview"
             | "minicon_winmgr_settings"
+            | "minicon_winmgr_desktop_dialog"
     ) {
         let _ = unsafe { SetWindowSubclass(hwnd, Some(native), 0xAC16, 0) };
     }

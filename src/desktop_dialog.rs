@@ -8,17 +8,87 @@ use crate::desktop_surface::Rgb;
 use crate::win_util::{guard_abi, wide};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{DEFAULT_GUI_FONT, GetStockObject, HFONT};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    CreateFontIndirectW, CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
+    DeleteObject, DrawTextW, FillRect, GetStockObject, HDC, HFONT, NULL_BRUSH, SetBkMode,
+    SetTextColor, TRANSPARENT,
+};
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
+use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_SELECTED};
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
+use windows::Win32::UI::HiDpi::SystemParametersInfoForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, PWSTR};
 
 const CLASS: &str = "minicon_winmgr_desktop_dialog";
+
+#[cfg(test)]
+/// Writes the window's rendered client as a 32-bit BMP for visual review.
+pub(crate) unsafe fn save_bitmap(hwnd: HWND, path: &std::path::Path) {
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
+        DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
+    };
+    use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    // PrintWindow renders the whole window, frame included, so size by the window.
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect) }.unwrap();
+    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+    let screen = unsafe { GetDC(None) };
+    let memory = unsafe { CreateCompatibleDC(Some(screen)) };
+    let bitmap = unsafe { CreateCompatibleBitmap(screen, w, h) };
+    let old = unsafe { SelectObject(memory, bitmap.into()) };
+    // PW_RENDERFULLCONTENT: include content that is not in the window's own surface.
+    let _ = unsafe { PrintWindow(hwnd, memory, PRINT_WINDOW_FLAGS(2)) };
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    unsafe {
+        GetDIBits(
+            memory,
+            bitmap,
+            0,
+            h as u32,
+            Some(pixels.as_mut_ptr().cast()),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        SelectObject(memory, old);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, screen);
+    }
+    let mut file = Vec::with_capacity(54 + pixels.len());
+    let size = 54 + pixels.len() as u32;
+    file.extend_from_slice(b"BM");
+    file.extend_from_slice(&size.to_le_bytes());
+    file.extend_from_slice(&[0; 4]);
+    file.extend_from_slice(&54u32.to_le_bytes());
+    file.extend_from_slice(&40u32.to_le_bytes());
+    file.extend_from_slice(&w.to_le_bytes());
+    file.extend_from_slice(&(-h).to_le_bytes());
+    file.extend_from_slice(&1u16.to_le_bytes());
+    file.extend_from_slice(&32u16.to_le_bytes());
+    file.extend_from_slice(&[0; 24]);
+    file.extend_from_slice(&pixels);
+    std::fs::write(path, file).unwrap();
+}
+
 const ID_COLOUR: usize = 3;
 const ID_COMBO: usize = 4;
 const ID_BROWSE: usize = 5;
@@ -44,12 +114,119 @@ struct State {
     /// Index 0 is "no photo"; the rest are paths shown in the combo box.
     photos: Vec<Option<String>>,
     outcome: Option<Option<Choice>>,
+    font: HFONT,
 }
 
 thread_local! { static DIALOG: RefCell<Option<State>> = const { RefCell::new(None) }; }
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     DIALOG.with(|s| s.borrow_mut().as_mut().map(f))
+}
+
+fn dpi_of(hwnd: HWND) -> u32 {
+    // SAFETY: a window handle query; a zero result falls back to the system DPI.
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+    if dpi == 0 {
+        unsafe { GetDpiForSystem() }.max(96)
+    } else {
+        dpi.max(96)
+    }
+}
+
+/// The settings panel's message font: Microsoft YaHei UI at 14 DIP, scaled to `dpi`.
+fn message_font(dpi: u32) -> HFONT {
+    let mut metrics = NONCLIENTMETRICSW {
+        cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: the structure is sized correctly and lives for the call.
+    let ok = unsafe {
+        SystemParametersInfoForDpi(
+            SPI_GETNONCLIENTMETRICS.0,
+            metrics.cbSize,
+            Some((&mut metrics as *mut NONCLIENTMETRICSW).cast()),
+            0,
+            dpi,
+        )
+    }
+    .is_ok();
+    if !ok {
+        return HFONT::default();
+    }
+    metrics.lfMessageFont.lfHeight = -(14 * dpi as i32 / 96);
+    let face = wide("Microsoft YaHei UI");
+    metrics.lfMessageFont.lfFaceName = [0; 32];
+    metrics.lfMessageFont.lfFaceName[..face.len()].copy_from_slice(&face);
+    // SAFETY: the LOGFONT is fully initialised above.
+    unsafe { CreateFontIndirectW(&metrics.lfMessageFont) }
+}
+
+/// Owner-drawn combo: the theme surface, the theme text colour, and the hover colour for
+/// the highlighted row. The face (`itemID` -1) shows the current selection.
+fn draw_combo_item(draw: &DRAWITEMSTRUCT) {
+    let theme = crate::config::theme();
+    let index = if draw.itemID == u32::MAX {
+        with(|s| unsafe { SendMessageW(s.combo, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))) }.0)
+            .unwrap_or(-1)
+    } else {
+        draw.itemID as isize
+    };
+    let highlighted = draw.itemState.0 & ODS_SELECTED.0 != 0 && draw.itemID != u32::MAX;
+    let background = if highlighted {
+        theme.hover
+    } else {
+        theme.surface
+    };
+    // SAFETY: the brush is created for this call and deleted before returning.
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(background));
+        FillRect(draw.hDC, &draw.rcItem, brush);
+        let _ = DeleteObject(brush.into());
+    }
+    let text = with(|s| {
+        if index < 0 {
+            return String::new();
+        }
+        let length = unsafe {
+            SendMessageW(
+                s.combo,
+                CB_GETLBTEXTLEN,
+                Some(WPARAM(index as usize)),
+                Some(LPARAM(0)),
+            )
+        }
+        .0;
+        if length <= 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0u16; length as usize + 1];
+        unsafe {
+            SendMessageW(
+                s.combo,
+                CB_GETLBTEXT,
+                Some(WPARAM(index as usize)),
+                Some(LPARAM(buffer.as_mut_ptr() as isize)),
+            );
+        }
+        String::from_utf16_lossy(&buffer[..length as usize])
+    })
+    .unwrap_or_default();
+    let mut text_rect = draw.rcItem;
+    text_rect.left += scale(8);
+    text_rect.right -= scale(8);
+    let mut wide_text = wide(&text);
+    wide_text.pop();
+    // SAFETY: the text buffer and the rectangle live for the call.
+    unsafe {
+        SetTextColor(draw.hDC, COLORREF(theme.text));
+        SetBkMode(draw.hDC, TRANSPARENT);
+        DrawTextW(
+            draw.hDC,
+            &mut wide_text,
+            &mut text_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
 }
 
 fn scale(value: i32) -> i32 {
@@ -109,9 +286,13 @@ pub(crate) fn run(instance: HINSTANCE, initial: Choice, parent: HWND) -> Option<
         }
     }
     let outcome = with(|s| s.outcome.take()).flatten().flatten();
+    let font = with(|s| s.font).unwrap_or_default();
     unsafe {
         if IsWindow(Some(hwnd)).as_bool() {
             let _ = DestroyWindow(hwnd);
+        }
+        if !font.is_invalid() {
+            let _ = DeleteObject(font.into());
         }
     }
     DIALOG.with(|s| *s.borrow_mut() = None);
@@ -133,8 +314,19 @@ fn create(instance: HINSTANCE, parent: HWND, selected: usize) -> HWND {
     unsafe {
         RegisterClassW(&class);
     }
-    let width = scale(380);
-    let height = scale(230);
+    // The content size is what the layout measures; the frame is added around it.
+    let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    let ex_style = WS_EX_DLGMODALFRAME;
+    let mut outer = RECT {
+        left: 0,
+        top: 0,
+        right: scale(380),
+        bottom: scale(206),
+    };
+    // SAFETY: the rectangle is a valid out/in parameter for the call.
+    let _ = unsafe { AdjustWindowRectEx(&mut outer, style, false, ex_style) };
+    let width = outer.right - outer.left;
+    let height = outer.bottom - outer.top;
     let title = wide(crate::i18n::text("桌面设置"));
     let hwnd = unsafe {
         CreateWindowExW(
@@ -156,7 +348,8 @@ fn create(instance: HINSTANCE, parent: HWND, selected: usize) -> HWND {
     if hwnd.is_invalid() {
         return hwnd;
     }
-    let font = unsafe { HFONT(GetStockObject(DEFAULT_GUI_FONT).0) };
+    let font = message_font(dpi_of(hwnd));
+    with(|s| s.font = font);
     let child = |class: &str,
                  text: &str,
                  style: WINDOW_STYLE,
@@ -247,7 +440,9 @@ fn create(instance: HINSTANCE, parent: HWND, selected: usize) -> HWND {
     let combo = child(
         "COMBOBOX",
         "",
-        WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_VSCROLL | tab,
+        WINDOW_STYLE((CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS) as u32)
+            | WS_VSCROLL
+            | tab,
         12,
         94,
         350,
@@ -507,6 +702,39 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         return LRESULT(0);
                     }
                 }
+                WM_MEASUREITEM => {
+                    if wp.0 == ID_COMBO {
+                        // SAFETY: for ownerdraw messages lp points at a MEASUREITEMSTRUCT.
+                        let measure = &mut *(lp.0 as *mut MEASUREITEMSTRUCT);
+                        measure.itemHeight = scale(24) as u32;
+                        return LRESULT(1);
+                    }
+                }
+                WM_DRAWITEM => {
+                    if wp.0 == ID_COMBO {
+                        // SAFETY: for ownerdraw messages lp points at a DRAWITEMSTRUCT.
+                        let draw = &*(lp.0 as *const DRAWITEMSTRUCT);
+                        draw_combo_item(draw);
+                        return LRESULT(1);
+                    }
+                }
+                WM_ERASEBKGND => {
+                    // Paint the theme background so the window matches the settings panel.
+                    let theme = crate::config::theme();
+                    let brush = CreateSolidBrush(COLORREF(theme.bg));
+                    let mut rect = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rect);
+                    let _ = FillRect(HDC(wp.0 as *mut _), &rect, brush);
+                    let _ = DeleteObject(brush.into());
+                    return LRESULT(1);
+                }
+                WM_CTLCOLORSTATIC => {
+                    // Labels are transparent over the themed background, in the theme text colour.
+                    let hdc = HDC(wp.0 as *mut _);
+                    SetTextColor(hdc, COLORREF(crate::config::theme().text));
+                    SetBkMode(hdc, TRANSPARENT);
+                    return LRESULT(GetStockObject(NULL_BRUSH).0 as isize);
+                }
                 WM_CLOSE => {
                     finish(false);
                     return LRESULT(0);
@@ -654,6 +882,81 @@ mod tests {
                 wallpaper: None
             })
         );
+    }
+
+    #[test]
+    #[ignore = "private desktop screenshot; use isolated_tray_probe.py --test dialog-shots"]
+    fn native_private_desktop_dialog_screenshots() {
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        let instance = HINSTANCE(unsafe { GetModuleHandleW(None) }.unwrap().0);
+        let folder = std::path::PathBuf::from("target/test-reports/dialog-shots");
+        std::fs::create_dir_all(&folder).unwrap();
+        let desktop = unsafe { thread_desktop(GetCurrentThreadId()) };
+        let variants = [
+            (
+                "zh-light",
+                crate::i18n::Language::Zh,
+                crate::config::ThemeMode::Light,
+            ),
+            (
+                "zh-dark",
+                crate::i18n::Language::Zh,
+                crate::config::ThemeMode::Dark,
+            ),
+            (
+                "en-light",
+                crate::i18n::Language::En,
+                crate::config::ThemeMode::Light,
+            ),
+            (
+                "en-dark",
+                crate::i18n::Language::En,
+                crate::config::ThemeMode::Dark,
+            ),
+        ];
+        for (name, language, mode) in variants {
+            crate::config::set_language(language);
+            crate::config::set_theme_mode(mode);
+            crate::config::refresh_theme();
+            let path = folder.join(format!("{name}.bmp"));
+            let shooter = std::thread::spawn(move || {
+                let _ = unsafe { set_thread_desktop(desktop) };
+                let class = wide(CLASS);
+                let mut hwnd = HWND::default();
+                for _ in 0..60 {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    hwnd = unsafe { FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) }
+                        .unwrap_or_default();
+                    if !hwnd.is_invalid() {
+                        break;
+                    }
+                }
+                assert!(!hwnd.is_invalid(), "dialog window not found");
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                unsafe { save_bitmap(hwnd, &path) };
+                let _ = unsafe {
+                    PostMessageW(
+                        Some(hwnd),
+                        WM_COMMAND,
+                        WPARAM(IDCANCEL.0 as usize | ((BN_CLICKED as usize) << 16)),
+                        LPARAM(0),
+                    )
+                };
+            });
+            let _ = run(
+                instance,
+                Choice {
+                    color: Some((0x1e, 0x3a, 0x5f)),
+                    wallpaper: None,
+                },
+                HWND::default(),
+            );
+            shooter.join().unwrap();
+        }
+        crate::config::set_language(crate::i18n::Language::Zh);
+        crate::config::set_theme_mode(crate::config::ThemeMode::Auto);
     }
 
     #[test]

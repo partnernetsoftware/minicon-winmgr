@@ -2035,6 +2035,63 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "private desktop screenshot; use isolated_tray_probe.py --test settings-shots"]
+    fn native_private_desktop_settings_screenshots() {
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        let module = unsafe { GetModuleHandleW(None) }.unwrap();
+        install(HINSTANCE(module.0)).unwrap();
+        let folder = std::path::PathBuf::from("target/test-reports/settings-shots");
+        std::fs::create_dir_all(&folder).unwrap();
+        let variants = [
+            (
+                "zh-light",
+                crate::i18n::Language::Zh,
+                crate::config::ThemeMode::Light,
+            ),
+            (
+                "zh-dark",
+                crate::i18n::Language::Zh,
+                crate::config::ThemeMode::Dark,
+            ),
+            (
+                "en-light",
+                crate::i18n::Language::En,
+                crate::config::ThemeMode::Light,
+            ),
+            (
+                "en-dark",
+                crate::i18n::Language::En,
+                crate::config::ThemeMode::Dark,
+            ),
+        ];
+        for (name, language, mode) in variants {
+            crate::config::set_language(language);
+            crate::config::set_theme_mode(mode);
+            crate::config::refresh_theme();
+            show();
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(900);
+            let mut msg = MSG::default();
+            while std::time::Instant::now() < until {
+                while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+                    unsafe {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            unsafe {
+                crate::desktop_dialog::save_bitmap(handle(), &folder.join(format!("{name}.bmp")))
+            };
+            hide();
+        }
+        crate::config::set_language(crate::i18n::Language::Zh);
+        crate::config::set_theme_mode(crate::config::ThemeMode::Auto);
+        crate::config::refresh_theme();
+    }
+
+    #[test]
     fn native_focus_and_escape_remain_responsive_during_two_second_save() {
         let events = crate::settings_store::install_delayed_test_writer();
         let module =
