@@ -812,6 +812,7 @@ fn source_note(key: &'static str, reason: Option<&str>) -> String {
 fn refresh() {
     crate::settings_ui::complete_shell_operation();
     crate::update::poll();
+    refresh_accent();
     label(
         handle(),
         &crate::ui_format!(
@@ -823,12 +824,11 @@ fn refresh() {
     let cfg = config::current();
     let controls = with(|p| p.controls.clone()).unwrap_or_default();
     for c in controls {
-        if !c.caption.is_empty() && c.id != 6307 {
+        // The accent heading carries its value, which refresh_accent sets.
+        if !c.caption.is_empty() && c.id != 6307 && c.id != ACCENT_HEADING {
             label(c.hwnd, &c.caption);
         }
     }
-    // After the caption pass, which would otherwise restore the plain heading.
-    refresh_accent();
     label(
         control(ADVANCED),
         if with(|p| p.advanced).unwrap_or(false) {
