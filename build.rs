@@ -12,6 +12,36 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=app.manifest");
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // Icon and version resources per binary. The manifest stays on the linker path
+        // below, so winresource does not add a second one.
+        println!("cargo:rerun-if-changed=assets/winmgr.ico");
+        let icon = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+            .join("assets")
+            .join("winmgr.ico");
+        for (binary, description, original) in [
+            (
+                "minicon-winmgr",
+                "Winmgr shell and taskbar",
+                "minicon-winmgr.exe",
+            ),
+            (
+                "minicon-tskmgr",
+                "Winmgr task manager",
+                "minicon-tskmgr.exe",
+            ),
+        ] {
+            let mut resource = winresource::WindowsResource::new();
+            resource
+                .set_icon(icon.to_str().expect("icon path is valid UTF-8"))
+                .set("ProductName", "Minicon Winmgr")
+                .set("CompanyName", "PARTNERNET SOFTWARE PTY LTD")
+                .set("FileDescription", description)
+                .set("OriginalFilename", original)
+                .set("InternalName", binary);
+            resource
+                .compile_for(binary)
+                .expect("failed to embed Winmgr resources");
+        }
         let manifest = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
             .join("app.manifest");
         println!("cargo:rustc-link-arg-bin=minicon-winmgr=/MANIFEST:EMBED");

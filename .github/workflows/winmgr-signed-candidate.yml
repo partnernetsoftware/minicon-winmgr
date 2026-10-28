@@ -1,0 +1,209 @@
+name: Signed candidate (Winmgr)
+
+# Manual, and not yet a release path. It builds the companion, signs it, binds the
+# signed companion digest into the shell, signs the shell, and only then prepares
+# the attachments. It is inert until the release-signing environment holds the
+# Azure Artifact Signing configuration; without it the first job stops, and no
+# unsigned fallback is produced. Remove the dispatch guard only after a real run
+# has been verified on this repository.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_provisioned:
+        description: Azure Artifact Signing is configured for this repository (vars and environment secrets)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: windows-latest
+    steps:
+      - name: Refuse to run before provisioning
+        if: ${{ !inputs.confirm_provisioned }}
+        run: |
+          Write-Error 'Set confirm_provisioned only after the Azure Artifact Signing setup in docs/validation_0_1_29.md is complete.'
+          exit 1
+        shell: pwsh
+
+  build-companion:
+    needs: guard
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build unsigned Tskmgr and record its digest
+        run: python scripts/build_candidate.py --tool-only --target-dir target
+        shell: pwsh
+      - name: Stage unsigned Tskmgr
+        run: |
+          New-Item -ItemType Directory -Force signing-input | Out-Null
+          Copy-Item target/release/minicon-tskmgr.exe signing-input/minicon-tskmgr.exe
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-companion
+          path: signing-input/minicon-tskmgr.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  sign-companion:
+    needs: build-companion
+    runs-on: windows-latest
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-companion
+          path: signing-input
+      - name: Azure login (GitHub OIDC federated identity, signer role only)
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29 # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign Tskmgr with Azure Artifact Signing (Public Trust)
+        uses: Azure/artifact-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files-folder: signing-input
+          files-folder-filter: exe
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Minicon Winmgr task manager
+          description-url: https://github.com/partnernetsoftware/minicon-winmgr
+          exclude-workload-identity-credential: true
+          exclude-environment-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+      - name: Verify publisher and timestamp
+        run: |
+          $sig = Get-AuthenticodeSignature -LiteralPath signing-input/minicon-tskmgr.exe
+          if ($sig.Status -ne 'Valid') { throw "Tskmgr signature status: $($sig.Status)" }
+          if ($null -eq $sig.TimeStamperCertificate) { throw 'Tskmgr is missing an RFC 3161 timestamp' }
+          if ($sig.SignerCertificate.Subject -notmatch 'PARTNERNET SOFTWARE PTY LTD') { throw 'Tskmgr publisher mismatch' }
+          Write-Host "signed Tskmgr: $($sig.SignerCertificate.Subject)"
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-companion
+          path: signing-input/minicon-tskmgr.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  build-shell:
+    needs: sign-companion
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-companion
+          path: signed
+      - name: Build Winmgr bound to the signed Tskmgr digest
+        run: python scripts/build_candidate.py --signed-tool signed/minicon-tskmgr.exe --target-dir target
+        shell: pwsh
+      - name: Stage unsigned Winmgr
+        run: |
+          New-Item -ItemType Directory -Force signing-input | Out-Null
+          Copy-Item target/release/minicon-winmgr.exe signing-input/minicon-winmgr.exe
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-shell
+          path: signing-input/minicon-winmgr.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  sign-shell:
+    needs: build-shell
+    runs-on: windows-latest
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-shell
+          path: signing-input
+      - name: Azure login (GitHub OIDC federated identity, signer role only)
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29 # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign Winmgr with Azure Artifact Signing (Public Trust)
+        uses: Azure/artifact-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files-folder: signing-input
+          files-folder-filter: exe
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Minicon Winmgr
+          description-url: https://github.com/partnernetsoftware/minicon-winmgr
+          exclude-workload-identity-credential: true
+          exclude-environment-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+      - name: Verify publisher and timestamp
+        run: |
+          $sig = Get-AuthenticodeSignature -LiteralPath signing-input/minicon-winmgr.exe
+          if ($sig.Status -ne 'Valid') { throw "Winmgr signature status: $($sig.Status)" }
+          if ($null -eq $sig.TimeStamperCertificate) { throw 'Winmgr is missing an RFC 3161 timestamp' }
+          if ($sig.SignerCertificate.Subject -notmatch 'PARTNERNET SOFTWARE PTY LTD') { throw 'Winmgr publisher mismatch' }
+          Write-Host "signed Winmgr: $($sig.SignerCertificate.Subject)"
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-shell
+          path: signing-input/minicon-winmgr.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  package:
+    needs: [sign-companion, sign-shell]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-companion
+          path: signed
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-shell
+          path: signed
+      - name: Prepare attachments from the signed executables
+        run: |
+          $tool = (Get-FileHash -Algorithm SHA256 signed/minicon-tskmgr.exe).Hash.ToLower()
+          $env:MINICON_TSKMGR_SHA256 = $tool
+          python scripts/release_artifact.py prepare --exe signed/minicon-winmgr.exe --tool signed/minicon-tskmgr.exe --output dist
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-signed-candidate
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
