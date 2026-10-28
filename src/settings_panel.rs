@@ -812,7 +812,6 @@ fn source_note(key: &'static str, reason: Option<&str>) -> String {
 fn refresh() {
     crate::settings_ui::complete_shell_operation();
     crate::update::poll();
-    refresh_accent();
     label(
         handle(),
         &crate::ui_format!(
@@ -828,6 +827,8 @@ fn refresh() {
             label(c.hwnd, &c.caption);
         }
     }
+    // After the caption pass, which would otherwise restore the plain heading.
+    refresh_accent();
     label(
         control(ADVANCED),
         if with(|p| p.advanced).unwrap_or(false) {
