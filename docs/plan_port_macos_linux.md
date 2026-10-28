@@ -2,6 +2,21 @@
 
 状态：讨论稿（2026-10-28），未排期、未开工。依据用户提出的方向：做 macOS 与 Linux 版本，权限受限时能做多少算多少；目的是功能增强与 Minicon 系列的品牌扩张，并作为产品背书。与之前的边界关系：[prd_7_2.md](prd_7_2.md) §4 写的是"当前不启动完整移植"，本稿是对该边界的一次受控推进，需要用户确认后才改变 7.2 的状态。
 
+## 0. 参照 minicon 的已有选择（2026-10-28）
+
+minicon（同一公司的跨平台终端 GUI，Windows、macOS、Linux）已经走过这条路，下面这些选择直接沿用，除非有明确理由偏离：
+
+| 方面 | minicon 的做法（来源：`minicon` 仓库） | 对 winmgr 的含义 |
+|---|---|---|
+| 平台结构 | `minicon-platform` 把平台中立的契约放在 `contract/`，编译期用 `selected.rs` 选择 `adapters/windows`、`adapters/linux`、`adapters/unix` 等适配层 | 采用同样结构：先定契约，再按系统选实现。Windows 现有代码作为 `adapters/windows` 逐步迁入，不做大搬迁 |
+| Linux 显示协议 | 只用 X11（`x11rb`）。归档记录写明当时没有 Wayland 后端 | 阶段 A 只做 X11，与 minicon 一致，不另起 Wayland 路线 |
+| 窗口与绘制 | 可选 `winit` + `softbuffer` 的像素窗口，`minicon-ui-core` 承担与宿主无关的 UI 机制 | winmgr 的任务条需要 dock 类型窗口和预留边，`winit` 本身不提供这些，需要 X11 层补充；绘制可评估复用 `minicon-ui-core`（需确认其许可与依赖边界） |
+| 签名与公证 | Windows 为 Azure Trusted Signing 的公开信任 Authenticode 签名；macOS 为 Developer ID 签名加公证；`release-policy.json` 中 `signing.mode=required`，缺少签名配置则阻断发布，不回退为未签名产物 | macOS 版直接复用同一个 Apple Developer 身份与公证流程，不需要另外开户。Windows 版也可沿用同一签名链路，这会去掉 winmgr 当前“尚未代码签名”的说明 |
+| 验证矩阵 | 发布前有“六格”运行时验证（三系统 × 两种架构的组合） | winmgr 的候选验收也按格组织，先覆盖 Windows x64，再按需补 macOS 与 Linux 各一格 |
+| 单文件理念 | “one file · no install” | 与 winmgr 的单 exe 一致。macOS 版仍需 `.app` 包结构，这一点要向用户说明 |
+
+由此，原策划中的几项决策会变化（见 §7）：Apple 开发者账户不需要另外决定，签名基础设施可以复用。
+
 ## 1. 先说清楚的前提
 
 - **Winmgr 在 Windows 上的核心能力是"替换外壳"**：接管登录 Shell、关闭 Explorer 的任务栏与桌面。这一能力在 macOS 上**不存在**（Dock、菜单栏、Finder 由系统持有，且受 SIP 保护），在 Linux 上只存在于特定窗口管理器或桌面环境中。
@@ -84,6 +99,8 @@ X11 上大多数窗口管理器（Openbox、Xfwm、i3 等）遵循 EWMH，这是
 
 1. 是否改变 prd_7_2 的边界，开始阶段 A（Linux X11 原型）。
 2. 第一个平台：建议 Linux X11 先行（无权限墙，便于验证公共模型）；如果你更看重用户规模，可以把 macOS 菜单栏提前，但需接受签名与授权的成本。
-3. 是否购买并使用 Apple Developer 账户（签名公证的前提）。
+3. 是否复用 minicon 已有的 Apple Developer 身份与公证流程（建议：复用，不另开户）。
 4. Linux 支持矩阵：先支持哪些窗口管理器（建议以 2–3 个常见的 X11 WM 为准）。
 5. 是否允许新建独立代码目录或仓库（例如 `minicon-winmgr-linux`），还是在本仓库内用 cargo feature 隔离。
+6. 是否让 winmgr 依赖 minicon 的共享 crate（`minicon-platform`、`minicon-ui-core`）。这会带来跨仓库的版本耦合，需要单独决定依赖方式（路径依赖、发布版本或 git 依赖）。
+7. 是否把 Windows 版也接入 minicon 的签名链路（建议：是，并以此替代当前“尚未代码签名”的状态）。
