@@ -1,6 +1,10 @@
 # 公开验收摘要
 
-当前公开版本：[v0.1.25](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.25)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+当前公开版本：[v0.1.26](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.26)。本页只记录可公开的结果，不包含工作站路径、用户标识、运行命令或桌面原始数据。
+
+## 0.1.26
+
+已合 main 并公开为 Latest。设置面板新增强调色（与桌面设置共用拾色对话框，带对比度保护），设置面板更紧凑，桌面设置对话框补上清除按钮。准确候选的设置与全屏层通过，四个附件（含 zip）与候选逐字节一致；真实 .25 更新与公开工具下载通过。范围与限制见[本版验收](validation_0_1_26.md)。
 
 ## 0.1.25
 

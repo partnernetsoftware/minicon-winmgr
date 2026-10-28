@@ -15,7 +15,9 @@
 产品原则：**用不上的可选功能，默认不加载。** 0.1.8 中，旧菜单默认不初始化，缩略预览默认不创建窗口，Run 的窗口和工作线程首次使用时才创建；通知宿主按外壳身份和显式配置决定初始化。详见 [0.1.8 设计与验收](docs/archive/plan_0_1_8.md)。
 
 
-当前公开版 **[0.1.25](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.25)**。版本事实见[发布说明](docs/releases/v0.1.25.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.25 计划](docs/archive/plan_0_1_20.md)。
+当前公开版 **[0.1.26](https://github.com/partnernetsoftware/minicon-winmgr/releases/tag/v0.1.26)**。版本事实见[发布说明](docs/releases/v0.1.26.md)，需求入口见 [PRD](docs/prd.md)，本版范围与验收见 [0.1.26 计划](docs/archive/plan_0_1_20.md)。
+
+0.1.26 已公开：设置面板新增“强调色”，与桌面设置共用拾色对话框，并带对比度保护；设置面板更紧凑。版本事实见[0.1.26 验收](docs/validation_0_1_26.md)。
 
 0.1.25 已公开：替换模式的“桌面设置”改为一个对话框，颜色与背景图片在同一处设置；背景可选系统自带壁纸或自己选的图片。版本事实见[0.1.25 验收](docs/validation_0_1_25.md)。
 
