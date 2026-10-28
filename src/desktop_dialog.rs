@@ -18,8 +18,8 @@ use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_SELECTED};
-use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::HiDpi::SystemParametersInfoForDpi;
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, PWSTR};
@@ -115,6 +115,9 @@ struct State {
     photos: Vec<Option<String>>,
     outcome: Option<Option<Choice>>,
     font: HFONT,
+    instance: HINSTANCE,
+    /// DPI the controls are laid out for; follows WM_DPICHANGED.
+    dpi: u32,
 }
 
 thread_local! { static DIALOG: RefCell<Option<State>> = const { RefCell::new(None) }; }
@@ -229,10 +232,39 @@ fn draw_combo_item(draw: &DRAWITEMSTRUCT) {
     }
 }
 
+/// Scales a design value (96 DPI) to the dialog's current DPI. Must not be called while
+/// the state is borrowed.
 fn scale(value: i32) -> i32 {
+    let dpi = with(|s| s.dpi)
+        .filter(|d| *d > 0)
+        .unwrap_or_else(system_dpi);
+    value * dpi as i32 / 96
+}
+
+fn system_dpi() -> u32 {
     // SAFETY: system DPI query with no arguments.
-    let dpi = unsafe { GetDpiForSystem() };
-    value * dpi.max(96) as i32 / 96
+    unsafe { GetDpiForSystem() }.max(96)
+}
+
+/// Outer window size that gives the layout its designed client area at `dpi`.
+fn frame_size(dpi: u32) -> (i32, i32) {
+    let mut outer = RECT {
+        left: 0,
+        top: 0,
+        right: 380 * dpi as i32 / 96,
+        bottom: 206 * dpi as i32 / 96,
+    };
+    // SAFETY: the rectangle is a valid in/out parameter for the call.
+    let _ = unsafe {
+        AdjustWindowRectExForDpi(
+            &mut outer,
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            false,
+            WS_EX_DLGMODALFRAME,
+            dpi,
+        )
+    };
+    (outer.right - outer.left, outer.bottom - outer.top)
 }
 
 /// Shows the dialog modally and returns the chosen colour and photo, or `None` on cancel.
@@ -314,19 +346,11 @@ fn create(instance: HINSTANCE, parent: HWND, selected: usize) -> HWND {
     unsafe {
         RegisterClassW(&class);
     }
-    // The content size is what the layout measures; the frame is added around it.
-    let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
-    let ex_style = WS_EX_DLGMODALFRAME;
-    let mut outer = RECT {
-        left: 0,
-        top: 0,
-        right: scale(380),
-        bottom: scale(206),
-    };
-    // SAFETY: the rectangle is a valid out/in parameter for the call.
-    let _ = unsafe { AdjustWindowRectEx(&mut outer, style, false, ex_style) };
-    let width = outer.right - outer.left;
-    let height = outer.bottom - outer.top;
+    with(|s| {
+        s.instance = instance;
+        s.dpi = system_dpi();
+    });
+    let (width, height) = frame_size(system_dpi());
     let title = wide(crate::i18n::text("桌面设置"));
     let hwnd = unsafe {
         CreateWindowExW(
@@ -348,7 +372,39 @@ fn create(instance: HINSTANCE, parent: HWND, selected: usize) -> HWND {
     if hwnd.is_invalid() {
         return hwnd;
     }
-    let font = message_font(dpi_of(hwnd));
+    // A window on a scaled monitor reports its own DPI, which can differ from the system's.
+    let dpi = dpi_of(hwnd);
+    with(|s| {
+        s.hwnd = hwnd;
+        s.dpi = dpi;
+    });
+    build_children(hwnd, selected);
+    crate::appearance::install(hwnd);
+    unsafe {
+        let _ = SetFocus(Some(GetDlgItem(Some(hwnd), IDOK.0).unwrap_or_default()));
+        let _ = crate::win_util::force_foreground(hwnd);
+    }
+    hwnd
+}
+
+/// Destroys the current controls and creates them again for the state's DPI. Colour and
+/// the photo list live in the state, so nothing the user chose is lost.
+fn build_children(hwnd: HWND, selected: usize) {
+    let (instance, dpi, old_font) = with(|s| (s.instance, s.dpi, s.font)).unwrap_or_default();
+    unsafe {
+        let mut child = GetWindow(hwnd, GW_CHILD).unwrap_or_default();
+        while !child.is_invalid() {
+            let next = GetWindow(child, GW_HWNDNEXT).unwrap_or_default();
+            let _ = DestroyWindow(child);
+            child = next;
+        }
+    }
+    if !old_font.is_invalid() {
+        unsafe {
+            let _ = DeleteObject(old_font.into());
+        }
+    }
+    let font = message_font(dpi);
     with(|s| s.font = font);
     let child = |class: &str,
                  text: &str,
@@ -459,7 +515,7 @@ fn create(instance: HINSTANCE, parent: HWND, selected: usize) -> HWND {
         26,
         ID_BROWSE,
     );
-    let ok = child(
+    child(
         "BUTTON",
         crate::i18n::text("确定"),
         WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | tab,
@@ -479,20 +535,12 @@ fn create(instance: HINSTANCE, parent: HWND, selected: usize) -> HWND {
         28,
         IDCANCEL.0 as usize,
     );
-    let _ = ok;
     with(|s| {
-        s.hwnd = hwnd;
         s.colour_text = colour_text;
         s.combo = combo;
     });
     populate(combo, selected);
     refresh_colour_text();
-    crate::appearance::install(hwnd);
-    unsafe {
-        let _ = SetFocus(Some(GetDlgItem(Some(hwnd), IDOK.0).unwrap_or_default()));
-        let _ = crate::win_util::force_foreground(hwnd);
-    }
-    hwnd
 }
 
 fn populate(combo: HWND, selected: usize) {
@@ -701,6 +749,29 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         }
                         return LRESULT(0);
                     }
+                }
+                WM_DPICHANGED => {
+                    // Adopt the suggested rectangle for the new monitor, then lay out again.
+                    let new_dpi = ((wp.0 >> 16) & 0xffff).max(96) as u32;
+                    // SAFETY: WM_DPICHANGED passes the suggested rectangle in lp.
+                    let suggested = &*(lp.0 as *const RECT);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    let selected = with(|s| {
+                        SendMessageW(s.combo, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0
+                    })
+                    .unwrap_or(0)
+                    .max(0) as usize;
+                    with(|s| s.dpi = new_dpi);
+                    build_children(hwnd, selected);
+                    return LRESULT(0);
                 }
                 WM_MEASUREITEM => {
                     if wp.0 == ID_COMBO {
@@ -957,6 +1028,86 @@ mod tests {
         }
         crate::config::set_language(crate::i18n::Language::Zh);
         crate::config::set_theme_mode(crate::config::ThemeMode::Auto);
+    }
+
+    #[test]
+    fn frame_grows_with_dpi() {
+        let (w96, h96) = frame_size(96);
+        let (w144, h144) = frame_size(144);
+        // 150% scaling should give about 1.5 times the frame, within rounding.
+        assert!(
+            (w144 as f64 / w96 as f64 - 1.5).abs() < 0.02,
+            "{w96} {w144}"
+        );
+        assert!(
+            (h144 as f64 / h96 as f64 - 1.5).abs() < 0.02,
+            "{h96} {h144}"
+        );
+    }
+
+    #[test]
+    #[ignore = "private desktop; use isolated_tray_probe.py --test dialog-dpi"]
+    fn native_private_desktop_dialog_relayouts_at_150_percent() {
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        assert_eq!(std::env::var("MINICON_PRIVATE_DESKTOP").as_deref(), Ok("1"));
+        let instance = HINSTANCE(unsafe { GetModuleHandleW(None) }.unwrap().0);
+        let folder = std::path::PathBuf::from("target/test-reports/dialog-shots");
+        std::fs::create_dir_all(&folder).unwrap();
+        let desktop = unsafe { thread_desktop(GetCurrentThreadId()) };
+        let shooter = std::thread::spawn(move || {
+            let _ = unsafe { set_thread_desktop(desktop) };
+            let class = wide(CLASS);
+            let mut hwnd = HWND::default();
+            for _ in 0..60 {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                hwnd = unsafe { FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) }
+                    .unwrap_or_default();
+                if !hwnd.is_invalid() {
+                    break;
+                }
+            }
+            assert!(!hwnd.is_invalid(), "dialog window not found");
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            // Simulate moving the dialog to a 150% monitor: the suggested rectangle is the
+            // same top-left with the 150% frame, and wParam carries the new DPI.
+            let mut current = windows::Win32::Foundation::RECT::default();
+            unsafe { GetWindowRect(hwnd, &mut current) }.unwrap();
+            let (w, h) = frame_size(144);
+            let suggested = windows::Win32::Foundation::RECT {
+                left: current.left,
+                top: current.top,
+                right: current.left + w,
+                bottom: current.top + h,
+            };
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_DPICHANGED,
+                    Some(WPARAM((144usize << 16) | 144)),
+                    Some(LPARAM(&suggested as *const _ as isize)),
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            unsafe { save_bitmap(hwnd, &folder.join("zh-light-150.bmp")) };
+            let _ = unsafe {
+                PostMessageW(
+                    Some(hwnd),
+                    WM_COMMAND,
+                    WPARAM(IDCANCEL.0 as usize | ((BN_CLICKED as usize) << 16)),
+                    LPARAM(0),
+                )
+            };
+        });
+        let _ = run(
+            instance,
+            Choice {
+                color: Some((0x1e, 0x3a, 0x5f)),
+                wallpaper: None,
+            },
+            HWND::default(),
+        );
+        shooter.join().unwrap();
     }
 
     #[test]
