@@ -18,6 +18,18 @@
 - 仓库专属 Entra 应用、联合凭据（精确 GitHub 主体）、`minicon-public` 证书配置上的签名者角色，以及 `release-signing` 环境中的三个 secret，均已创建。
 - 只读核对：GitHub 侧 READY；Azure 侧 READY（四个签名者各有一个精确主体）。
 
-## 4. 签名运行、发布路径与公开发布
+## 4. 签名运行（2026-10-29）
 
-待补充。
+- 运行 `winmgr-signed-candidate.yml`，源提交 `ffb809b`，run `40846854862`，六个 job 全部成功（guard、build-companion、sign-companion、build-shell、sign-shell、package）。
+- 产物 `windows-x64-signed-candidate` 中两个 exe 都经 `Get-AuthenticodeSignature` 核对为 Valid，发行者 PARTNERNET SOFTWARE PTY LTD，带 RFC 3161 时间戳。
+- 摘要：Winmgr `61c80340…`，Tskmgr `e430e5af…`，zip `23611388…`；BUILDINFO 与 SHA256SUMS 一致。清单 `docs/releases/v0.1.29.artifact.toml` 原样取自该 BUILDINFO。
+
+## 5. 发布路径
+
+- `scripts/release_artifact.py`：从 0.1.29 起读取 `release-policy.json`；`required` 时只接受签名工作流的 run 与 `windows-x64-signed-candidate`，并校验两个 exe 的签名；所有晋升都校验 zip 只含已审阅的 exe。策略缺失或取值非法直接失败。
+- 单元测试 29 项通过，覆盖签名路径、候选 run 被拒绝、未签名 exe 被拒绝、策略缺失、`off` 模式、zip 内容与签名判定的正反例。
+- 本机对真实签名 run 执行 `promote` 成功，输出的五个文件与签名产物一致。
+
+## 6. 公开发布
+
+待 tag `v0.1.29` 草稿、字节比对与公开后补充。
