@@ -155,8 +155,10 @@ def verify_authenticode(path):
     script=('$s=Get-AuthenticodeSignature -LiteralPath $env:MINICON_SIGN_PATH;'
         '[pscustomobject]@{status=[string]$s.Status;subject=[string]$s.SignerCertificate.Subject;'
         'timestamped=($null -ne $s.TimeStamperCertificate)}|ConvertTo-Json -Compress')
+    # Windows PowerShell 5.1 must not inherit a PowerShell 7 module path, or its security module fails to load.
+    env={key:value for key,value in os.environ.items() if key.upper()!='PSMODULEPATH'}
     result=json.loads(subprocess.check_output(['powershell','-NoProfile','-NonInteractive','-Command',script],
-        env=dict(os.environ,MINICON_SIGN_PATH=str(path)),text=True,encoding='utf-8'))
+        env=dict(env,MINICON_SIGN_PATH=str(path)),text=True,encoding='utf-8'))
     if result['status']!='Valid' or SIGNER+',' not in result['subject']+',' or not result['timestamped']:
         raise ValueError(f'{path.name} is not validly signed by the company with a timestamp')
 

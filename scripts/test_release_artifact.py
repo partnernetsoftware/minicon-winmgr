@@ -262,5 +262,13 @@ class Provenance(unittest.TestCase):
         with patch.object(subprocess,'check_output',return_value=json.dumps(accepted)):
             a.verify_authenticode(exe)
 
+    def test_authenticode_check_does_not_inherit_a_powershell_7_module_path(self):
+        exe=self.root/'signed.exe';exe.write_bytes(b'MZ'+b'x'*510)
+        accepted=dict(status='Valid',subject='CN=PARTNERNET SOFTWARE PTY LTD, O=PARTNERNET SOFTWARE PTY LTD',timestamped=True)
+        with patch.dict(os.environ,PSModulePath=r'C:\Program Files\PowerShell\7\Modules'),\
+                patch.object(subprocess,'check_output',return_value=json.dumps(accepted)) as run:
+            a.verify_authenticode(exe)
+        self.assertNotIn('PSMODULEPATH',[key.upper() for key in run.call_args.kwargs['env']])
+
 
 if __name__=='__main__':unittest.main()
