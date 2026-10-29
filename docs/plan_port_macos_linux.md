@@ -2,6 +2,10 @@
 
 状态：讨论稿（2026-10-28），未排期、未开工。依据用户提出的方向：做 macOS 与 Linux 版本，权限受限时能做多少算多少；目的是功能增强与 Minicon 系列的品牌扩张，并作为产品背书。与之前的边界关系：[prd_7_2.md](prd_7_2.md) §4 写的是"当前不启动完整移植"，本稿是对该边界的一次受控推进，需要用户确认后才改变 7.2 的状态。
 
+## 0a. 产品家族定位（2026-10-29）
+
+Winmgr 是 MiniCon 系列的窗口管理子产品。系列结构：agenterm（控制入口）→ minicon（客户端与平台层）→ minicon-winmgr（窗口管理）。依赖只向下流动：子产品复用平台层，不反向依赖子产品。分发与更新是否经由 agenterm 的目录与校验安装，需要单独决定（见 §7 第 8 条）。
+
 ## 0. 参照 minicon 的已有选择（2026-10-28）
 
 minicon（同一公司的跨平台终端 GUI，Windows、macOS、Linux）已经走过这条路，下面这些选择直接沿用，除非有明确理由偏离：
@@ -104,3 +108,5 @@ X11 上大多数窗口管理器（Openbox、Xfwm、i3 等）遵循 EWMH，这是
 5. 是否允许新建独立代码目录或仓库（例如 `minicon-winmgr-linux`），还是在本仓库内用 cargo feature 隔离。
 6. 是否让 winmgr 依赖 minicon 的共享 crate（`minicon-platform`、`minicon-ui-core`）。这会带来跨仓库的版本耦合，需要单独决定依赖方式（路径依赖、发布版本或 git 依赖）。
 7. 是否把 Windows 版也接入 minicon 的签名链路（建议：是，并以此替代当前“尚未代码签名”的状态）。
+8. 是否把 Winmgr 的分发与更新纳入 agenterm 的目录与校验安装（系列控制入口）。这会改变现在"只从 GitHub Releases 更新"的做法，需要与 agenterm 的目录契约一起设计。
+9. 是否由 Winmgr 固定依赖 `minicon-platform` 的 git 版本（与 agenterm 相同方式），以替代 §0 中"只复用代码模块、不建立依赖"的做法。
