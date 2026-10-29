@@ -101,10 +101,11 @@ class Provenance(unittest.TestCase):
         with self.assertRaises(ValueError):
             a.promote(self.root/'artifact/BUILDINFO.toml',self.root/'download',self.root/'out','v0.1.10')
 
-    def promote_fixture(self,tamper=False,paired=False,tamper_tool=False,packaged=None,tamper_zip=False):
+    def promote_fixture(self,tamper=False,paired=False,tamper_tool=False,packaged=None,tamper_zip=False,
+            workflow=a.CANDIDATE_WORKFLOW):
         info=self.prepare(paired,packaged);real_command=a.command;real_run=subprocess.run
         producer=dict(status='completed',conclusion='success',head_sha=info['source_commit'],
-            event='workflow_dispatch',path='.github/workflows/candidate.yml',
+            event='workflow_dispatch',path=workflow,
             repository=dict(full_name=a.REPO),head_repository=dict(full_name=a.REPO))
         def command(*args):return json.dumps(producer) if args[0]=='gh' else real_command(*args)
         def run(args,**kwargs):
@@ -202,6 +203,64 @@ class Provenance(unittest.TestCase):
     def test_tampered_zip_prevents_all_release_output(self):
         with self.assertRaisesRegex(ValueError,'payload digest'):self.promote_fixture(packaged='0.1.24',tamper_zip=True)
         self.assertFalse((self.root/'out').exists())
+
+    def write_policy(self,mode):
+        (self.root/'release-policy.json').write_text(json.dumps({'signing':{'mode':mode}}))
+
+    def test_required_policy_promotes_only_from_the_signed_workflow(self):
+        self.write_policy('required')
+        with patch.object(a,'verify_authenticode') as verify:
+            self.promote_fixture(packaged='0.1.29',workflow=a.SIGNED_WORKFLOW)
+        self.assertEqual(verify.call_count,2)
+        self.assertTrue((self.root/'out'/a.filename('0.1.29')).exists())
+
+    def test_candidate_run_cannot_satisfy_required_policy(self):
+        self.write_policy('required')
+        with patch.object(a,'verify_authenticode'),self.assertRaisesRegex(ValueError,'Producer'):
+            self.promote_fixture(packaged='0.1.29',workflow=a.CANDIDATE_WORKFLOW)
+        self.assertFalse((self.root/'download').exists())
+        self.assertFalse((self.root/'out').exists())
+
+    def test_unsigned_executable_prevents_release_output(self):
+        self.write_policy('required')
+        with patch.object(a,'verify_authenticode',side_effect=ValueError('not signed')),self.assertRaises(ValueError):
+            self.promote_fixture(packaged='0.1.29',workflow=a.SIGNED_WORKFLOW)
+        self.assertFalse((self.root/'out').exists())
+
+    def test_new_release_without_policy_fails_instead_of_downgrading(self):
+        with self.assertRaises(OSError):
+            self.promote_fixture(packaged='0.1.29',workflow=a.CANDIDATE_WORKFLOW)
+        self.assertFalse((self.root/'out').exists())
+
+    def test_off_policy_keeps_the_candidate_path_for_new_release(self):
+        self.write_policy('off')
+        with patch.object(a,'verify_authenticode') as verify:
+            self.promote_fixture(packaged='0.1.29',workflow=a.CANDIDATE_WORKFLOW)
+        verify.assert_not_called()
+        self.assertTrue((self.root/'out'/a.filename('0.1.29')).exists())
+
+    def test_unknown_signing_mode_is_rejected(self):
+        self.write_policy('optional')
+        with self.assertRaisesRegex(ValueError,'Invalid signing mode'):a.signing_mode()
+
+    def test_zip_entry_must_be_the_signed_executable(self):
+        zipped=self.root/'entry.zip';self.exe.write_bytes(b'MZ'+b'x'*510);a.build_zip(self.exe,zipped,'0.1.29')
+        with self.assertRaisesRegex(ValueError,'Zip entry differs'):a.verify_zip_entry(zipped,'0'*64)
+        a.verify_zip_entry(zipped,a.digest(self.exe))
+
+    def test_authenticode_requires_valid_company_signature_with_timestamp(self):
+        exe=self.root/'signed.exe';exe.write_bytes(b'MZ'+b'x'*510)
+        cases=[
+            dict(status='Valid',subject='CN=Someone Else, O=Someone',timestamped=True),
+            dict(status='HashMismatch',subject='CN=PARTNERNET SOFTWARE PTY LTD, O=PARTNERNET SOFTWARE PTY LTD',timestamped=True),
+            dict(status='Valid',subject='CN=PARTNERNET SOFTWARE PTY LTD, O=PARTNERNET SOFTWARE PTY LTD',timestamped=False),
+        ]
+        for result in cases:
+            with patch.object(subprocess,'check_output',return_value=json.dumps(result)),self.assertRaises(ValueError):
+                a.verify_authenticode(exe)
+        accepted=dict(status='Valid',subject='CN=PARTNERNET SOFTWARE PTY LTD, O=PARTNERNET SOFTWARE PTY LTD',timestamped=True)
+        with patch.object(subprocess,'check_output',return_value=json.dumps(accepted)):
+            a.verify_authenticode(exe)
 
 
 if __name__=='__main__':unittest.main()

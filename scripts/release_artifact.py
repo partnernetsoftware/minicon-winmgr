@@ -13,7 +13,13 @@ import zipfile
 ROOT=Path(__file__).resolve().parents[1]
 REPO='partnernetsoftware/minicon-winmgr'
 ARTIFACT='windows-x64-candidate'
-INPUTS=['src','Cargo.toml','Cargo.lock','build.rs','app.manifest','tskmgr.manifest','.cargo','scripts/build_candidate.py']
+CANDIDATE_WORKFLOW='.github/workflows/candidate.yml'
+SIGNED_ARTIFACT='windows-x64-signed-candidate'
+SIGNED_WORKFLOW='.github/workflows/winmgr-signed-candidate.yml'
+POLICY_FILE='release-policy.json'
+SIGNED_SINCE=(0,1,29)
+SIGNER='CN=PARTNERNET SOFTWARE PTY LTD'
+INPUTS=['src','Cargo.toml','Cargo.lock','build.rs','app.manifest','tskmgr.manifest','.cargo','assets/winmgr.ico','scripts/build_candidate.py']
 FIELDS={'version','run_id','source_commit','source_sha256','exe_sha256'}
 TOOL_FIELD='tskmgr_sha256'
 ZIP_FIELD='zip_sha256'
@@ -124,23 +130,58 @@ def prepare(exe,output,tool=None):
     (output/'SHA256SUMS.txt').write_text(checksums(info),encoding='ascii')
 
 
+def signing_mode():
+    mode=json.loads((ROOT/POLICY_FILE).read_text(encoding='utf-8'))['signing']['mode']
+    if mode not in ('off','required'):raise ValueError('Invalid signing mode')
+    return mode
+
+
+def producer(info):
+    # From SIGNED_SINCE on, a missing or invalid policy fails; it never falls back to unsigned.
+    if tuple(map(int,info['version'].split('.')))<SIGNED_SINCE:return CANDIDATE_WORKFLOW,ARTIFACT,False
+    if signing_mode()=='required':return SIGNED_WORKFLOW,SIGNED_ARTIFACT,True
+    return CANDIDATE_WORKFLOW,ARTIFACT,False
+
+
+def verify_zip_entry(archive,exe_sha256):
+    with zipfile.ZipFile(archive) as zipped:
+        entries=zipped.infolist()
+        if len(entries)!=1:raise ValueError('Zip must hold exactly one executable')
+        data=zipped.read(entries[0])
+    if hashlib.sha256(data).hexdigest()!=exe_sha256:raise ValueError('Zip entry differs from the executable')
+
+
+def verify_authenticode(path):
+    script=('$s=Get-AuthenticodeSignature -LiteralPath $env:MINICON_SIGN_PATH;'
+        '[pscustomobject]@{status=[string]$s.Status;subject=[string]$s.SignerCertificate.Subject;'
+        'timestamped=($null -ne $s.TimeStamperCertificate)}|ConvertTo-Json -Compress')
+    result=json.loads(subprocess.check_output(['powershell','-NoProfile','-NonInteractive','-Command',script],
+        env=dict(os.environ,MINICON_SIGN_PATH=str(path)),text=True,encoding='utf-8'))
+    if result['status']!='Valid' or SIGNER+',' not in result['subject']+',' or not result['timestamped']:
+        raise ValueError(f'{path.name} is not validly signed by the company with a timestamp')
+
+
 def promote(manifest,download,output,tag):
     info=load(manifest)
     if info['version']!=version() or tag!='v'+info['version']:raise ValueError('Tag/package/provenance version mismatch')
     if info['source_sha256']!=source_digest():raise ValueError('Product source differs from the tested artifact')
+    workflow,artifact,signed=producer(info)
     run=json.loads(command('gh','api',f'repos/{REPO}/actions/runs/{info["run_id"]}'))
     if not (run.get('status')=='completed' and run.get('conclusion')=='success'
             and run.get('head_sha')==info['source_commit'] and run.get('event')=='workflow_dispatch'
-            and run.get('path')=='.github/workflows/candidate.yml'
+            and run.get('path')==workflow
             and run.get('repository',{}).get('full_name')==REPO
             and run.get('head_repository',{}).get('full_name')==REPO):
-        raise ValueError('Producer is not a successful candidate workflow in this repository')
+        raise ValueError(f'Producer is not a successful {workflow} run in this repository')
     download.mkdir(parents=True,exist_ok=False)
-    subprocess.run(['gh','run','download',str(info['run_id']),'--repo',REPO,'--name',ARTIFACT,
+    subprocess.run(['gh','run','download',str(info['run_id']),'--repo',REPO,'--name',artifact,
         '--dir',str(download)],cwd=ROOT,check=True)
     if load(download/'BUILDINFO.toml')!=info:raise ValueError('Downloaded provenance differs from reviewed manifest')
     for name,expected in payloads(info):
         if digest(download/name)!=expected:raise ValueError('Downloaded payload digest differs from the tested artifact')
+    if ZIP_FIELD in info:verify_zip_entry(download/zip_filename(info['version']),info['exe_sha256'])
+    if signed:
+        for name in [filename(info['version']),tool_filename(info['version'])]:verify_authenticode(download/name)
     if (download/'SHA256SUMS.txt').read_text(encoding='ascii')!=checksums(info):raise ValueError('Checksum file differs')
     output.mkdir(parents=True,exist_ok=False)
     for name in [*(name for name,_ in payloads(info)),'SHA256SUMS.txt','BUILDINFO.toml']:
