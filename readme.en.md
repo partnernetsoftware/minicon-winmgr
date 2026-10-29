@@ -19,6 +19,8 @@ Current release: **[0.1.28](https://github.com/partnernetsoftware/minicon-winmgr
 
 Version 0.1.28 is public: the desktop settings dialog re-lays out when its monitor's DPI changes, keeping the chosen colour and photo. See the [validation](docs/validation_0_1_28.md).
 
+Version 0.1.29 is public: the executables carry an icon and version information, and the shell and task manager are signed by PARTNERNET SOFTWARE PTY LTD through Azure Artifact Signing. Known issue: with the taskbar on the left or right, Show desktop puts the minimised window title bars at the bottom of the screen; this is not fixed yet. See the [validation](docs/validation_0_1_29.md).
+
 Version 0.1.27 is public: the desktop settings dialog follows the theme (dark mode, labels, the photo list), and its buttons are no longer clipped. See the [validation](docs/validation_0_1_27.md).
 
 Version 0.1.26 is public: the settings panel gains an accent colour that shares the colour chooser with desktop settings, with a contrast guard; the panel is more compact. See the [validation](docs/validation_0_1_26.md).
