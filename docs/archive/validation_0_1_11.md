@@ -7,7 +7,7 @@
 - 版本 0.1.11，Windows x64，2,857,472 字节。
 - [生产候选 run 39039043759](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39039043759)，源码提交 `dbd04974afc8acd7daa220edb14377f74daaf59c`。
 - exe SHA-256：`eaa1a4ac89bf619c994f34ec13641f3fd42e88894a65e412cb1c800fb71af0f0`。
-- [公开构建清单](releases/v0.1.11.artifact.toml)记录生产 run、源码树及 exe 摘要；正式附件原样晋升该 CI 文件，不用本机重建替换。
+- [公开构建清单](../releases/v0.1.11.artifact.toml)记录生产 run、源码树及 exe 摘要；正式附件原样晋升该 CI 文件，不用本机重建替换。
 
 ## 功能验收
 

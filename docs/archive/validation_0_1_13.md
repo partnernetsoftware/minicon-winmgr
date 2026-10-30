@@ -8,7 +8,7 @@
 - [候选 CI 39185911252](https://github.com/partnernetsoftware/minicon-winmgr/actions/runs/39185911252)：成功；源码提交 3cb99494df2d201c69afcb75697949efef3aab90。
 - 产品源码树摘要：059f1348f10cb84a4b5843c14528cc7ab39df92db3b845e3c19582f37860f036。
 - exe SHA-256：6030fcfe3dee91baf74c7094e313ac4b7a5bc57f3b41f93d42db06a4b514118a。
-- [构建清单](releases/v0.1.13.artifact.toml)与下载文件核对，产品源码与当前修复一致；正式附件必须原样晋升此候选。
+- [构建清单](../releases/v0.1.13.artifact.toml)与下载文件核对，产品源码与当前修复一致；正式附件必须原样晋升此候选。
 
 ## 问题与修复
 
@@ -65,6 +65,6 @@
 
 无认证公开 Latest API 返回 v0.1.13；真实官方 .12 更新器通过公网检查、下载校验、明确重启及就绪回执，八项检查全部通过。暂存文件与上述候选摘要一致，保留上一版备份；旧版本文件名保持，实际进程路径仍是原安装目标，编译版本为 .13。原运行实例、工作区与用户 Shell 设置恢复。
 
-首份候选只修正枚举，管理员入口仍失败，已明确标记失败。其 exe 摘要为 1dccd40cbebc05bfe3149f568e7ce110138dfc1f255fa7998c7f98a5a2358405；旧草稿 tag 指向 e4c574ee23617a6684388770b164091f0879a471。原始候选来源与开发期覆盖见[历史记录](archive/validation_0_1_13_development.md)及[旧构建清单](releases/v0.1.13-first-candidate.artifact.toml)，不可当作最终文件证据。
+首份候选只修正枚举，管理员入口仍失败，已明确标记失败。其 exe 摘要为 1dccd40cbebc05bfe3149f568e7ce110138dfc1f255fa7998c7f98a5a2358405；旧草稿 tag 指向 e4c574ee23617a6684388770b164091f0879a471。原始候选来源与开发期覆盖见[历史记录](validation_0_1_13_development.md)及[旧构建清单](../releases/v0.1.13-first-candidate.artifact.toml)，不可当作最终文件证据。
 
 物理混合 DPI、热插拔、辅助功能、公网故障扩样、特殊账户/策略以及长期资源观察仍不包含在本补丁完成范围内。

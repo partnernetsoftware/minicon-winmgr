@@ -1,8 +1,8 @@
 """Interactive Windows notification-area acceptance client (Python stdlib only).
 
 Run while minicon-winmgr hosts the notification area, for example:
-  python scripts/notification_probe.py --count 8 --hidden 2 --duration 120
-  python scripts/notification_probe.py --cycles 100 --output .workbuddy/probe.json
+  python scripts/archive/notification_probe.py --count 8 --hidden 2 --duration 120
+  python scripts/archive/notification_probe.py --cycles 100 --output .workbuddy/probe.json
 
 Click the probe icons; callbacks and actual Shell_NotifyIcon return values are
 recorded. An optional --command-file accepts a JSON command or array of commands:

@@ -1,6 +1,6 @@
 # 历史归档
 
-- [0.1.13 首份失败候选](validation_0_1_13_development.md)：保留管理员入口失败及早期普通入口覆盖，最终事实见[正式验收记录](../validation_0_1_13.md)。
+- [0.1.13 首份失败候选](validation_0_1_13_development.md)：保留管理员入口失败及早期普通入口覆盖，最终事实见[正式验收记录](validation_0_1_13.md)。
 
 2026-10-21 更新。归档保留当时的计划、决策过程和验收限制；旧文中的“当前”“未实现”不代表现状。当前事实以 [PRD](../prd.md)、代码和[公开验收摘要](../validation.md)交叉核对。历史材料提及的 `CHANGELOG.md` 已不在当前工作树中，引用文字保留用于追溯。
 
@@ -39,10 +39,20 @@
 
 - [0.1.10 开发过程](notes_0_1_10_development.md)：逐轮进度与已取代的长测发布门槛；当前任务以[版本计划](plan_0_1_10.md)为准。
 
-- [0.1.10 阶段验收](validation_0_1_10_development.md)：开发期逐轮结果；正式验收见[当前记录](../validation_0_1_10.md)。
+- [0.1.10 阶段验收](validation_0_1_10_development.md)：开发期逐轮结果；正式验收见[当前记录](validation_0_1_10.md)。
 
 - [0.1.12 前 Shell 试替换记录](shell_replacement_before_0_1_12.md)：保留旧备份、HKLM 尝试和立即恢复文案的历史；现行契约见[Shell 规格](../prd_3_1.md)。
 
 - [Run 交互模型讨论稿](design_0_1_14_run_interaction.md)：原 0.1.14 候选分析，未实施、未确定新按键规则；当前范围见[版本计划](plan_0_1_14.md)。
 
 - [0.1.16 计划](plan_0_1_16.md)：普通任务工具已交付，当前公开版本为 .17。
+
+## 2026-10-30 整理移入
+
+- [0.1.26 计划](plan_0_1_26.md)：设置强调色与紧凑布局，已公开；验收见 [0.1.26 验收](../validation_0_1_26.md)。
+- [0.1.10 至 0.1.22 验收记录](validation_0_1_10.md)：各版公开验收的正式记录（0.1.10 至 0.1.22）。
+- [0.1.10 资源归因](resources_0_1_10.md)、[0.1.12 代码与文档梳理](review_0_1_12.md)、[0.1.12 产品设计讨论稿](design_0_1_12.md)：已被实施或替代的审阅与设计。
+- [更新文件名修复](update_filename_fix.md)：0.1.15 已交付，细节以 0.1.15 验收为准。
+- [任务分析说明](task_analysis.md)：0.1.18 的用法说明，功能现以 Tskmgr 与 `task_analysis_probe.py` 为准。
+
+脚本方面，已无引用的 `notification_probe.py` 与 `legacy_update_path_probe.py` 移入 `scripts/archive/`。
