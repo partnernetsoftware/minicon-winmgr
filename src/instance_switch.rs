@@ -16,7 +16,8 @@ use windows::{
         },
         UI::WindowsAndMessaging::{
             FindWindowExW, GetWindowThreadProcessId, HWND_MESSAGE, IDOK, MB_DEFBUTTON2,
-            MB_ICONQUESTION, MB_OKCANCEL, MessageBoxW, PostMessageW, WM_CLOSE,
+            MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_OKCANCEL, MessageBoxW, PostMessageW,
+            WM_CLOSE,
         },
     },
     core::PCWSTR,
@@ -78,6 +79,25 @@ impl Drop for Session {
                 }
             }
         }
+    }
+}
+
+/// Same build already running: a second launch is otherwise silent, which looks
+/// like the shell died.
+fn notify_already_running() {
+    tracing::info!("same executable already running; telling the user");
+    let message = error(
+        "minicon-winmgr is already running. The running instance stays in use.",
+        "minicon-winmgr 已在运行，继续使用当前实例。",
+    );
+    let title = error("minicon-winmgr", "minicon-winmgr");
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(wide(&message).as_ptr()),
+            PCWSTR(wide(&title).as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
     }
 }
 
@@ -193,6 +213,8 @@ pub(crate) fn acquire(show_settings: bool) -> Result<Option<Session>, String> {
     if old.hash == hash {
         if show_settings {
             crate::window::request_settings()?;
+        } else {
+            notify_already_running();
         }
         return Ok(None);
     }

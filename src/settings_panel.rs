@@ -216,6 +216,37 @@ fn paint_surface(hwnd: HWND, viewport: bool) -> LRESULT {
         let dc = BeginPaint(hwnd, &mut paint);
         let mut rect = RECT::default();
         let _ = GetClientRect(hwnd, &mut rect);
+        // Draw off screen and copy once, so a scroll step never shows the blank
+        // background between the erase and the cards.
+        let memory = CreateCompatibleDC(Some(dc));
+        let bitmap = CreateCompatibleBitmap(dc, rect.right.max(1), rect.bottom.max(1));
+        if memory.is_invalid() || bitmap.is_invalid() {
+            draw_surface(dc, rect, viewport);
+        } else {
+            let old = SelectObject(memory, bitmap.into());
+            draw_surface(memory, rect, viewport);
+            let _ = BitBlt(
+                dc,
+                0,
+                0,
+                rect.right,
+                rect.bottom,
+                Some(memory),
+                0,
+                0,
+                SRCCOPY,
+            );
+            SelectObject(memory, old);
+        }
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(memory);
+        let _ = EndPaint(hwnd, &paint);
+    }
+    LRESULT(0)
+}
+
+fn draw_surface(dc: HDC, mut rect: RECT, viewport: bool) {
+    unsafe {
         FillRect(dc, &rect, crate::appearance::brush(dc, COLOR_BTNFACE));
         if viewport {
             let cards = with(|p| p.cards.clone()).unwrap_or_default();
@@ -248,9 +279,7 @@ fn paint_surface(hwnd: HWND, viewport: bool) -> LRESULT {
             rect.top = with(|p| p.viewport).unwrap_or(rect.bottom);
             FillRect(dc, &rect, crate::appearance::brush(dc, COLOR_WINDOW));
         }
-        let _ = EndPaint(hwnd, &paint);
     }
-    LRESULT(0)
 }
 // Keep native button behavior, keyboard handling and UIA provider; draw only
 // its surface so classic Windows themes do not add heavy bevels.
@@ -445,6 +474,11 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
             }
         }
         let previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // The 540x700 design size is in 96-DPI units; scale it so the content fits
+        // without scrolling at common display scales, and stay inside the screen.
+        let dpi = GetDpiForSystem().max(96) as i32;
+        let width = 540 * dpi / 96;
+        let height = (700 * dpi / 96).min(GetSystemMetrics(SM_CYSCREEN) * 9 / 10);
         let result = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             PCWSTR(wide(CLASS).as_ptr()),
@@ -459,8 +493,8 @@ pub(crate) fn install(instance: HINSTANCE) -> Result<(), Box<dyn std::error::Err
             WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            540,
-            700,
+            width,
+            height,
             None,
             None,
             Some(instance),
@@ -1740,8 +1774,8 @@ fn layout() {
             },
             true,
         );
-        let _ = InvalidateRect(Some(view), None, true);
-        let _ = InvalidateRect(Some(hwnd), None, true);
+        let _ = InvalidateRect(Some(view), None, false);
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
     with(|p| p.layout = false);
     // SetScrollInfo can show/hide the native scrollbar and synchronously send
@@ -1930,6 +1964,10 @@ unsafe extern "system" fn viewproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             if msg == WM_PAINT {
                 return paint_surface(hwnd, true);
             }
+            if msg == WM_ERASEBKGND {
+                // paint_surface covers the whole client, so the system erase would only flash.
+                return LRESULT(1);
+            }
             if matches!(msg, WM_CTLCOLORSTATIC | WM_CTLCOLORBTN) {
                 return control_color(wp, lp);
             }
@@ -1946,6 +1984,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         "settings",
         || match msg {
             WM_PAINT => paint_surface(hwnd, false),
+            WM_ERASEBKGND => LRESULT(1),
             WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => control_color(wp, lp),
             WM_CLOSE => {
                 hide();

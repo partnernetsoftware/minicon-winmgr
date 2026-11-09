@@ -43,12 +43,12 @@ use windows::Win32::UI::Shell::{
     ABN_FULLSCREENAPP, ABN_POSCHANGED, APPBARDATA, SHAppBarMessage,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyWindow, DrawIconEx,
-    GetClassNameW, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, HICON, HWND_BOTTOM, HWND_TOPMOST, IsIconic, IsWindow,
-    IsWindowVisible, KillTimer, PostMessageW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetTimer,
-    SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    CS_DBLCLKS, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyWindow, DrawIconEx, GWL_EXSTYLE,
+    GetClassNameW, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HICON, HWND_BOTTOM, HWND_TOPMOST,
+    IsIconic, IsWindow, IsWindowVisible, KillTimer, PostMessageW, RegisterClassW, SM_CXSCREEN,
+    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetTimer, SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
     WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
@@ -730,8 +730,8 @@ fn update_fullscreen_yield() {
     for (key, yielded) in changes {
         tracing::info!(hwnd = key, yielded, "taskbar fullscreen yield transition");
         // SAFETY: z-order-only change on our own bar window.
-        unsafe {
-            let _ = SetWindowPos(
+        let placed = unsafe {
+            SetWindowPos(
                 hwnd_from(key),
                 Some(if yielded { HWND_BOTTOM } else { HWND_TOPMOST }),
                 0,
@@ -739,7 +739,51 @@ fn update_fullscreen_yield() {
                 0,
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
+        if placed.is_err() {
+            tracing::error!(
+                hwnd = key,
+                yielded,
+                "taskbar fullscreen yield placement failed"
             );
+        }
+    }
+}
+
+/// A bar that is not yielded must stay in the topmost band. The desktop surface
+/// sits at the bottom of the normal band, so a bar that lost the band is covered.
+fn restore_topmost() {
+    let resting: Vec<isize> = lock_or_recover(bars())
+        .iter()
+        .filter(|b| !b.yielded)
+        .map(|b| b.hwnd)
+        .collect();
+    for key in resting {
+        let hwnd = hwnd_from(key);
+        // SAFETY: reads the extended style of our own bar window; a dead handle reads 0.
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+        if style & WS_EX_TOPMOST.0 != 0 {
+            continue;
+        }
+        tracing::warn!(
+            hwnd = key,
+            "taskbar was not topmost while not yielded; restoring"
+        );
+        // SAFETY: z-order-only change on our own bar window.
+        let placed = unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
+        if placed.is_err() {
+            tracing::error!(hwnd = key, "taskbar topmost restore failed");
         }
     }
 }
@@ -1779,6 +1823,7 @@ pub fn refresh() {
     // After layout settles: foreground/show/hide events funnel into refresh,
     // so this is where fullscreen transitions are noticed promptly.
     update_fullscreen_yield();
+    restore_topmost();
 }
 fn refresh_inner() {
     reposition();
