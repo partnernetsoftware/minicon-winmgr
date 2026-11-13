@@ -45,12 +45,12 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyWindow, DrawIconEx, GWL_EXSTYLE,
     GetClassNameW, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HICON, HWND_BOTTOM, HWND_TOPMOST,
-    IsIconic, IsWindow, IsWindowVisible, KillTimer, PostMessageW, RegisterClassW, SM_CXSCREEN,
-    SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SetTimer, SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HICON, HWND_BOTTOM, HWND_TOP,
+    HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, KillTimer, PostMessageW, RegisterClassW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SetTimer, SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -784,6 +784,28 @@ fn restore_topmost() {
         };
         if placed.is_err() {
             tracing::error!(hwnd = key, "taskbar topmost restore failed");
+            continue;
+        }
+        // The topmost style did not stick: fall back to the top of the normal band,
+        // which still keeps the bar above the desktop surface at the bottom.
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+        if style & WS_EX_TOPMOST.0 == 0 {
+            tracing::error!(
+                hwnd = key,
+                "taskbar topmost style did not stick; raising to top of band"
+            );
+            // SAFETY: z-order-only change on our own bar window.
+            let _ = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOP),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            };
         }
     }
 }
